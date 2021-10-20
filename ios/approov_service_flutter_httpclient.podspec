@@ -3,13 +3,13 @@ Pod::Spec.new do |s|
     s.version          = '0.0.3'
     s.summary          = 'Flutter plugin for accessing Approov SDK attestation services.'
     s.description      = <<-DESC
-  A Flutter plugin using mobile API protection provided by the Approov SDK.
+  A Flutter plugin using mobile API protection provided by the Approov SDK. If the provided Approov SDK is configured to protect an API, then the plugin will automatically set up pinning and add relevant headers for any request to the API.
                          DESC
     s.homepage         = 'https://github.com/flutter/plugins'
     s.license          = { :type => 'BSD', :file => '../LICENSE' }
     s.author           = { 'CriticalBlue' => 'ivol@criticalblue.com' }
-    s.source           = { :http => 'https://github.com/approov/approov-service-flutter-httpclient' }
-    #s.documentation_url = 'https://pub.dev/packages/battery_plus'
+    s.source           = { :http => 'https://github.com/approov/approov_service_flutter_httpclient' }
+    #s.documentation_url = 'https://pub.dev/packages/approov-service-flutter-httpclient'
     s.source_files = 'Classes/**/*'
     s.public_header_files = 'Classes/**/*.h'
     s.dependency 'Flutter'
