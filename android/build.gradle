@@ -1,4 +1,4 @@
-group 'com.criticalblue.approov_http_client'
+group 'com.criticalblue.approov_service_flutter_httpclient'
 version '1.0'
 
 buildscript {

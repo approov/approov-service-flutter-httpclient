@@ -1,5 +1,5 @@
 Pod::Spec.new do |s|
-    s.name             = 'battery_plus'
+    s.name             = 'approov_service_flutter_httpclient'
     s.version          = '0.0.3'
     s.summary          = 'Flutter plugin for accessing Approov SDK attestation services.'
     s.description      = <<-DESC

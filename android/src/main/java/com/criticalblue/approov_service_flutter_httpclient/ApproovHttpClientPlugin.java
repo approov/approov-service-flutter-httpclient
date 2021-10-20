@@ -15,7 +15,7 @@
  * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-package com.criticalblue.approov_http_client;
+package com.criticalblue.approov_service_flutter_httpclient;
 
 import android.content.Context;
 

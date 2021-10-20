@@ -1,7 +1,6 @@
 name: approov_service_flutter_httpclient
 description: A new flutter plugin project.
 version: 0.0.2
-author: ivol@criticalblue.com
 homepage: https://github.com/approov/approov_service_flutter_httpclient
 
 environment:
