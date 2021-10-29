@@ -16,6 +16,7 @@ rootProject.allprojects {
     repositories {
         google()
         jcenter()
+        maven { url 'https://jitpack.io' }
     }
 }
 
@@ -42,5 +43,5 @@ artifacts.add("default", file('approov-sdk.aar'))
 
 dependencies {
     implementation 'com.squareup.okhttp3:okhttp:3.14.2'
-    implementation files("approov-sdk.aar")
+    implementation 'com.github.approov:approov-android-sdk:2.7.0'
 }

@@ -56,7 +56,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
-    channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "approov_http_client");
+    channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "approov_service_flutter_httpclient");
     channel.setMethodCallHandler(this);
     appContext = flutterPluginBinding.getApplicationContext();
   }

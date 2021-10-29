@@ -42,7 +42,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
   FlutterMethodChannel* channel = [FlutterMethodChannel
-      methodChannelWithName:@"approov_http_client"
+      methodChannelWithName:@"approov_service_flutter_httpclient"
             binaryMessenger:[registrar messenger]];
   ApproovHttpClientPlugin* instance = [[ApproovHttpClientPlugin alloc] init];
   [registrar addMethodCallDelegate:instance channel:channel];

@@ -17,6 +17,7 @@ dependencies:
   logger: ^1.0.0
   pem: ^2.0.0
   shared_preferences: ^2.0.5
+  mutex: ^3.0.0
 
 dev_dependencies:
   flutter_test:
