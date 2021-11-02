@@ -71,7 +71,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // depending on the user's project. onAttachedToEngine or registerWith must both be defined
   // in the same class.
   public static void registerWith(Registrar registrar) {
-    final MethodChannel channel = new MethodChannel(registrar.messenger(), "approov_http_client");
+    final MethodChannel channel = new MethodChannel(registrar.messenger(), "approov_service_flutter_httpclient");
     channel.setMethodCallHandler(new ApproovHttpClientPlugin());
     appContext = registrar.context();
   }
