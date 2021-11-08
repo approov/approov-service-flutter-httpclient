@@ -1003,6 +1003,18 @@ class ApproovClient extends http.BaseClient {
     ApproovHttpClient.setApproovHeader(header, prefix);
   }
 
+  /// We forward this call to the all the way down to the ApproovService
+  /// @return String  the header to place the Approov token on
+  String getApproovHeader() {
+    return ApproovHttpClient.getApproovHeader();
+  }
+
+  /// We forward this call to the all the way down to the ApproovService
+  /// @return String  any prefix String for the Approov token header
+  String getApproovPrefix() {
+    return ApproovHttpClient.getApproovPrefix();
+  }
+
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) {
     http.Client? inner = _inner;
