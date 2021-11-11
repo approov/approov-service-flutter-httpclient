@@ -101,7 +101,7 @@ class ApproovService {
   static const String APPROOV_TOKEN_PREFIX = "";
 
   // Mutex to control access to initialization
-  static final _mutex = ReadWriteMutex();
+  static final _mutex = Mutex();
 
   // Header used when adding the Approov Token to network requests
   static String _approovTokenHeader = APPROOV_HEADER;
@@ -133,7 +133,7 @@ class ApproovService {
   /// @throws Exception if the provided configuration is not valid
   static Future<void> initialize(
       String initialConfig, String? updateConfig, String? reserved) async {
-    await _mutex.protectWrite(() async {
+    await _mutex.protect(() async {
       if (isInitialized) return;
       //If no dynamic configuration specified, attempt to load system one
       if (updateConfig == null) {
@@ -186,7 +186,7 @@ class ApproovService {
   ///
   /// @return String representation of the configuration.
   static Future<String> fetchConfig() async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -204,7 +204,7 @@ class ApproovService {
   ///
   /// @return String representation of the device ID.
   static Future<String> getDeviceID() async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -227,7 +227,7 @@ class ApproovService {
   /// @param pinType is the type of pinning information that is required
   /// @return Map from domain to the list of strings providing the pins
   static Future<Map/*<String, List<String> >*/ > getPins(String pinType) async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -261,7 +261,7 @@ class ApproovService {
   /// @param url provides the top level domain URL for which a token is being fetched
   /// @return results of fetching a token
   static Future<TokenFetchResult> fetchApproovToken(String url) async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -290,7 +290,7 @@ class ApproovService {
   ///
   /// @param data is the data whose SHA256 hash is to be included in future Approov tokens
   static Future<void> setDataHashInToken(String data) async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -314,7 +314,7 @@ class ApproovService {
   /// @return 32-byte (256-bit) measurement proof value
   static Future<Uint8List> getIntegrityMeasurementProof(
       Uint8List nonce, Uint8List measurementConfig) async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -341,7 +341,7 @@ class ApproovService {
   /// @return 32-byte (256-bit) measurement proof value
   static Future<Uint8List> getDeviceMeasurementProof(
       Uint8List nonce, Uint8List measurementConfig) async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -368,7 +368,7 @@ class ApproovService {
   /// @param the message for which to et the signature
   /// @return base64 encoded signature of the message, or null if no signing key is available
   static Future<String> getMessageSignature(String message) async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -392,7 +392,7 @@ class ApproovService {
   ///
   /// @param property to be set, which may be null
   static Future<void> setUserProperty(String property) async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) throw "ApproovService has not been initialized";
     });
@@ -411,7 +411,7 @@ class ApproovService {
   /// latency of a subsequent token fetch by starting the operation earlier so the subsequent fetch may be able to use a
   /// cached token.
   static void prefetchApproovToken() async {
-    await _mutex.protectRead(() async {
+    await _mutex.protect(() async {
       // critical read section
       if (!isInitialized) return;
     });
