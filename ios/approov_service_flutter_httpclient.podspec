@@ -1,5 +1,5 @@
 Pod::Spec.new do |s|
-    s.name             = 'approov_service_flutter_httpclient'
+    s.name             = 'approov-service-flutter-httpclient'
     s.version          = '0.0.3'
     s.summary          = 'Flutter plugin for accessing Approov SDK attestation services.'
     s.description      = <<-DESC
@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
     s.homepage         = 'https://github.com/approov/approov_service_flutter_httpclient'
     s.license          = { :type => 'BSD', :file => '../LICENSE' }
     s.author           = { 'CriticalBlue' => 'ivol@criticalblue.com' }
-    s.source           = { :http => 'https://github.com/approov/approov_service_flutter_httpclient' }
+    s.source           = { :http => 'https://github.com/approov/approov-service-flutter-httpclient' }
     #s.documentation_url = 'https://pub.dev/packages/approov-service-flutter-httpclient'
     s.source_files = 'Classes/**/*'
     s.public_header_files = 'Classes/**/*.h'
