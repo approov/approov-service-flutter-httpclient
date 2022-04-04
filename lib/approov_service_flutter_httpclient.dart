@@ -526,7 +526,7 @@ class ApproovService {
   /// Performs a precheck to determine if the app will pass attestation. This requires secure
   /// strings to be enabled for the account, although no strings need to be set up. This will
   /// likely require network access so may take some time to complete. It should always be called
-  /// with await to allow capture of any ApproovException throwm, if the precheck fails or if there
+  /// with await to allow capture of any ApproovException thrown, if the precheck fails or if there
   /// is some other problem. ApproovRejectionException is thrown if the app has failed Approov checks
   /// or ApproovNetworkException for networking issues where a user initiated retry of the operation
   /// should be allowed. An ApproovRejectionException may provide additional information about the
