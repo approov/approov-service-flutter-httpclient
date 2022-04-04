@@ -1,2 +1,1 @@
-// TODO? include ':approovsdk'
 rootProject.name = 'approov_service_flutter_httpclient'

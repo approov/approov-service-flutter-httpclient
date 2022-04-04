@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 CriticalBlue Ltd.
+ * Copyright (c) 2022 CriticalBlue Ltd.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
  * documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
@@ -34,18 +34,21 @@ import androidx.annotation.NonNull;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
+import io.flutter.plugin.common.StandardMethodCodec;
+import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
-import io.flutter.plugin.common.PluginRegistry.Registrar;
 
-
-/** ApproovHttpClientPlugin */
+// ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
+// MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
+// presented on any particular URL to implement the pinning. Note that the MethodChannel must run on a background
+// thread since it makes blocking calls.
 public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler {
 
-  /// The MethodChannel for the communication between Flutter and native Android
-  ///
-  /// This local reference serves to register the plugin with the Flutter Engine and unregister it
-  /// when the Flutter Engine is detached from the Activity
+  // The MethodChannel for the communication between Flutter and native Android
+  //
+  // This local reference serves to register the plugin with the Flutter Engine and unregister it
+  // when the Flutter Engine is detached from the Activity
   private MethodChannel channel;
 
   // Connect timeout (in ms) for host certificate fetch
@@ -56,32 +59,18 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
-    channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "approov_service_flutter_httpclient");
+    BinaryMessenger messenger = flutterPluginBinding.getBinaryMessenger();
+    channel = new MethodChannel(messenger, "approov_service_flutter_httpclient",
+              StandardMethodCodec.INSTANCE, messenger.makeBackgroundTaskQueue());
     channel.setMethodCallHandler(this);
     appContext = flutterPluginBinding.getApplicationContext();
-  }
-
-  // This static function is optional and equivalent to onAttachedToEngine. It supports the old
-  // pre-Flutter-1.12 Android projects. You are encouraged to continue supporting
-  // plugin registration via this function while apps migrate to use the new Android APIs
-  // post-flutter-1.12 via https://flutter.dev/go/android-project-migration.
-  //
-  // It is encouraged to share logic between onAttachedToEngine and registerWith to keep
-  // them functionally equivalent. Only one of onAttachedToEngine or registerWith will be called
-  // depending on the user's project. onAttachedToEngine or registerWith must both be defined
-  // in the same class.
-  public static void registerWith(Registrar registrar) {
-    final MethodChannel channel = new MethodChannel(registrar.messenger(), "approov_service_flutter_httpclient");
-    channel.setMethodCallHandler(new ApproovHttpClientPlugin());
-    appContext = registrar.context();
   }
 
   @Override
   public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
     if (call.method.equals("initialize")) {
       try {
-        Approov.initialize(appContext, call.argument("initialConfig"), call.argument("dynamicConfig"),
-          call.argument("comment"));
+        Approov.initialize(appContext, call.argument("initialConfig"), call.argument("updateConfig"), call.argument("comment"));
         result.success(null);
       } catch(Exception e) {
         result.error("Approov.initialize", e.getLocalizedMessage(), null);
@@ -110,7 +99,9 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
         HashMap<String, Object> tokenFetchResultMap = new HashMap<>();
         tokenFetchResultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
         tokenFetchResultMap.put("Token", tokenFetchResult.getToken());
+        tokenFetchResultMap.put("SecureString", tokenFetchResult.getSecureString());
         tokenFetchResultMap.put("ARC", tokenFetchResult.getARC());
+        tokenFetchResultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());
         tokenFetchResultMap.put("IsConfigChanged", tokenFetchResult.isConfigChanged());
         tokenFetchResultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
         tokenFetchResultMap.put("MeasurementConfig", tokenFetchResult.getMeasurementConfig());
@@ -156,54 +147,54 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
     } else if (call.method.equals("fetchHostCertificates")) {
       try {
         final URL url = new URL(call.argument("url"));
-        // Fetch host certificates for URL
-        HostCertificatesFetcher hostCertificateFetcher = new HostCertificatesFetcher();
-        final List<byte[]> hostCertificates = hostCertificateFetcher.fetchCertificates(url);
+        HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
+        connection.setConnectTimeout(FETCH_CERTIFICATES_TIMEOUT_MS);
+        connection.connect();
+        Certificate[] certificates = connection.getServerCertificates();
+        final List<byte[]> hostCertificates = new ArrayList<>(certificates.length);
+        for (Certificate certificate: certificates) {
+          hostCertificates.add(certificate.getEncoded());
+        }
+        connection.disconnect();
         result.success(hostCertificates);
       } catch (Exception e) {
         result.error("fetchHostCertificates", e.getLocalizedMessage(), null);
       }
+    } else if (call.method.equals("fetchSecureStringAndWait")) {
+      try {
+        Approov.TokenFetchResult tokenFetchResult = Approov.fetchSecureStringAndWait(call.argument("key"), call.argument("newDef"));
+        HashMap<String, Object> fetchResultMap = new HashMap<>();
+        fetchResultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
+        fetchResultMap.put("Token", tokenFetchResult.getToken());
+        fetchResultMap.put("SecureString", tokenFetchResult.getSecureString());
+        fetchResultMap.put("ARC", tokenFetchResult.getARC());
+        fetchResultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());
+        fetchResultMap.put("IsConfigChanged", tokenFetchResult.isConfigChanged());
+        fetchResultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
+        fetchResultMap.put("LoggableToken", tokenFetchResult.getLoggableToken());
+        result.success(fetchResultMap);
+      } catch(Exception e) {
+        result.error("Approov.fetchSecureStringAndWait", e.getLocalizedMessage(), null);
+      }
+    } else if (call.method.equals("fetchCustomJWTAndWait")) {
+      try {
+        Approov.TokenFetchResult tokenFetchResult = Approov.fetchCustomJWTAndWait(call.argument("payload"));
+        HashMap<String, Object> tokenFetchResultMap = new HashMap<>();
+        tokenFetchResultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
+        tokenFetchResultMap.put("Token", tokenFetchResult.getToken());
+        tokenFetchResultMap.put("SecureString", tokenFetchResult.getSecureString());
+        tokenFetchResultMap.put("ARC", tokenFetchResult.getARC());
+        tokenFetchResultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());
+        tokenFetchResultMap.put("IsConfigChanged", tokenFetchResult.isConfigChanged());
+        tokenFetchResultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
+        tokenFetchResultMap.put("MeasurementConfig", tokenFetchResult.getMeasurementConfig());
+        tokenFetchResultMap.put("LoggableToken", tokenFetchResult.getLoggableToken());
+        result.success(tokenFetchResultMap);
+      } catch(Exception e) {
+        result.error("Approov.fetchCustomJWTAndWait", e.getLocalizedMessage(), null);
+      }
     } else {
       result.notImplemented();
-    }
-  }
-
-
-  // Certificates fetcher that is running the network operations to get the certificates in a background thread (as
-  // opposed to the UI thread) to prevent NetworkOnMainThreadException
-  private static class HostCertificatesFetcher {
-
-    // Host certificates to return from fetchHostCertificates()
-    List<byte[]> hostCertificates;
-
-    // Any exception thrown in the inner thread
-    Exception exception;
-
-    // Fetches the certificates from the host specified in the URL, without sending a request
-    public List<byte[]> fetchCertificates(URL url) throws Exception {
-      hostCertificates = null;
-      exception = null;
-      Thread getCertsThread = new Thread(() -> {
-        try {
-          final HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
-          connection.setConnectTimeout(FETCH_CERTIFICATES_TIMEOUT_MS);
-          connection.connect();
-          Certificate[] certificates = connection.getServerCertificates();
-          hostCertificates = new ArrayList<>(certificates.length);
-          for (Certificate certificate : certificates) {
-            hostCertificates.add(certificate.getEncoded());
-          }
-          connection.disconnect();
-        } catch (Exception e) {
-          exception = e;
-        }
-      });
-      getCertsThread.start();
-      getCertsThread.join();
-      if (exception != null) {
-        throw exception;
-      }
-      return hostCertificates;
     }
   }
 
@@ -211,5 +202,4 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
     channel.setMethodCallHandler(null);
   }
-
 }
