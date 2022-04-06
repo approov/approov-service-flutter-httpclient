@@ -335,7 +335,7 @@ class ApproovService {
     }
   }
 
-  /// Internal method for fetching an Approov token from the the SDK.
+  /// Internal method for fetching an Approov token from the SDK.
   ///
   /// @param url provides the top level domain URL for which a token is being fetched
   /// @return results of fetching a token
@@ -704,7 +704,7 @@ class ApproovService {
   /// poor network) then an ApproovNetworkException is thrown and a later retry should be made. Other failures will
   /// result in an ApproovException. Note that if substitution headers have been setup then this method also examines
   /// the headers and remaps them to the substituted value if they correspond to a key set in Approov. Note that in this
-  /// case it is possible for the the method to fail with an ApproovRejectionException, which may provide additional
+  /// case it is possible for the method to fail with an ApproovRejectionException, which may provide additional
   /// information about the reason for the rejection.
   ///
   /// @param request is the http.BaseRequest to which Approov is being added
@@ -870,7 +870,7 @@ class ApproovService {
   /// host (which may have been previously cached) and then we restrict it to those corresponding to pinned
   /// certifificates.
   ///
-  /// @param url of the the host that is being pinned
+  /// @param url of the host that is being pinned
   /// @param approovPins is the set of pins for the host as configured in Approov
   /// @return a list of host certificates that match the Approov pins
   static Future<List<Uint8List>> _hostPinCertificates(Uri url, Set<String> approovPins) async {
@@ -908,7 +908,7 @@ class ApproovService {
   /// connection to the host will fail. These certificates that match a pin are set to the trusted certificates for the
   /// security context so that connections are restricted to ensure one of those certificates is present.
   ///
-  /// @param url of the the host that is being pinned
+  /// @param url of the host that is being pinned
   /// @param approovPins is the set of pins for the host as configured in Approov
   /// @return a security context that enforces pinning by using the host certificates that match the pins set in Approov
   static Future<SecurityContext> _pinnedSecurityContext(Uri url, Set<String> approovPins) async {
