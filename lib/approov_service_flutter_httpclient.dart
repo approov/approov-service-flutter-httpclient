@@ -707,23 +707,22 @@ class ApproovService {
   /// case it is possible for the the method to fail with an ApproovRejectionException, which may provide additional
   /// information about the reason for the rejection.
   ///
-  /// @param request is the http.BaseRequest to which Approov is being added
-  /// @return true if there was a possible pinning change due to a config update, false otherwise
+  /// @param request is the HttpClientRequest to which Approov is being added
   /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
-  static Future<bool> updateRequest(http.BaseRequest request) async {
+  static Future<void> updateRequest(HttpClientRequest request) async {
     // perform SDK initialization if required
     await _initializeIfRequired();
 
     // update the data hash based on any token binding header that is present
     String? bindingHeader = _bindingHeader;
     if (bindingHeader != null) {
-      String? headerValue = request.headers[bindingHeader];
+      String? headerValue = request.headers.value(bindingHeader);
       if (headerValue != null)
         setDataHashInToken(headerValue);
     }
 
     // request an Approov token for the host domain
-    String host = request.url.host;
+    String host = request.uri.host;
     _TokenFetchResult fetchResult = await _fetchApproovToken(host);
 
     // provide information about the obtained token or error (note "approov token -check" can
@@ -733,18 +732,22 @@ class ApproovService {
 
     // if there was a configuration change we clear it by fetching the new config and clearing
     // all the cached certificates which will force re-evaluation for new connections
-    bool wasPinningChange = false;
     if (fetchResult.isConfigChanged) {
       await fetchConfig();
       _removeAllCertificates();
-      wasPinningChange = true;
       Log.d("$TAG: updateRequest, dynamic configuration update");
     }
+
+    // if a pin update is forced then this indicates the pins have been updated since the last time they
+    // where read, or that we never had any valid pins when the pinned client was created so we cannot allow
+    // the update to complete as this could leak an Approov token via an unpinned connection
+    if (fetchResult.isForceApplyPins)
+      throw new ApproovException("Forced pin update required");
 
     // check the status of Approov token fetch
     if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
       // we successfully obtained a token so add it to the header for the request
-      request.headers[getApproovHeader()] = getApproovPrefix() + fetchResult.token;
+      request.headers.set(getApproovHeader(), getApproovPrefix() + fetchResult.token, preserveHeaderCase: true);
     } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
                (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
                (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
@@ -764,7 +767,7 @@ class ApproovService {
     for (MapEntry entry in _substitutionHeaders.entries) {
       String header = entry.key;
       String prefix = entry.value;
-      String? value = request.headers[header];
+      String? value = request.headers.value(header);
       if ((value != null) && value.startsWith(prefix) && (value.length > prefix.length)) {
         // perform the request to get the secure string for the header value
         final Map<String, dynamic> arguments = <String, dynamic>{
@@ -786,7 +789,7 @@ class ApproovService {
             // don't allow substitutions on unadded API domains to prevent them accidentally being
             // subject to a Man-in-the-Middle (MitM) attack
             throw new ApproovException("Header substitution for $header illegal for $host that is not an added API domain");
-          request.headers[header] = prefix + fetchResult.secureString!;
+          request.headers.set(header, prefix + fetchResult.secureString!, preserveHeaderCase: true);
         }
         else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
             // if the request is rejected then we provide a special exception with additional information
@@ -803,9 +806,6 @@ class ApproovService {
             throw new ApproovException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
       }
     }
-
-    // show if there was a possible pinning change
-    return wasPinningChange;
   }
 
   /// Retrieves the certificates in the chain for the specified host. These are obtained at the platform level and we
@@ -928,9 +928,144 @@ class ApproovService {
   }  
 }
 
+/// Approov version of an HttpClientRequest, which delegates to an HttpClientRequest provided by the standard HttpClient. This
+/// is necessary because we Approov needs to be able to read, add and modify outgoing headers. This cannot be done at the time
+/// of initial connection since the headers will not have been added at this time, and these are required for the token binding
+/// and secret protection options (where a placeholder value in a header is replaced by the actual secret). Things are complicated
+/// by the fact that headers are only mutable until anything is written to the body. Thus the headers are updated just before any
+/// operation that updates the headers (limited by the fact that the updates can only be done on functions that return a future,
+/// since it is an asynchronous operation).
+class _ApproovHttpClientRequest implements HttpClientRequest {
+
+  // request to be delegated to
+  late HttpClientRequest _delegateRequest;
+
+  // true if the request has been updated with Approov related headers
+  bool _requestUpdated = false;
+
+  // Construct a new _ApproovHttpClientRequest that delegates to the given request. This adds Approov as late as possible while
+  // the headers are still mutable.
+  //
+  // @param request is the HttpClientRequest to be delegated to
+  _ApproovHttpClientRequest(HttpClientRequest request) {
+    _delegateRequest = request;
+  }
+
+  @override
+  set bufferOutput(bool _bufferOutput) => _delegateRequest.bufferOutput = _bufferOutput;
+  @override
+  bool get bufferOutput => _delegateRequest.bufferOutput;
+
+  @override
+  HttpConnectionInfo? get connectionInfo => _delegateRequest.connectionInfo;
+
+  @override
+  set contentLength(int _contentLength) => _delegateRequest.contentLength = _contentLength;
+  @override
+  int get contentLength => _delegateRequest.contentLength;
+
+  @override
+  List<Cookie> get cookies => _delegateRequest.cookies;
+
+  @override
+  Future<HttpClientResponse> get done => _delegateRequest.done;
+
+  @override
+  set encoding(Encoding _encoding) => _delegateRequest.encoding = _encoding;
+  @override
+  Encoding get encoding => _delegateRequest.encoding;
+
+  @override
+  set followRedirects(bool _followRedirects) => _delegateRequest.followRedirects = _followRedirects;
+  @override
+  bool get followRedirects => _delegateRequest.followRedirects;
+
+  @override
+  HttpHeaders get headers => _delegateRequest.headers;
+
+  @override 
+  set maxRedirects(int _maxRedirects) => _delegateRequest.maxRedirects = _maxRedirects;
+  @override
+  int get maxRedirects => _delegateRequest.maxRedirects;
+
+  @override
+  String get method => _delegateRequest.method;
+
+  @override 
+  set persistentConnection(bool _persistentConnection) => _delegateRequest.persistentConnection = _persistentConnection;
+  @override
+  bool get persistentConnection => _delegateRequest.persistentConnection;
+
+  @override
+  Uri get uri => _delegateRequest.uri;
+
+  @override
+  void abort([Object? exception, StackTrace? stackTrace]) {
+    _delegateRequest.abort(exception, stackTrace);
+  }
+
+  @override
+  void add(List<int> data) {
+    _delegateRequest.add(data);
+  }
+
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) {
+    _delegateRequest.addError(error, stackTrace);
+  }
+
+  @override
+  Future addStream(Stream<List<int>> stream) async {
+    if (!_requestUpdated) {
+      await ApproovService.updateRequest(_delegateRequest);
+      _requestUpdated = true;
+    }
+    return _delegateRequest.addStream(stream);
+  }
+
+  @override
+  Future<HttpClientResponse> close() async {
+    if (!_requestUpdated) {
+      await ApproovService.updateRequest(_delegateRequest);
+      _requestUpdated = true;
+    }
+    return _delegateRequest.close();
+  }
+
+  @override
+  Future flush() async {
+    if (!_requestUpdated) {
+      await ApproovService.updateRequest(_delegateRequest);
+      _requestUpdated = true;
+    }
+    return _delegateRequest.flush();
+  }
+
+  @override
+  void write(Object? object) {
+    _delegateRequest.write(object);
+  }
+
+  @override
+  void writeAll(Iterable objects, [String separator = ""]) {
+    _delegateRequest.writeAll(objects, separator);
+  }
+
+  @override 
+  void writeCharCode(int charCode) {
+    _delegateRequest.writeCharCode(charCode);
+  }
+
+  @override
+  void writeln([Object? object=""]) {
+    _delegateRequest.writeln(object);
+  }
+}
+
 /// ApproovHttpClient is a drop-in replacement for the Dart IO library's HttpClient. If Approov is configured to protect
-/// an API on a host, then an ApproovHTTPClient will automatically set up pinning and add relevant headers for a request.
-/// Otherwise the behaviour of ApproovHttpClient is the same as for the Dart IO library's HttpClient.
+/// an API on a host, then an ApproovHTTPClient will automatically set up pinning and add relevant headers for a request,
+/// and also provide secret substitution if required. Otherwise the behaviour of ApproovHttpClient is the same as for the
+/// Dart IO library's HttpClient.
 class ApproovHttpClient implements HttpClient {
   // logging tag
   static const String TAG = "ApproovHttpClient";
@@ -957,7 +1092,7 @@ class ApproovHttpClient implements HttpClient {
   final List _proxyCredentials = [];
   bool Function(X509Certificate cert, String host, int port)? _badCertificateCallback;
 
-  /// Certificate check function for the badCertificateCallback of HttpClient. This is called if the pinning
+  /// Pinning failure callback function for the badCertificateCallback of HttpClient. This is called if the pinning
   /// certificate check failed, which can indicate a certificate update on the server or a Man-in-the-Middle (MitM)
   /// attack. It invalidates the certificates for the given host so they will be refreshed and the communication with
   /// the server can be re-established for the case of a certificate update. Returns false to prevent the request to
@@ -966,7 +1101,7 @@ class ApproovHttpClient implements HttpClient {
   /// @param cert is the certificate which could not be authenticated
   /// @param host is the host name of the server to which the request is being sent
   /// @param port is the port of the server
-  bool certificateCheck(X509Certificate cert, String host, int port) {
+  bool _pinningFailureCallback(X509Certificate cert, String host, int port) {
     Function(X509Certificate cert, String host, int port)? badCertificateCallback = _badCertificateCallback;
     if (badCertificateCallback != null) {
       // call the user defined function for its side effects only (as we are going to reject anyway)
@@ -974,7 +1109,7 @@ class ApproovHttpClient implements HttpClient {
     }
 
     // reset host certificates and delegate pinned HttpClient connected host to force them to be recreated
-    Log.d("$TAG: Bad certificate callback for $host");
+    Log.d("$TAG: Pinning failure callback for $host");
     ApproovService._removeCertificates(host);
     _connectedHost = null;
     return false;
@@ -986,14 +1121,19 @@ class ApproovHttpClient implements HttpClient {
   /// @param url for which to set up pinning
   /// @return the new HTTP client
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
-    // get pins from Approov, ensuring that they are up to date by getting a fresh token and clearing any cached certificates
-    // if the config has changed (fetching the config clears the config changed state)
+    // fetch an Approov token to get the latest configuration - but note we do not fail if a token fetch was not possible
     _TokenFetchResult fetchResult = await ApproovService._fetchApproovToken(url.host);
     Log.d("$TAG: Pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+
+    // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
+    // config clears the config changed state)
     if (fetchResult.isConfigChanged) {
       await ApproovService.fetchConfig();
       ApproovService._removeAllCertificates();
     }
+
+    // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
+    // have are available, in which case we detect that at the time we are processing a request to add Approov
     Map allPins = await ApproovService.getPins("public-key-sha256");
 
     // get any pins defined for the host domain
@@ -1001,7 +1141,8 @@ class ApproovHttpClient implements HttpClient {
     if ((allPins != null) && (allPins[url.host] != null))
       pins = (allPins[url.host] as List);
 
-    // if there are no pins for the host domain then we use any associated with the managed trust roots instead
+    // if there are no pins for the host domain then we use any associated with the managed trust roots instead - note
+    // this means that this will be applied to all domains, not just those added as Approov API domains
     if (pins.isEmpty && (allPins != null) && (allPins["*"] != null))
       pins = (allPins["*"] as List);
 
@@ -1042,40 +1183,61 @@ class ApproovHttpClient implements HttpClient {
         newHttpClient.addProxyCredentials(proxyCredential[0], proxyCredential[1],
             proxyCredential[2], proxyCredential[3]);
       }
-      newHttpClient.badCertificateCallback = certificateCheck;
+      newHttpClient.badCertificateCallback = _pinningFailureCallback;
     }
 
     // provide the new http client with a pinned security context
     return newHttpClient;
   }
 
+  // Don't allow use of the default constructor without an initial configuration.
+  ApproovHttpClient._() {}
+
+  // Constructor for a custom Approov HttpClient. The config can be obtained using the Approov CLI or is also available in
+  // the original onboarding email.
+  //
+  // @param initialConfig is the config string for the account
+  ApproovHttpClient(String initialConfig): super() {
+    ApproovService.initialize(initialConfig);
+  }
+
   @override
   Future<HttpClientRequest> open(String method, String host, int port, String path) async {
+    // if already closed then just delegate
+    if (_isClosed) {
+      return _delegatePinnedHttpClient.open(method, host, port, path);
+    }
+
     // if we have an active connection to a different host we need to tear down the delegate
     // pinned HttpClient and create a new one with the correct pinning
-    if (!_isClosed && (_connectedHost != host)) {
+    if (_connectedHost != host) {
       Uri url = Uri(scheme: "https", host: host, port: port, path: path);
       HttpClient httpClient = await _createPinnedHttpClient(url);
       _delegatePinnedHttpClient.close();
       _delegatePinnedHttpClient = httpClient;
     }
 
-    // delegate the open operation to the pinned http client
-    return await _delegatePinnedHttpClient.open(method, host, port, path);
+    // delegate the open operation to the pinned http client and then wrap the provided HttpClientRequest
+    return _delegatePinnedHttpClient.open(method, host, port, path).then((request){return _ApproovHttpClientRequest(request);});
   }
 
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
+    // if already closed then just delegate
+    if (_isClosed) {
+      return _delegatePinnedHttpClient.openUrl(method, url);
+    }
+
     // if we have an active connection to a different host we need to tear down the delegate
     // pinned HttpClient and create a new one with the correct pinning
-    if (!_isClosed && (_connectedHost != url.host)) {
+    if (_connectedHost != url.host) {
       HttpClient httpClient = await _createPinnedHttpClient(url);
       _delegatePinnedHttpClient.close();
       _delegatePinnedHttpClient = httpClient;
     }
 
-    // delegate the openUrl operation to the pinned http client
-    return await _delegatePinnedHttpClient.openUrl(method, url);
+    // delegate the open operation to the pinned http client and then wrap the provided HttpClientRequest
+    return _delegatePinnedHttpClient.openUrl(method, url).then((request){return _ApproovHttpClientRequest(request);});
   }
 
   @override
@@ -1212,27 +1374,30 @@ class ApproovClient extends http.BaseClient {
   // logging tag
   static const String TAG = "ApproovClient";
 
+  // initial configuration to supply to delegate ApproovHttpClients
+  late String _initialConfig;
+
   // internal client delegate used to perform the actual requests
   http.Client? _delegateClient;
+
+  // DOn't allow construction of an ApproovClient without an initial configuration.
+  ApproovClient._() {}
 
   // Constructor for a custom Approov client. The config can be obtained using the Approov CLI or is also available in
   // the original onboarding email.
   //
   // @param initialConfig is the config string for the account
   ApproovClient(String initialConfig): super() {
+    _initialConfig = initialConfig;
     ApproovService.initialize(initialConfig);
   }
 
   @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    // process the request to add an Approov token or substitute headers as required
-    bool wasPinningChange = await ApproovService.updateRequest(request);
-
-    // construct the client delegate on demand and rebuild on a pinning change to ensure the latest
-    // pins are used
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    // construct the client delegate on demand
     http.Client? delegateClient = _delegateClient;
-    if ((delegateClient == null) || wasPinningChange) {
-      ApproovHttpClient httpClient = ApproovHttpClient();
+    if (delegateClient == null) {
+      ApproovHttpClient httpClient = ApproovHttpClient(_initialConfig);
       delegateClient = httpio.IOClient(httpClient);
       _delegateClient = delegateClient;
     }
