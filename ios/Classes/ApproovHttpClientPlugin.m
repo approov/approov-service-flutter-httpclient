@@ -77,7 +77,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         case ApproovTokenFetchStatusBadURL:
             return @"BAD_URL";
         case ApproovTokenFetchStatusUnknownURL:
-            return @"UNKOWN_URL";
+            return @"UNKNOWN_URL";
         case ApproovTokenFetchStatusUnprotectedURL:
             return @"UNPROTECTED_URL";
         case ApproovTokenFetchStatusNotInitialized:
