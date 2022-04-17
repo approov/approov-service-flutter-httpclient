@@ -187,6 +187,9 @@ class ApproovService {
   // initial configuration string provided
   static String? _initialConfig = null;
 
+  // true if the interceptor should proceed on network failures and not add an Approov token
+  static bool _proceedOnNetworkFail = false;
+
   // any header to be used for binding in Approov tokens or null if not set
   static String? _bindingHeader = null;
 
@@ -250,6 +253,16 @@ class ApproovService {
     if ((_initialConfig != null) && (initialConfig != _initialConfig))
       throw ApproovException("Attempt to reinitialize the Approov SDK with a different initial config");
     _initialConfig = initialConfig;
+  }
+
+  /// Sets a flag indicating if the network interceptor should proceed anyway if it is
+  /// not possible to obtain an Approov token due to a networking failure. If this is set
+  /// then your backend API can receive calls without the expected Approov token header
+  /// being added, or without header/query parameter substitutions being made.
+  ///
+  /// @param proceed is true if Approov networking fails should allow continuation
+  static void setProceedOnNetworkFail(bool proceed) {
+    _proceedOnNetworkFail = proceed;
   }
 
   /// Sets the header that the Approov token is added on, as well as an optional
@@ -703,8 +716,8 @@ class ApproovService {
   /// then this should be available. If it is not currently possible to fetch an Approov token (typically due to no or
   /// poor network) then an ApproovNetworkException is thrown and a later retry should be made. Other failures will
   /// result in an ApproovException. Note that if substitution headers have been setup then this method also examines
-  /// the headers and remaps them to the substituted value if they correspond to a key set in Approov. Note that in this
-  /// case it is possible for the method to fail with an ApproovRejectionException, which may provide additional
+  /// the headers and remaps them to the substituted value if they correspond to a secure string set in Approov. Note that
+  // in this  case it is possible for the method to fail with an ApproovRejectionException, which may provide additional
   /// information about the reason for the rejection.
   ///
   /// @param request is the HttpClientRequest to which Approov is being added
@@ -752,8 +765,9 @@ class ApproovService {
                (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
                (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
       // we are unable to get an Approov token due to network conditions so the request can
-      // be retried by the user later
-      throw new ApproovNetworkException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
+      // be retried by the user later - unless overridden
+      if (!_proceedOnNetworkFail)
+        throw new ApproovNetworkException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
     } else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.NO_APPROOV_SERVICE) &&
                (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL) &&
                (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL)) {
@@ -797,15 +811,77 @@ class ApproovService {
                     fetchResult.ARC, fetchResult.rejectionReasons);
         else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
                 (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-                (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED))
+                (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
             // we are unable to get the secure string due to network conditions so the request can
-            // be retried by the user later
-            throw new ApproovNetworkException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
+            // be retried by the user later - unless overridden
+            if (!_proceedOnNetworkFail)
+              throw new ApproovNetworkException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
+        }
         else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY)
             // we are unable to get the secure string due to a more permanent error
             throw new ApproovException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
       }
     }
+  }
+
+  /// Substitutes the given query parameter in the Uri. If no substitution is made then the
+  /// original Uri is returned, otherwise a new one is constructed with the revised query
+  /// parameter value. Since this modifies the Uri itself this must be done before making the
+  /// request. If it is not currently possible to fetch secure strings token due to
+  /// networking issues then ApproovNetworkException is thrown and a user initiated retry of the
+  /// operation should be allowed. ApproovRejectionException may be thrown if the attestation
+  /// fails and secure strings cannot be obtained. Other ApproovExecptions represent a more
+  /// permanent error condition.
+  ///
+  /// @param uri is the Uri being analyzed for substitution
+  /// @param queryParameter is the parameter to be potentially substituted
+  /// @return Uri passed in, or modified with a new Uri if required
+  /// @throws ApproovException if it is not possible to obtain secure strings for substitution
+  static Future<Uri> substituteQueryParam(Uri uri, String queryParameter) async {
+    String? queryValue = uri.queryParameters[queryParameter];
+    if (queryValue != null) {
+       // perform SDK initialization if required
+      await _initializeIfRequired();
+
+      // we have found an occurrence of the query parameter to be replaced so we look up the existing
+      // value as a key for a secure string
+      final Map<String, dynamic> arguments = <String, dynamic>{
+          "key": queryValue,
+          "newDef": null,
+      };
+      _TokenFetchResult fetchResult;
+      try {
+        Map fetchResultMap = await _channel.invokeMethod('fetchSecureStringAndWait', arguments);
+        fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+        Log.d("$TAG: substituting query parameter $queryParameter: ${fetchResult.tokenFetchStatus.name}");
+      } catch (err) {
+        throw ApproovException('$err');
+      }
+
+      // process the returned Approov status
+      if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+        // perform a query substitution
+        Map<String, String> updatedParams = Map<String, String>.from(uri.queryParameters);
+        updatedParams[queryParameter] = fetchResult.secureString!;
+        return uri.replace(queryParameters: updatedParams);
+      }
+      else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
+          // if the request is rejected then we provide a special exception with additional information
+          throw new ApproovRejectionException("Query parameter substitution for $queryParameter: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
+                    fetchResult.ARC, fetchResult.rejectionReasons);
+      else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
+              (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
+              (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
+          // we are unable to get the secure string due to network conditions so the request can
+          // be retried by the user later - unless this is overridden
+          if (!_proceedOnNetworkFail)
+              throw new ApproovNetworkException("Query parameter substitution for $queryParameter: ${fetchResult.tokenFetchStatus.name}");
+      }
+      else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY)
+          // we have failed to get a secure string with a more serious permanent error
+          throw new ApproovException("Query parameter substitution for $queryParameter: ${fetchResult.tokenFetchStatus.name}");
+    }
+    return uri;
   }
 
   /// Retrieves the certificates in the chain for the specified host. These are obtained at the platform level and we
@@ -1123,7 +1199,7 @@ class ApproovHttpClient implements HttpClient {
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
     // fetch an Approov token to get the latest configuration - but note we do not fail if a token fetch was not possible
     _TokenFetchResult fetchResult = await ApproovService._fetchApproovToken(url.host);
-    Log.d("$TAG: Pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+    Log.d("$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
     // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
     // config clears the config changed state)
