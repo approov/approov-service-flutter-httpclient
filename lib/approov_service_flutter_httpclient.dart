@@ -578,7 +578,7 @@ class ApproovService {
   /// @param payload is the marshaled JSON object for the claims to be included
   /// @return custom JWT string
   /// @throws ApproovException if there was a problem
-  static Future<String?>fetchCustomJWT(String payload) async {
+  static Future<String>fetchCustomJWT(String payload) async {
     // fetch the custom JWT from the platform layer
     await _initializeIfRequired();
     final Map<String, dynamic> arguments = <String, dynamic>{
