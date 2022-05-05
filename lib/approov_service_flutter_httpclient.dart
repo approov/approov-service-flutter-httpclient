@@ -197,6 +197,9 @@ class ApproovService {
   // required prefixes
   static Map<String, String> _substitutionHeaders = {};
 
+  // map of URL regexs that should be excluded from any Approov protection, mapped to the regular expressions
+  static Map<String, RegExp> _exclusionURLRegexs = {};
+
   // cached host certificates obtaining from probing the relevant host domains
   static Map<String, List<Uint8List>?> _hostCertificates = Map<String, List<Uint8List>?>();
 
@@ -246,22 +249,26 @@ class ApproovService {
   /// actual use of the SDK. If an initial configuration has been provided previously and this one is different then
   /// an error is thrown.
   ///
-  /// @param initialConfig is the initial configuration string
+  /// @param config is the configuration string
   /// @throws ApproovException if the provided configuration is not valid
-  static Future<void> initialize(String initialConfig) async {
+  static Future<void> initialize(String config) async {
     Log.d("$TAG: initialize");
-    if ((_initialConfig != null) && (initialConfig != _initialConfig))
-      throw ApproovException("Attempt to reinitialize the Approov SDK with a different initial config");
-    _initialConfig = initialConfig;
+    if ((_initialConfig != null) && (config != _initialConfig))
+      throw ApproovException("Attempt to reinitialize the Approov SDK with a different configuration");
+    _initialConfig = config;
   }
 
   /// Sets a flag indicating if the network interceptor should proceed anyway if it is
   /// not possible to obtain an Approov token due to a networking failure. If this is set
   /// then your backend API can receive calls without the expected Approov token header
-  /// being added, or without header/query parameter substitutions being made.
+  /// being added, or without header/query parameter substitutions being made. Note that
+  /// this should be used with caution because it may allow a connection to be established
+  /// before any dynamic pins have been received via Approov, thus potentially opening the
+  /// channel to a MitM.
   ///
   /// @param proceed is true if Approov networking fails should allow continuation
   static void setProceedOnNetworkFail(bool proceed) {
+    Log.d("$TAG: setProceedOnNetworkFail $proceed");
     _proceedOnNetworkFail = proceed;
   }
 
@@ -277,244 +284,73 @@ class ApproovService {
     _approovTokenPrefix = prefix;
   }
 
-  /// Getter for the approov token header.
+  /// Sets a binding header that must be present on all requests using the Approov service. A
+  /// header should be chosen whose value is unchanging for most requests (such as an
+  /// Authorization header). A hash of the header value is included in the issued Approov tokens
+  /// to bind them to the value. This may then be verified by the backend API integration. This
+  /// method should typically only be called once.
   ///
-  /// @return approov token header value
-  static String getApproovHeader() {
-    return _approovTokenHeader;
+  /// @param header is the header to use for Approov token binding
+  static void setBindingHeader(String header) {
+    _bindingHeader = header;
   }
 
-  /// Getter for the approov token prefix.
+  /// Adds the name of a header which should be subject to secure strings substitution. This
+  /// means that if the header is present then the value will be used as a key to look up a
+  /// secure string value which will be substituted into the header value instead. This allows
+  /// easy migration to the use of secure strings. Note that this should be done on initialization
+  /// rather than for every request as it will require a new OkHttpClient to be built. A required
+  /// prefix may be specified to deal with cases such as the use of "Bearer " prefixed before values
+  /// in an authorization header.
   ///
-  /// @return approov token prefix value
-  static String getApproovPrefix() {
-    return _approovTokenPrefix;
+  /// @param header is the header to be marked for substitution
+  /// @param requiredPrefix is any required prefix to the value being substituted or null if not required
+  static void addSubstitutionHeader(String header, String? requiredPrefix) {
+    Log.d("$TAG: addSubstitutionHeader $header");
+    if (requiredPrefix == null)
+        _substitutionHeaders[header] = "";
+    else
+        _substitutionHeaders[header] = requiredPrefix;
   }
 
-  /// Fetches the current configuration for the SDK. Normally this method returns the latest configuration that is
-  /// available and is cached in the SDK. Thus the method will return quickly. However, if this method is called when
-  /// there has been no prior call to fetch an Approov token then a network request to the Approov cloud service will be
-  /// made to obtain any latest configuration update. The maximum timeout period is set to be quite short but the caller
-  /// must be aware that this delay may occur.
+  /// Removes a header previously added using addSubstitutionHeader.
   ///
-  /// @return String representation of the configuration.
-  static Future<String> fetchConfig() async {
-    Log.d("$TAG: fetchConfig");
-    await _initializeIfRequired();
+  /// @param header is the header to be removed for substitution
+  static void removeSubstitutionHeader(String header) {
+    Log.d("$TAG: removeSubstitutionHeader $header");
+    _substitutionHeaders.remove(header);
+  }
+
+  /// Adds an exclusion URL regular expression. If a URL for a request matches this regular expression
+  /// then it will not be subject to any Approov protection. Note that this facility must be used with
+  /// EXTREME CAUTION due to the impact of dynamic pinning. Pinning may be applied to all domains added
+  /// using Approov, and updates to the pins are received when an Approov fetch is performed. If you
+  /// exclude some URLs on domains that are protected with Approov, then these will be protected with
+  /// Approov pins but without a path to update the pins until a URL is used that is not excluded. Thus
+  /// you are responsible for ensuring that there is always a possibility of calling a non-excluded
+  /// URL, or you should make an explicit call to fetchToken if there are persistent pinning failures.
+  /// Conversely, use of those option may allow a connection to be established before any dynamic pins
+  /// have been received via Approov, thus potentially opening the channel to a MitM.
+  ///
+  /// @param urlRegex is the regular expression that will be compared against URLs to exlude them
+  static void addExclusionURLRegex(String urlRegex) {
+    Log.d("$TAG: addExclusionURLRegex $urlRegex");
     try {
-      String config = await _channel.invokeMethod('fetchConfig');
-      return config;
-    } catch (err) {
-      throw ApproovException('$err');
+      RegExp regExp = RegExp(urlRegex);
+      _exclusionURLRegexs[urlRegex] = regExp;
+      Log.d("$TAG: addExclusionURLRegex $urlRegex");
+    }
+    on FormatException catch(e) {
+      Log.d("$TAG: addExclusionURLRegex $urlRegex: ${e.message}");
     }
   }
 
-  /// Gets the device ID used by Approov to identify the particular device that the SDK is running on. Note that
-  /// different Approov apps on the same device will return a different ID. Moreover, the ID may be changed by an
-  /// uninstall and reinstall of the app.
+  /// Removes an exclusion URL regular expression previously added using addExclusionURLRegex.
   ///
-  /// @return String representation of the device ID.
-  static Future<String> getDeviceID() async {
-    Log.d("$TAG: getDeviceID");
-    await _initializeIfRequired();
-    try {
-      String deviceID = await _channel.invokeMethod('getDeviceID');
-      return deviceID;
-    } catch (err) {
-      throw ApproovException('$err');
-    }
-  }
-
-  /// Fetches the pins from the current configuration of the SDK. This is returned as a map from URL domain (hostname
-  /// only) to the possible pins for that domain. If there is no map entry for a domain then that indicates that the
-  /// connection is not specifically pinned, or managed trust roots should be used if they are present (keyed from the
-  /// "*" domain). The type of pin requested determines the data in each of the pins. This is typically the base64 encoding
-  /// of the hash of some aspect of the certificate. A connection is considered to be valid if any certificate in the chain
-  /// presented is one with the same hash as one in the array of hashes.
-  ///
-  /// @param pinType is the type of pinning information that is required
-  /// @return Map from domain to the list of strings providing the pins
-  static Future<Map> getPins(String pinType) async {
-    Log.d("$TAG: getPins $pinType");
-    await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "pinType": pinType,
-    };
-    try {
-      Map pins = await _channel.invokeMethod('getPins', arguments);
-      return pins;
-    } catch (err) {
-      throw ApproovException('$err');
-    }
-  }
-
-  /// Internal method for fetching an Approov token from the SDK.
-  ///
-  /// @param url provides the top level domain URL for which a token is being fetched
-  /// @return results of fetching a token
-  static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
-    await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "url": url,
-    };
-    try {
-      Map tokenFetchResultMap = await _channel.invokeMethod('fetchApproovTokenAndWait', arguments);
-      _TokenFetchResult tokenFetchResult = _TokenFetchResult.fromTokenFetchResultMap(tokenFetchResultMap);
-      return tokenFetchResult;
-    } catch (err) {
-      throw ApproovException('$err');
-    }
-  }
-
-  /// Initiates a request to obtain an Approov token and other results. If an Approov token fetch has been completed
-  /// previously and the tokens are unexpired then this may return the same one without a need to perform a network
-  /// transaction. Note though that the caller should never cache the Approov token as it may become invalidated at any point.
-  ///
-  /// If a new Approov token is required then a more extensive app measurement is performed that involves communicating
-  /// with the Approov cloud service. Thus this method may take up to several seconds to complete. Note that if the
-  /// attestation is rejected by the Approov cloud service then a token is still returned, it just won't be signed
-  /// with the correct signature so the failure is detected when any API, to which the token is presented, verifies it.
-  ///
-  /// All calls must provide a URL which provides the high level domain of the API to which the Approov token is going
-  /// to be sent. Different API domains will have different Approov tokens associated with them so it is important that
-  /// the Approov token is only sent to requests for that domain. If the domain has not been configured using the Approov
-  /// CLI then an ApproovException is thrown. Note that there are various other reasons that an ApproovException might also
-  /// be thrown. If the fetch fails due to a networking issue, and should be retried at some later point, then an
-  /// ApproovNetworkException is thrown.
-  ///
-  /// @param url provides the top level domain URL for which a token is being fetched
-  /// @return results of fetching a token
-  static Future<String> fetchApproovToken(String url) async {
-    // fetch the Approov token
-    _TokenFetchResult fetchResult = await _fetchApproovToken(url);
-    Log.d("$TAG: fetchApproovToken for $url: ${fetchResult.loggableToken}");
-
-    // check the status of Approov token fetch
-    if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_APPROOV_SERVICE)) {
-      // we successfully obtained a token so provide it, or provide an empty one on complete Approov service failure
-      return fetchResult.token;
-    } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-               (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-               (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
-      // we are unable to get an Approov token due to network conditions so the request can
-      // be retried by the user later
-      throw new ApproovNetworkException("fetchApproovToken for $url: ${fetchResult.tokenFetchStatus.name}");
-    } else {
-      // we have failed to get an Approov token with a more serious permanent error
-      throw ApproovException("fetchApproovToken for $url: ${fetchResult.tokenFetchStatus.name}");
-    }
-  }
-
-  /// Sets a hash of the given data value into any future Approov tokens obtained in the 'pay' claim. If the data values
-  /// are transmitted to the API backend along with the Approov token then this allows the backend to check that the
-  /// data value was indeed known to the app at the time of the token fetch and hasn't been spoofed. If the data is the
-  /// same as any previous one set then the token does not need to be updated. Otherwise the next token fetch causes a
-  /// new attestation to fetch a new token. Note that this should not be done frequently due to the additional latency on
-  /// token fetching that will be caused. The hash appears in the 'pay' claim of the Approov token as a base64 encoded
-  /// string of the SHA256 hash of the data. Note that the data is hashed locally and never sent to the Approov cloud service.
-  ///
-  /// @param data is the data whose SHA256 hash is to be included in future Approov tokens
-  static Future<void> setDataHashInToken(String data) async {
-    Log.d("$TAG: setDataHashInToken");
-    await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "data": data,
-    };
-    try {
-      await _channel.invokeMethod('setDataHashInToken', arguments);
-    } catch (err) {
-      throw ApproovException('$err');
-    }
-  }
-
-  /// Obtains an integrity measurement proof that is used to show that the app and its environment have not changed
-  /// since the time of the original integrity measurement. The proof does an HMAC calculation over the secret integrity
-  /// measurement value which is salted by a provided nonce. This proves that the SDK is able to reproduce the integrity
-  /// measurement value.
-  ///
-  /// @param nonce is a 16-byte (128-bit) nonce value used to salt the proof HMAC
-  /// @param measurementConfig is the measurement configuration obtained from a previous token fetch results
-  /// @return 32-byte (256-bit) measurement proof value
-  static Future<Uint8List> getIntegrityMeasurementProof(Uint8List nonce, Uint8List measurementConfig) async {
-    Log.d("$TAG: getIntegrityMeasurementProof");
-    await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "nonce": nonce,
-      "measurementConfig": measurementConfig,
-    };
-    try {
-      Uint8List integrityMeasurementProof = await _channel.invokeMethod('getIntegrityMeasurementProof', arguments);
-      return integrityMeasurementProof;
-    } catch (err) {
-      throw ApproovException('$err');
-    }
-  }
-
-  /// Obtains a device measurement proof that is used to show that the device environment has not changed since the time
-  /// of the original integrity measurement. This allows the app version, including the Approov SDK, to be updated while
-  /// preserving the device measurement. The proof does an HMAC calculation over the secret device measurement value
-  /// which is salted by a provided nonce. This proves that the SDK is able to reproduce the device measurement value.
-  ///
-  /// @param nonce is a 16-byte (128-bit) nonce value used to salt the proof HMAC
-  /// @param measurementConfig is the measurement configuration obtained from a previous token fetch results
-  /// @return 32-byte (256-bit) measurement proof value
-  static Future<Uint8List> getDeviceMeasurementProof(Uint8List nonce, Uint8List measurementConfig) async {
-    Log.d("$TAG: getDeviceMeasurementProof");
-    await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "nonce": nonce,
-      "measurementConfig": measurementConfig,
-    };
-    try {
-      Uint8List deviceMeasurementProof = await _channel.invokeMethod('getDeviceMeasurementProof', arguments);
-      return deviceMeasurementProof;
-    } catch (err) {
-      throw ApproovException('$err');
-    }
-  }
-
-  /// Gets the signature for the given message. This uses an account specific message signing key that is
-  /// transmitted to the SDK after a successful token fetch if the facility is enabled for the account and
-  /// the token is received from the primary (rather than failover) Approov cloud. Note
-  /// that if the attestation failed then the signing key provided is actually random so that the
-  /// signature will be incorrect. An Approov token should always be included in the message
-  /// being signed and sent alongside this signature to prevent replay attacks.
-  ///
-  /// @param the message for which to et the signature
-  /// @return base64 encoded signature of the message, or null if no signing key is available
-  static Future<String> getMessageSignature(String message) async {
-    Log.d("$TAG: getMessageSignature");
-    await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "message": message,
-    };
-    try {
-      String messageSignature = await _channel.invokeMethod('getMessageSignature', arguments);
-      return messageSignature;
-    } catch (err) {
-      throw ApproovException('$err');
-    }
-  }
-
-  /// Sets a user defined property on the SDK. This may provide information about the
-  /// app state or aspects of the environment it is running in. This has no direct
-  /// impact on Approov except it is visible as a property on attesting devices and
-  /// can be analyzed using device filters. Note that properties longer than 128
-  /// characters are ignored and all non ASCII characters are removed.
-  ///
-  /// @param property to be set, which may be null
-  static Future<void> setUserProperty(String? property) async {
-    Log.d("$TAG: setUserProperty");
-    await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "property": property,
-    };
-    try {
-      await _channel.invokeMethod('setUserProperty', arguments);
-    } catch (err) {
-      throw ApproovException('$err');
-    }
+  /// @param urlRegex is the regular expression that will be compared against URLs to exlude them
+  static void removeExclusionURLRegex(String urlRegex) {
+    Log.d("$TAG: removeExclusionURLRegex $urlRegex");
+    _exclusionURLRegexs.remove(urlRegex);
   }
 
   /// Prefetches to lower the effective latency of a subsequent token or secure string fetch by
@@ -523,7 +359,7 @@ class ApproovService {
   static void prefetch() async {
     try {
       await _initializeIfRequired();
-      _TokenFetchResult result = await ApproovService._fetchApproovToken("www.approov.io");
+      _TokenFetchResult result = await ApproovService._fetchApproovToken("approov.io");
       if ((result.tokenFetchStatus == _TokenFetchStatus.SUCCESS) ||
           (result.tokenFetchStatus == _TokenFetchStatus.UNKNOWN_URL) ||
           (result.tokenFetchStatus == _TokenFetchStatus.UNPROTECTED_URL))
@@ -577,6 +413,107 @@ class ApproovService {
             (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY))
         // we are unable to get the secure string due to a more permanent error
         throw new ApproovException("precheck: ${fetchResult.tokenFetchStatus.name}");
+  }
+
+  /// Gets the device ID used by Approov to identify the particular device that the SDK is running on. Note that
+  /// different Approov apps on the same device will return a different ID. Moreover, the ID may be changed by an
+  /// uninstall and reinstall of the app.
+  ///
+  /// @return String representation of the device ID
+  static Future<String> getDeviceID() async {
+    await _initializeIfRequired();
+    try {
+      String deviceID = await _channel.invokeMethod('getDeviceID');
+       Log.d("$TAG: getDeviceID: $deviceID");
+      return deviceID;
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
+  /// Sets a hash of the given data value into any future Approov tokens obtained in the 'pay' claim. If the data values
+  /// are transmitted to the API backend along with the Approov token then this allows the backend to check that the
+  /// data value was indeed known to the app at the time of the token fetch and hasn't been spoofed. If the data is the
+  /// same as any previous one set then the token does not need to be updated. Otherwise the next token fetch causes a
+  /// new attestation to fetch a new token. Note that this should not be done frequently due to the additional latency on
+  /// token fetching that will be caused. The hash appears in the 'pay' claim of the Approov token as a base64 encoded
+  /// string of the SHA256 hash of the data. Note that the data is hashed locally and never sent to the Approov cloud service.
+  ///
+  /// @param data is the data whose SHA256 hash is to be included in future Approov tokens
+  static Future<void> setDataHashInToken(String data) async {
+    Log.d("$TAG: setDataHashInToken");
+    await _initializeIfRequired();
+    final Map<String, dynamic> arguments = <String, dynamic>{
+      "data": data,
+    };
+    try {
+      await _channel.invokeMethod('setDataHashInToken', arguments);
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
+  /// Initiates a request to obtain an Approov token and other results. If an Approov token fetch has been completed
+  /// previously and the tokens are unexpired then this may return the same one without a need to perform a network
+  /// transaction. Note though that the caller should never cache the Approov token as it may become invalidated at any point.
+  ///
+  /// If a new Approov token is required then a more extensive app measurement is performed that involves communicating
+  /// with the Approov cloud service. Thus this method may take up to several seconds to complete. Note that if the
+  /// attestation is rejected by the Approov cloud service then a token is still returned, it just won't be signed
+  /// with the correct signature so the failure is detected when any API, to which the token is presented, verifies it.
+  ///
+  /// All calls must provide a URL which provides the high level domain of the API to which the Approov token is going
+  /// to be sent. Different API domains will have different Approov tokens associated with them so it is important that
+  /// the Approov token is only sent to requests for that domain. If the domain has not been configured using the Approov
+  /// CLI then an ApproovException is thrown. Note that there are various other reasons that an ApproovException might also
+  /// be thrown. If the fetch fails due to a networking issue, and should be retried at some later point, then an
+  /// ApproovNetworkException is thrown.
+  ///
+  /// @param url provides the top level domain URL for which a token is being fetched
+  /// @return results of fetching a token
+  static Future<String> fetchToken(String url) async {
+    // fetch the Approov token
+    _TokenFetchResult fetchResult = await _fetchApproovToken(url);
+    Log.d("$TAG: fetchToken for $url: ${fetchResult.loggableToken}");
+
+    // check the status of Approov token fetch
+    if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) ||
+        (fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_APPROOV_SERVICE)) {
+      // we successfully obtained a token so provide it, or provide an empty one on complete Approov service failure
+      return fetchResult.token;
+    } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
+               (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
+               (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
+      // we are unable to get an Approov token due to network conditions so the request can
+      // be retried by the user later
+      throw new ApproovNetworkException("fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
+    } else {
+      // we have failed to get an Approov token with a more serious permanent error
+      throw ApproovException("fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
+    }
+  }
+
+  /// Gets the signature for the given message. This uses an account specific message signing key that is
+  /// transmitted to the SDK after a successful token fetch if the facility is enabled for the account and
+  /// the token is received from the primary (rather than failover) Approov cloud. Note
+  /// that if the attestation failed then the signing key provided is actually random so that the
+  /// signature will be incorrect. An Approov token should always be included in the message
+  /// being signed and sent alongside this signature to prevent replay attacks.
+  ///
+  /// @param the message for which to et the signature
+  /// @return base64 encoded signature of the message, or null if no signing key is available
+  static Future<String> getMessageSignature(String message) async {
+    Log.d("$TAG: getMessageSignature");
+    await _initializeIfRequired();
+    final Map<String, dynamic> arguments = <String, dynamic>{
+      "message": message,
+    };
+    try {
+      String messageSignature = await _channel.invokeMethod('getMessageSignature', arguments);
+      return messageSignature;
+    } catch (err) {
+      throw ApproovException('$err');
+    }
   }
 
   /// Fetches a secure string with the given key. If newDef is not null then a
@@ -675,152 +612,60 @@ class ApproovService {
     return fetchResult.token;
   }
 
-  /// Sets a binding header that must be present on all requests using the Approov service. A
-  /// header should be chosen whose value is unchanging for most requests (such as an
-  /// Authorization header). A hash of the header value is included in the issued Approov tokens
-  /// to bind them to the value. This may then be verified by the backend API integration. This
-  /// method should typically only be called once.
+  /// Fetches the current configuration for the SDK. Normally this method returns the latest configuration that is
+  /// available and is cached in the SDK. Thus the method will return quickly. However, if this method is called when
+  /// there has been no prior call to fetch an Approov token then a network request to the Approov cloud service will be
+  /// made to obtain any latest configuration update. The maximum timeout period is set to be quite short but the caller
+  /// must be aware that this delay may occur.
   ///
-  /// @param header is the header to use for Approov token binding
-  static void setBindingHeader(String header) {
-    _bindingHeader = header;
-  }
-
-  /// Adds the name of a header which should be subject to secure strings substitution. This
-  /// means that if the header is present then the value will be used as a key to look up a
-  /// secure string value which will be substituted into the header value instead. This allows
-  /// easy migration to the use of secure strings. Note that this should be done on initialization
-  /// rather than for every request as it will require a new OkHttpClient to be built. A required
-  /// prefix may be specified to deal with cases such as the use of "Bearer " prefixed before values
-  /// in an authorization header.
-  ///
-  /// @param header is the header to be marked for substitution
-  /// @param requiredPrefix is any required prefix to the value being substituted or null if not required
-  static void addSubstitutionHeader(String header, String? requiredPrefix) {
-    Log.d("$TAG: addSubstitutionHeader $header");
-    if (requiredPrefix == null)
-        _substitutionHeaders[header] = "";
-    else
-        _substitutionHeaders[header] = requiredPrefix;
-  }
-
-  /// Removes a header previously added using addSubstitutionHeader.
-  ///
-  /// @param header is the header to be removed for substitution
-  static void removeSubstitutionHeader(String header) {
-    Log.d("$TAG: removeSubstitutionHeader $header");
-    _substitutionHeaders.remove(header);
-  }
-
-  /// Adds Approov to the given request by adding the Approov token in a header. If a binding header has been specified
-  /// then this should be available. If it is not currently possible to fetch an Approov token (typically due to no or
-  /// poor network) then an ApproovNetworkException is thrown and a later retry should be made. Other failures will
-  /// result in an ApproovException. Note that if substitution headers have been setup then this method also examines
-  /// the headers and remaps them to the substituted value if they correspond to a secure string set in Approov. Note that
-  // in this  case it is possible for the method to fail with an ApproovRejectionException, which may provide additional
-  /// information about the reason for the rejection.
-  ///
-  /// @param request is the HttpClientRequest to which Approov is being added
-  /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
-  static Future<void> updateRequest(HttpClientRequest request) async {
-    // perform SDK initialization if required
+  /// @return String representation of the configuration.
+  static Future<String> _fetchConfig() async {
     await _initializeIfRequired();
-
-    // update the data hash based on any token binding header that is present
-    String? bindingHeader = _bindingHeader;
-    if (bindingHeader != null) {
-      String? headerValue = request.headers.value(bindingHeader);
-      if (headerValue != null)
-        setDataHashInToken(headerValue);
+    try {
+      String config = await _channel.invokeMethod('fetchConfig');
+      return config;
+    } catch (err) {
+      throw ApproovException('$err');
     }
+  }
 
-    // request an Approov token for the host domain
-    String host = request.uri.host;
-    _TokenFetchResult fetchResult = await _fetchApproovToken(host);
-
-    // provide information about the obtained token or error (note "approov token -check" can
-    // be used to check the validity of the token and if you use token annotations they
-    // will appear here to determine why a request is being rejected)
-    Log.d("$TAG: updateRequest for $host: ${fetchResult.loggableToken}");
-
-    // if there was a configuration change we clear it by fetching the new config and clearing
-    // all the cached certificates which will force re-evaluation for new connections
-    if (fetchResult.isConfigChanged) {
-      await fetchConfig();
-      _removeAllCertificates();
-      Log.d("$TAG: updateRequest, dynamic configuration update");
+  /// Fetches the pins from the current configuration of the SDK. This is returned as a map from URL domain (hostname
+  /// only) to the possible pins for that domain. If there is no map entry for a domain then that indicates that the
+  /// connection is not specifically pinned, or managed trust roots should be used if they are present (keyed from the
+  /// "*" domain). The type of pin requested determines the data in each of the pins. This is typically the base64 encoding
+  /// of the hash of some aspect of the certificate. A connection is considered to be valid if any certificate in the chain
+  /// presented is one with the same hash as one in the array of hashes.
+  ///
+  /// @param pinType is the type of pinning information that is required
+  /// @return Map from domain to the list of strings providing the pins
+  static Future<Map> _getPins(String pinType) async {
+    await _initializeIfRequired();
+    final Map<String, dynamic> arguments = <String, dynamic>{
+      "pinType": pinType,
+    };
+    try {
+      Map pins = await _channel.invokeMethod('getPins', arguments);
+      return pins;
+    } catch (err) {
+      throw ApproovException('$err');
     }
+  }
 
-    // if a pin update is forced then this indicates the pins have been updated since the last time they
-    // where read, or that we never had any valid pins when the pinned client was created so we cannot allow
-    // the update to complete as this could leak an Approov token via an unpinned connection
-    if (fetchResult.isForceApplyPins)
-      throw new ApproovException("Forced pin update required");
-
-    // check the status of Approov token fetch
-    if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
-      // we successfully obtained a token so add it to the header for the request
-      request.headers.set(getApproovHeader(), getApproovPrefix() + fetchResult.token, preserveHeaderCase: true);
-    } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-               (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-               (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
-      // we are unable to get an Approov token due to network conditions so the request can
-      // be retried by the user later - unless overridden
-      if (!_proceedOnNetworkFail)
-        throw new ApproovNetworkException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
-    } else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.NO_APPROOV_SERVICE) &&
-               (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL) &&
-               (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL)) {
-      // we have failed to get an Approov token with a more serious permanent error
-      throw ApproovException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
-    }
-
-    // we now deal with any header substitutions, which may require further fetches but these
-    // should be using cached results
-    bool isIllegalSubstitution = (fetchResult.tokenFetchStatus == _TokenFetchStatus.UNKNOWN_URL);
-    for (MapEntry entry in _substitutionHeaders.entries) {
-      String header = entry.key;
-      String prefix = entry.value;
-      String? value = request.headers.value(header);
-      if ((value != null) && value.startsWith(prefix) && (value.length > prefix.length)) {
-        // perform the request to get the secure string for the header value
-        final Map<String, dynamic> arguments = <String, dynamic>{
-          "key": value.substring(prefix.length),
-          "newDef": null,
-        };
-        _TokenFetchResult fetchResult;
-        try {
-          Map fetchResultMap = await _channel.invokeMethod('fetchSecureStringAndWait', arguments);
-          fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
-          Log.d("$TAG: updateRequest substituting header $header: ${fetchResult.tokenFetchStatus.name}");
-        } catch (err) {
-          throw ApproovException('$err');
-        }
-
-        // process the returned Approov status
-        if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
-          if (isIllegalSubstitution)
-            // don't allow substitutions on unadded API domains to prevent them accidentally being
-            // subject to a Man-in-the-Middle (MitM) attack
-            throw new ApproovException("Header substitution for $header illegal for $host that is not an added API domain");
-          request.headers.set(header, prefix + fetchResult.secureString!, preserveHeaderCase: true);
-        }
-        else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
-            // if the request is rejected then we provide a special exception with additional information
-            throw new ApproovRejectionException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
-                    fetchResult.ARC, fetchResult.rejectionReasons);
-        else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-                (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-                (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
-            // we are unable to get the secure string due to network conditions so the request can
-            // be retried by the user later - unless overridden
-            if (!_proceedOnNetworkFail)
-              throw new ApproovNetworkException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
-        }
-        else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY)
-            // we are unable to get the secure string due to a more permanent error
-            throw new ApproovException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
-      }
+  /// Internal method for fetching an Approov token from the SDK.
+  ///
+  /// @param url provides the top level domain URL for which a token is being fetched
+  /// @return results of fetching a token
+  static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
+    await _initializeIfRequired();
+    final Map<String, dynamic> arguments = <String, dynamic>{
+      "url": url,
+    };
+    try {
+      Map tokenFetchResultMap = await _channel.invokeMethod('fetchApproovTokenAndWait', arguments);
+      _TokenFetchResult tokenFetchResult = _TokenFetchResult.fromTokenFetchResultMap(tokenFetchResultMap);
+      return tokenFetchResult;
+    } catch (err) {
+      throw ApproovException('$err');
     }
   }
 
@@ -840,7 +685,14 @@ class ApproovService {
   static Future<Uri> substituteQueryParam(Uri uri, String queryParameter) async {
     String? queryValue = uri.queryParameters[queryParameter];
     if (queryValue != null) {
-       // perform SDK initialization if required
+      // check if the URL matches one of the exclusion regexs and just return the provided Uri if so
+      String url = uri.toString();
+      for (RegExp regExp in _exclusionURLRegexs.values) {
+        if (regExp.hasMatch(url))
+          return uri;
+      }
+
+      // perform SDK initialization if required
       await _initializeIfRequired();
 
       // we have found an occurrence of the query parameter to be replaced so we look up the existing
@@ -882,6 +734,127 @@ class ApproovService {
           throw new ApproovException("Query parameter substitution for $queryParameter: ${fetchResult.tokenFetchStatus.name}");
     }
     return uri;
+  }
+
+  /// Adds Approov to the given request by adding the Approov token in a header. If a binding header has been specified
+  /// then this should be available. If it is not currently possible to fetch an Approov token (typically due to no or
+  /// poor network) then an ApproovNetworkException is thrown and a later retry should be made. Other failures will
+  /// result in an ApproovException. Note that if substitution headers have been setup then this method also examines
+  /// the headers and remaps them to the substituted value if they correspond to a secure string set in Approov. Note that
+  // in this  case it is possible for the method to fail with an ApproovRejectionException, which may provide additional
+  /// information about the reason for the rejection.
+  ///
+  /// @param request is the HttpClientRequest to which Approov is being added
+  /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
+  static Future<void> _updateRequest(HttpClientRequest request) async {
+    // check if the URL matches one of the exclusion regexs and just return if so
+    String url = request.uri.toString();
+    for (RegExp regExp in _exclusionURLRegexs.values) {
+      if (regExp.hasMatch(url))
+        return;
+    }
+
+    // perform SDK initialization if required
+    await _initializeIfRequired();
+
+    // update the data hash based on any token binding header that is present
+    String? bindingHeader = _bindingHeader;
+    if (bindingHeader != null) {
+      String? headerValue = request.headers.value(bindingHeader);
+      if (headerValue != null)
+        setDataHashInToken(headerValue);
+    }
+
+    // request an Approov token for the host domain
+    String host = request.uri.host;
+    _TokenFetchResult fetchResult = await _fetchApproovToken(host);
+
+    // provide information about the obtained token or error (note "approov token -check" can
+    // be used to check the validity of the token and if you use token annotations they
+    // will appear here to determine why a request is being rejected)
+    Log.d("$TAG: updateRequest for $host: ${fetchResult.loggableToken}");
+
+    // if there was a configuration change we clear it by fetching the new config and clearing
+    // all the cached certificates which will force re-evaluation for new connections
+    if (fetchResult.isConfigChanged) {
+      await _fetchConfig();
+      _removeAllCertificates();
+      Log.d("$TAG: updateRequest, dynamic configuration update");
+    }
+
+    // if a pin update is forced then this indicates the pins have been updated since the last time they
+    // where read, or that we never had any valid pins when the pinned client was created so we cannot allow
+    // the update to complete as this could leak an Approov token via an unpinned connection
+    if (fetchResult.isForceApplyPins)
+      throw new ApproovException("Forced pin update required");
+
+    // check the status of Approov token fetch
+    if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+      // we successfully obtained a token so add it to the header for the request
+      request.headers.set(_approovTokenHeader, _approovTokenPrefix + fetchResult.token, preserveHeaderCase: true);
+    } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
+               (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
+               (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
+      // we are unable to get an Approov token due to network conditions so the request can
+      // be retried by the user later - unless overridden
+      if (!_proceedOnNetworkFail)
+        throw new ApproovNetworkException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
+    } else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.NO_APPROOV_SERVICE) &&
+               (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL) &&
+               (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL)) {
+      // we have failed to get an Approov token with a more serious permanent error
+      throw ApproovException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
+    }
+
+    // we only continue additional processing if we had a valid status from Approov, to prevent additional delays
+    // by trying to fetch from Approov again and this also protects against header substiutions in domains not
+    // protected by Approov and therefore potentially subject to a MitM
+    if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
+        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL))
+      return;
+
+    // we now deal with any header substitutions, which may require further fetches but these
+    // should be using cached results
+    for (MapEntry entry in _substitutionHeaders.entries) {
+      String header = entry.key;
+      String prefix = entry.value;
+      String? value = request.headers.value(header);
+      if ((value != null) && value.startsWith(prefix) && (value.length > prefix.length)) {
+        // perform the request to get the secure string for the header value
+        final Map<String, dynamic> arguments = <String, dynamic>{
+          "key": value.substring(prefix.length),
+          "newDef": null,
+        };
+        _TokenFetchResult fetchResult;
+        try {
+          Map fetchResultMap = await _channel.invokeMethod('fetchSecureStringAndWait', arguments);
+          fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+          Log.d("$TAG: updateRequest substituting header $header: ${fetchResult.tokenFetchStatus.name}");
+        } catch (err) {
+          throw ApproovException('$err');
+        }
+
+        // process the returned Approov status
+        if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS)
+          // substitute the header value
+          request.headers.set(header, prefix + fetchResult.secureString!, preserveHeaderCase: true);
+        else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
+            // if the request is rejected then we provide a special exception with additional information
+            throw new ApproovRejectionException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
+                    fetchResult.ARC, fetchResult.rejectionReasons);
+        else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
+                (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
+                (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
+            // we are unable to get the secure string due to network conditions so the request can
+            // be retried by the user later - unless overridden
+            if (!_proceedOnNetworkFail)
+              throw new ApproovNetworkException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
+        }
+        else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY)
+            // we are unable to get the secure string due to a more permanent error
+            throw new ApproovException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
+      }
+    }
   }
 
   /// Retrieves the certificates in the chain for the specified host. These are obtained at the platform level and we
@@ -1093,7 +1066,7 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   @override
   Future addStream(Stream<List<int>> stream) async {
     if (!_requestUpdated) {
-      await ApproovService.updateRequest(_delegateRequest);
+      await ApproovService._updateRequest(_delegateRequest);
       _requestUpdated = true;
     }
     return _delegateRequest.addStream(stream);
@@ -1102,7 +1075,7 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   @override
   Future<HttpClientResponse> close() async {
     if (!_requestUpdated) {
-      await ApproovService.updateRequest(_delegateRequest);
+      await ApproovService._updateRequest(_delegateRequest);
       _requestUpdated = true;
     }
     return _delegateRequest.close();
@@ -1111,7 +1084,7 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   @override
   Future flush() async {
     if (!_requestUpdated) {
-      await ApproovService.updateRequest(_delegateRequest);
+      await ApproovService._updateRequest(_delegateRequest);
       _requestUpdated = true;
     }
     return _delegateRequest.flush();
@@ -1204,23 +1177,25 @@ class ApproovHttpClient implements HttpClient {
     // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
     // config clears the config changed state)
     if (fetchResult.isConfigChanged) {
-      await ApproovService.fetchConfig();
+      await ApproovService._fetchConfig();
       ApproovService._removeAllCertificates();
     }
 
     // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
     // have are available, in which case we detect that at the time we are processing a request to add Approov
-    Map allPins = await ApproovService.getPins("public-key-sha256");
+    Map allPins = await ApproovService._getPins("public-key-sha256");
 
     // get any pins defined for the host domain
     List pins = List.empty();
-    if ((allPins != null) && (allPins[url.host] != null))
+    if ((allPins != null) && (allPins[url.host] != null)) {
+      // get the pins for the host
       pins = (allPins[url.host] as List);
 
-    // if there are no pins for the host domain then we use any associated with the managed trust roots instead - note
-    // this means that this will be applied to all domains, not just those added as Approov API domains
-    if (pins.isEmpty && (allPins != null) && (allPins["*"] != null))
-      pins = (allPins["*"] as List);
+      // if there are no pins for the host domain then we use any associated with the managed trust roots instead - note
+      // this means that this will only be applied to domains added in Approov
+      if (pins.isEmpty && (allPins["*"] != null))
+        pins = (allPins["*"] as List);
+    }
 
     // construct a new http client
     HttpClient? newHttpClient;

@@ -137,10 +137,6 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     } else if ([@"setDataHashInToken" isEqualToString:call.method]) {
         [Approov setDataHashInToken:call.arguments[@"data"]];
         result(nil);
-    } else if ([@"getIntegrityMeasurementProof" isEqualToString:call.method]) {
-        result([Approov getIntegrityMeasurementProof:call.arguments[@"nonce"] :call.arguments[@"measurementConfig"]]);
-    } else if ([@"getDeviceMeasurementProof" isEqualToString:call.method]) {
-        result([Approov getDeviceMeasurementProof:call.arguments[@"nonce"] :call.arguments[@"measurementConfig"]]);
     } else if ([@"getMessageSignature" isEqualToString:call.method]) {
         result([Approov getMessageSignature:call.arguments[@"message"]]);
     } else if ([@"setUserProperty" isEqualToString:call.method]) {

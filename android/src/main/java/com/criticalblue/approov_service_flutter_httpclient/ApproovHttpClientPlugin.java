@@ -117,19 +117,6 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       } catch(Exception e) {
         result.error("Approov.setDataHashInToken", e.getLocalizedMessage(), null);
       }
-    } else if (call.method.equals("getIntegrityMeasurementProof")) {
-      try {
-        result.success(Approov.getIntegrityMeasurementProof(call.argument("nonce"), call.argument("measurementConfig")));
-      } catch(Exception e) {
-        result.error("Approov.getIntegrityMeasurementProof", e.getLocalizedMessage(), null);
-      }
-    } else if (call.method.equals("getDeviceMeasurementProof")) {
-      try {
-        result.success(Approov.getDeviceMeasurementProof(call.argument("nonce"), call.argument("measurementConfig")));
-      } catch(Exception e) {
-        result.error("Approov.getDeviceMeasurementProof", e.getLocalizedMessage(), null);
-      }
-
     } else if (call.method.equals("getMessageSignature")) {
       try {
         String messageSignature = Approov.getMessageSignature((String) call.argument("message"));
