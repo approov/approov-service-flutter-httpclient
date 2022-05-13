@@ -332,7 +332,7 @@ class ApproovService {
   /// Conversely, use of those option may allow a connection to be established before any dynamic pins
   /// have been received via Approov, thus potentially opening the channel to a MitM.
   ///
-  /// @param urlRegex is the regular expression that will be compared against URLs to exlude them
+  /// @param urlRegex is the regular expression that will be compared against URLs to exclude them
   static void addExclusionURLRegex(String urlRegex) {
     Log.d("$TAG: addExclusionURLRegex $urlRegex");
     try {
@@ -347,7 +347,7 @@ class ApproovService {
 
   /// Removes an exclusion URL regular expression previously added using addExclusionURLRegex.
   ///
-  /// @param urlRegex is the regular expression that will be compared against URLs to exlude them
+  /// @param urlRegex is the regular expression that will be compared against URLs to exclude them
   static void removeExclusionURLRegex(String urlRegex) {
     Log.d("$TAG: removeExclusionURLRegex $urlRegex");
     _exclusionURLRegexs.remove(urlRegex);
