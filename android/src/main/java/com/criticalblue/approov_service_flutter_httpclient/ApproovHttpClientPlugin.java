@@ -57,6 +57,10 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // Application context passed to Approov initialization
   private static Context appContext;
 
+  // Provides any prior initial configuration supplied, to allow a reinitialization caused by
+  // a hot restart if the configuration is the same
+  private static String initializedConfig;
+
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
     BinaryMessenger messenger = flutterPluginBinding.getBinaryMessenger();
@@ -69,11 +73,20 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   @Override
   public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
     if (call.method.equals("initialize")) {
-      try {
-        Approov.initialize(appContext, call.argument("initialConfig"), call.argument("updateConfig"), call.argument("comment"));
+      String initialConfig = call.argument("initialConfig");
+      if ((initializedConfig == null) || !initializedConfig.equals(initialConfig)) {
+        // only actually initialize if we haven't before or if there is a change in the
+        // configuration provided
+        try {
+          Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), call.argument("comment"));
+          initializedConfig = initialConfig;
+          result.success(null);
+        } catch(Exception e) {
+          result.error("Approov.initialize", e.getLocalizedMessage(), null);
+        }
+      } else {
+        // the previous initialization is compatible
         result.success(null);
-      } catch(Exception e) {
-        result.error("Approov.initialize", e.getLocalizedMessage(), null);
       }
     } else if (call.method.equals("fetchConfig")) {
       try {

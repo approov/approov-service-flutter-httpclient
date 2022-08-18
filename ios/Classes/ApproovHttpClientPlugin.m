@@ -37,7 +37,6 @@
 // Timeout in seconds for a getting the host certificates
 static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
-
 // ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
 // MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
 // presented on any particular URL to implement the pinning. Note that the MethodChannel must run on a background
@@ -103,18 +102,26 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     if ([@"initialize" isEqualToString:call.method]) {
         NSError* error = nil;
         NSString *initialConfig = call.arguments[@"initialConfig"];
-        NSString *updateConfig = nil;
-        if (call.arguments[@"updateConfig"] != [NSNull null])
-            updateConfig = call.arguments[@"updateConfig"];
-        NSString *comment = nil;
-        if (call.arguments[@"comment"] != [NSNull null])
-            comment = call.arguments[@"comment"];
-        [Approov initialize:initialConfig updateConfig:updateConfig comment:comment error:&error];
-        if (error == nil) {
-            result(nil);
+        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig]) {
+            // only actually initialize if we haven't before or if there is a change in the
+            // configuration provided
+            NSString *updateConfig = nil;
+            if (call.arguments[@"updateConfig"] != [NSNull null])
+                updateConfig = call.arguments[@"updateConfig"];
+            NSString *comment = nil;
+            if (call.arguments[@"comment"] != [NSNull null])
+                comment = call.arguments[@"comment"];
+            [Approov initialize:initialConfig updateConfig:updateConfig comment:comment error:&error];
+            if (error == nil) {
+                _initializedConfig = initialConfig;
+                result(nil);
+            } else {
+                result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
+                    message:error.domain details:error.localizedDescription]);
+            }
         } else {
-            result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
-                message:error.domain details:error.localizedDescription]);
+            // the previous initialization is compatible
+            result(nil);
         }
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
         result([Approov fetchConfig]);
