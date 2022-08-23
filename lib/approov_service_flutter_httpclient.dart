@@ -977,17 +977,92 @@ class ApproovService {
   }  
 }
 
+/// Possible write operations that may need to be placed in the pending list
+enum _WriteOpType {
+  unknown,
+  add,
+  addError,
+  write,
+  writeAll,
+  writeCharCode,
+  writeln
+}
+
+/// Holds a pending write operation that must be delayed because issuing it immediately
+/// would cause the headers to become immutable, but it is not possible to update the headers
+/// because this can only be done in an async method that returns a Future to ensure that the
+/// caller will wait for it to be completed.
+class _PendingWriteOp {
+  // state held for an individual pending write operation
+  _WriteOpType type = _WriteOpType.unknown;
+  List<int>? data;
+  Object? error;
+  StackTrace? stackTrace;
+  Object? object;
+  Iterable? objects;
+  String? separator;
+  int charCode = 0;
+
+  void add(List<int> data) {
+    this.type = _WriteOpType.add;
+    this.data = data;
+  }
+
+  void addError(Object error, [StackTrace? stackTrace]) {
+    this.type = _WriteOpType.addError;
+    this.error = error;
+    this.stackTrace = stackTrace;
+  }
+
+  void write(Object? object) {
+    this.type = _WriteOpType.write;
+    this.object = object;
+  }
+
+  void writeAll(Iterable objects, [String separator = ""]) {
+    this.type = _WriteOpType.writeAll;
+    this.objects = objects;
+    this.separator = separator;
+  }
+
+  void writeCharCode(int charCode) {
+    this.type = _WriteOpType.writeCharCode;
+    this.charCode = charCode;
+  }
+
+  void writeln([Object? object=""]) {
+    this.type = _WriteOpType.writeln;
+    this.object = object;
+  }
+
+  void performOperation(HttpClientRequest delegateRequest) {
+    switch (type) {
+      case _WriteOpType.add: delegateRequest.add(data!); break;
+      case _WriteOpType.addError: delegateRequest.addError(error!, stackTrace); break;
+      case _WriteOpType.write: delegateRequest.write(object); break;
+      case _WriteOpType.writeAll: delegateRequest.writeAll(objects!, separator!); break;
+      case _WriteOpType.writeCharCode: delegateRequest.writeCharCode(charCode); break;
+      case _WriteOpType.writeln: delegateRequest.writeln(object); break;
+    }
+  }
+}
+
 /// Approov version of an HttpClientRequest, which delegates to an HttpClientRequest provided by the standard HttpClient. This
-/// is necessary because we Approov needs to be able to read, add and modify outgoing headers. This cannot be done at the time
+/// is necessary because Approov needs to be able to read, add and modify outgoing headers. This cannot be done at the time
 /// of initial connection since the headers will not have been added at this time, and these are required for the token binding
 /// and secret protection options (where a placeholder value in a header is replaced by the actual secret). Things are complicated
 /// by the fact that headers are only mutable until anything is written to the body. Thus the headers are updated just before any
-/// operation that updates the headers (limited by the fact that the updates can only be done on functions that return a future,
-/// since it is an asynchronous operation).
+/// operation that updates the body. This is further limited by the fact that the updates can only be done on functions that return
+/// a future (since the Approov fetch is an asynchronous operation), so some operaions have to be delayed until a suitable method is
+/// called, knowing that in the worst case it can be performed when "close" is called.
 class _ApproovHttpClientRequest implements HttpClientRequest {
 
   // request to be delegated to
   late HttpClientRequest _delegateRequest;
+
+  // list of write operations (that update the body of the request) which have been delayed until there
+  // is a possibility of updating the headers in the request with Approov
+  List<_PendingWriteOp> _pendingWriteOps = <_PendingWriteOp>[];
 
   // true if the request has been updated with Approov related headers
   bool _requestUpdated = false;
@@ -998,6 +1073,23 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   // @param request is the HttpClientRequest to be delegated to
   _ApproovHttpClientRequest(HttpClientRequest request) {
     _delegateRequest = request;
+  }
+
+  // Updates the request if that is required. This may require the headers to be updated and therefore it cannot be
+  // done after write operations to the body which make the headers immutable (as they may have already been transmitted).
+  // Thus pending write operations are held and issue after the header updates.
+  Future _updateRequestIfRequired() async {
+    if (!_requestUpdated) {
+      // update the request while the headers can still be mutated
+      await ApproovService._updateRequest(_delegateRequest);
+      _requestUpdated = true;
+
+      // now perform any pending write operations
+      for (final pendingWriteOp in _pendingWriteOps) {
+          pendingWriteOp.performOperation(_delegateRequest);
+      }
+      _pendingWriteOps = <_PendingWriteOp>[];
+    }
   }
 
   @override
@@ -1055,59 +1147,86 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
 
   @override
   void add(List<int> data) {
-    _delegateRequest.add(data);
+    if (_requestUpdated)
+      _delegateRequest.add(data);
+    else {
+      _PendingWriteOp pendingWriteOp = new _PendingWriteOp();
+      pendingWriteOp.add(data);
+      _pendingWriteOps.add(pendingWriteOp);
+    }
   }
 
   @override
   void addError(Object error, [StackTrace? stackTrace]) {
-    _delegateRequest.addError(error, stackTrace);
+    if (_requestUpdated)
+      _delegateRequest.addError(error, stackTrace);
+    else {
+      _PendingWriteOp pendingWriteOp = new _PendingWriteOp();
+      pendingWriteOp.addError(error, stackTrace);
+      _pendingWriteOps.add(pendingWriteOp);
+    }
   }
 
   @override
   Future addStream(Stream<List<int>> stream) async {
-    if (!_requestUpdated) {
-      await ApproovService._updateRequest(_delegateRequest);
-      _requestUpdated = true;
-    }
+    await _updateRequestIfRequired();
     return _delegateRequest.addStream(stream);
   }
 
   @override
   Future<HttpClientResponse> close() async {
-    if (!_requestUpdated) {
-      await ApproovService._updateRequest(_delegateRequest);
-      _requestUpdated = true;
-    }
+    await _updateRequestIfRequired();
     return _delegateRequest.close();
   }
 
   @override
   Future flush() async {
-    if (!_requestUpdated) {
-      await ApproovService._updateRequest(_delegateRequest);
-      _requestUpdated = true;
-    }
+    await _updateRequestIfRequired();
     return _delegateRequest.flush();
   }
 
   @override
   void write(Object? object) {
-    _delegateRequest.write(object);
+    if (_requestUpdated)
+      _delegateRequest.write(object);
+    else {
+      _PendingWriteOp pendingWriteOp = new _PendingWriteOp();
+      pendingWriteOp.write(object);
+      _pendingWriteOps.add(pendingWriteOp);
+    }
   }
 
   @override
   void writeAll(Iterable objects, [String separator = ""]) {
-    _delegateRequest.writeAll(objects, separator);
+    if (_requestUpdated)
+      _delegateRequest.writeAll(objects, separator);
+    else {
+      _PendingWriteOp pendingWriteOp = new _PendingWriteOp();
+      pendingWriteOp.writeAll(objects, separator);
+      _pendingWriteOps.add(pendingWriteOp);
+    }
   }
 
   @override 
   void writeCharCode(int charCode) {
-    _delegateRequest.writeCharCode(charCode);
+    if (_requestUpdated)
+      _delegateRequest.writeCharCode(charCode);
+    else {
+      _PendingWriteOp pendingWriteOp = new _PendingWriteOp();
+      pendingWriteOp.writeCharCode(charCode);
+      _pendingWriteOps.add(pendingWriteOp);
+    }
   }
 
   @override
   void writeln([Object? object=""]) {
-    _delegateRequest.writeln(object);
+    if (_requestUpdated)
+      _delegateRequest.writeln(object);
+    else {
+      _PendingWriteOp pendingWriteOp = new _PendingWriteOp();
+      pendingWriteOp.writeln(object);
+      _pendingWriteOps.add(pendingWriteOp);
+    }
   }
 }
 
