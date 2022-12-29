@@ -269,18 +269,28 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     }
 
     // Check the validity of the server trust
-    SecTrustResultType result;
-    OSStatus aStatus = SecTrustEvaluate(serverTrust, &result);
-    if (errSecSuccess != aStatus) {
-        completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
-        return;
+    if (@available(iOS 12.0, *)) {
+        if (!SecTrustEvaluateWithError(serverTrust, nil)) {
+            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+            return;
+        }
+    }
+    else {
+        SecTrustResultType result;
+        OSStatus status = SecTrustEvaluate(serverTrust, &result);
+        if (errSecSuccess != status) {
+            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+            return;
+        }
     }
 
     // Collect all the certs in the chain
     CFIndex certCount = SecTrustGetCertificateCount(serverTrust);
     NSMutableArray<FlutterStandardTypedData *> *certs = [NSMutableArray arrayWithCapacity:(NSUInteger)certCount];
     for (int certIndex = 0; certIndex < certCount; certIndex++) {
-        // get the chain certificate
+        // Get the chain certificate - note that this function is deprecated from iOS 15 but the
+        // replacement function is only available from iOS 15 and has a very different interface so
+        // we can't use it yet
         SecCertificateRef cert = SecTrustGetCertificateAtIndex(serverTrust, certIndex);
         if (!cert) {
             completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);

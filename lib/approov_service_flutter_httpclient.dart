@@ -252,9 +252,10 @@ class ApproovService {
   /// @param config is the configuration string
   /// @throws ApproovException if the provided configuration is not valid
   static Future<void> initialize(String config) async {
-    Log.d("$TAG: initialize");
+    if (_initialConfig == null)
+      Log.d("$TAG: initialize $config");
     if ((_initialConfig != null) && (config != _initialConfig))
-      throw ApproovException("Attempt to reinitialize the Approov SDK with a different configuration");
+      throw ApproovException("Attempt to reinitialize the Approov SDK with a different configuration $config");
     _initialConfig = config;
   }
 
@@ -786,7 +787,7 @@ class ApproovService {
     // where read, or that we never had any valid pins when the pinned client was created so we cannot allow
     // the update to complete as this could leak an Approov token via an unpinned connection
     if (fetchResult.isForceApplyPins)
-      throw new ApproovException("Forced pin update required");
+      throw new ApproovNetworkException("Forced pin update required");
 
     // check the status of Approov token fetch
     if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
@@ -1243,6 +1244,10 @@ class ApproovHttpClient implements HttpClient {
   // request forces a pinned HttpClient to be used.
   HttpClient _delegatePinnedHttpClient = HttpClient();
 
+  // any future delegated pinned HttpClient that is currently being created - this is used to force serialization
+  // of delegate creation in case there are many open operations in flight concurrently
+  Future<HttpClient>? _futureDelegatePinnedHttpClient;
+
   // the host to which the delegate pinned HttpClient delegate is connected and, optionally, pinning. Used to detect when to
   // re-create the delegate pinned HttpClient.
   String? _connectedHost;
@@ -1304,6 +1309,22 @@ class ApproovHttpClient implements HttpClient {
     // have are available, in which case we detect that at the time we are processing a request to add Approov
     Map allPins = await ApproovService._getPins("public-key-sha256");
 
+    // if we didn't manage to fetch a token before then it is possible we have never fetched a token and therefore
+    // not have any available pins - we force another token fetch in that case so that we can check
+    bool forceNoConnection = false;
+    if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
+        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
+      // perform another attempted token fetch
+      fetchResult = await ApproovService._fetchApproovToken(url.host);
+      Log.d("$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+
+      // if we are forced to update pins then this likely means that no pins were ever fetched and in this
+      // case we must force a no connection when so that another fetched can be tried again - this is because
+      // once a connection is made it might not be dropped until the app is executed so there is no possibility
+      // to retry and get the pins without restarting the app
+      forceNoConnection = fetchResult.isForceApplyPins;
+    }
+
     // get any pins defined for the host domain
     List pins = List.empty();
     if ((allPins != null) && (allPins[url.host] != null)) {
@@ -1318,7 +1339,15 @@ class ApproovHttpClient implements HttpClient {
 
     // construct a new http client
     HttpClient? newHttpClient;
-    if (pins.isEmpty)
+    if (forceNoConnection) {
+      // we have been unable to obtain the pins so we need to force the client to not connect
+      // by not trusting anything - this will give us a further opportunity to fetch pins again
+      // later when network connectivity may have resumed
+      SecurityContext securityContext = SecurityContext(withTrustedRoots: false);
+      newHttpClient = HttpClient(context: securityContext);
+      Log.d("$TAG: forcing no connection for ${url.host}");
+    }
+    else if (pins.isEmpty)
       // if there are no pins then we can just use a standard http client
       newHttpClient = HttpClient();
     else {
@@ -1373,6 +1402,12 @@ class ApproovHttpClient implements HttpClient {
 
   @override
   Future<HttpClientRequest> open(String method, String host, int port, String path) async {
+    // serialize if we are already creating a future delegate pinned http client - we
+    // might be able to use that if it is for the same host
+    if (_futureDelegatePinnedHttpClient != null) {
+      await _futureDelegatePinnedHttpClient;
+    }
+
     // if already closed then just delegate
     if (_isClosed) {
       return _delegatePinnedHttpClient.open(method, host, port, path);
@@ -1382,7 +1417,10 @@ class ApproovHttpClient implements HttpClient {
     // pinned HttpClient and create a new one with the correct pinning
     if (_connectedHost != host) {
       Uri url = Uri(scheme: "https", host: host, port: port, path: path);
-      HttpClient httpClient = await _createPinnedHttpClient(url);
+      Future<HttpClient> futureDelegatePinnedHttpClient = _createPinnedHttpClient(url);
+      _futureDelegatePinnedHttpClient = futureDelegatePinnedHttpClient;
+      HttpClient httpClient = await futureDelegatePinnedHttpClient;
+      _futureDelegatePinnedHttpClient = null;
       _delegatePinnedHttpClient.close();
       _delegatePinnedHttpClient = httpClient;
     }
@@ -1393,6 +1431,12 @@ class ApproovHttpClient implements HttpClient {
 
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
+    // serialize if we are already creating a future delegate pinned http client - we
+    // might be able to use that if it is for the same host
+    if (_futureDelegatePinnedHttpClient != null) {
+      await _futureDelegatePinnedHttpClient;
+    }
+
     // if already closed then just delegate
     if (_isClosed) {
       return _delegatePinnedHttpClient.openUrl(method, url);
@@ -1401,7 +1445,10 @@ class ApproovHttpClient implements HttpClient {
     // if we have an active connection to a different host we need to tear down the delegate
     // pinned HttpClient and create a new one with the correct pinning
     if (_connectedHost != url.host) {
-      HttpClient httpClient = await _createPinnedHttpClient(url);
+      Future<HttpClient> futureDelegatePinnedHttpClient = _createPinnedHttpClient(url);
+      _futureDelegatePinnedHttpClient = futureDelegatePinnedHttpClient;
+      HttpClient httpClient = await futureDelegatePinnedHttpClient;
+      _futureDelegatePinnedHttpClient = null;
       _delegatePinnedHttpClient.close();
       _delegatePinnedHttpClient = httpClient;
     }
