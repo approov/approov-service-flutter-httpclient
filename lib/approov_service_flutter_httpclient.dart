@@ -273,6 +273,28 @@ class ApproovService {
     _proceedOnNetworkFail = proceed;
   }
 
+  /// Sets a development key indicating that the app is a development version and it should
+  /// pass attestation even if the app is not registered or it is running on an emulator. The
+  /// development key value can be rotated at any point in the account if a version of the app
+  /// containing the development key is accidentally released. This is primarily
+  /// used for situations where the app package must be modified or resigned in
+  /// some way as part of the testing process.
+  /// 
+  /// @param devKey is the development key to be used
+  /// @throws ApproovException if there was a problem
+  static Future<void> setDevKey(String devKey) async {
+    Log.d("$TAG: setDevKey");
+    await _initializeIfRequired();
+    final Map<String, dynamic> arguments = <String, dynamic>{
+      "devKey": devKey,
+    };
+    try {
+      await _channel.invokeMethod('setDevKey', arguments);
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
   /// Sets the header that the Approov token is added on, as well as an optional
   /// prefix String (such as "Bearer "). By default the token is provided on
   /// "Approov-Token" with no prefix.
@@ -293,6 +315,7 @@ class ApproovService {
   ///
   /// @param header is the header to use for Approov token binding
   static void setBindingHeader(String header) {
+    Log.d("$TAG: setBindingHeader $header");
     _bindingHeader = header;
   }
 
@@ -441,6 +464,7 @@ class ApproovService {
   /// string of the SHA256 hash of the data. Note that the data is hashed locally and never sent to the Approov cloud service.
   ///
   /// @param data is the data whose SHA256 hash is to be included in future Approov tokens
+  /// @throws ApproovException if there was a problem
   static Future<void> setDataHashInToken(String data) async {
     Log.d("$TAG: setDataHashInToken");
     await _initializeIfRequired();
@@ -472,6 +496,7 @@ class ApproovService {
   ///
   /// @param url provides the top level domain URL for which a token is being fetched
   /// @return results of fetching a token
+  /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
     // fetch the Approov token
     _TokenFetchResult fetchResult = await _fetchApproovToken(url);
@@ -503,6 +528,7 @@ class ApproovService {
   ///
   /// @param the message for which to et the signature
   /// @return base64 encoded signature of the message, or null if no signing key is available
+  /// @throws ApproovException if there was a problem
   static Future<String> getMessageSignature(String message) async {
     Log.d("$TAG: getMessageSignature");
     await _initializeIfRequired();
@@ -619,7 +645,8 @@ class ApproovService {
   /// made to obtain any latest configuration update. The maximum timeout period is set to be quite short but the caller
   /// must be aware that this delay may occur.
   ///
-  /// @return String representation of the configuration.
+  /// @return String representation of the configuration
+  /// @throws ApproovException if there was a problem
   static Future<String> _fetchConfig() async {
     await _initializeIfRequired();
     try {
@@ -639,6 +666,7 @@ class ApproovService {
   ///
   /// @param pinType is the type of pinning information that is required
   /// @return Map from domain to the list of strings providing the pins
+  /// @throws ApproovException if there was a problem
   static Future<Map> _getPins(String pinType) async {
     await _initializeIfRequired();
     final Map<String, dynamic> arguments = <String, dynamic>{
@@ -656,6 +684,7 @@ class ApproovService {
   ///
   /// @param url provides the top level domain URL for which a token is being fetched
   /// @return results of fetching a token
+  /// @throws ApproovException if there was a problem
   static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
     await _initializeIfRequired();
     final Map<String, dynamic> arguments = <String, dynamic>{

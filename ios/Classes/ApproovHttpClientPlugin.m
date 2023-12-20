@@ -144,6 +144,9 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     } else if ([@"setDataHashInToken" isEqualToString:call.method]) {
         [Approov setDataHashInToken:call.arguments[@"data"]];
         result(nil);
+    } else if ([@"setDevKey" isEqualToString:call.method]) {
+        [Approov setDevKey:call.arguments[@"devKey"]];
+        result(nil);
     } else if ([@"getMessageSignature" isEqualToString:call.method]) {
         result([Approov getMessageSignature:call.arguments[@"message"]]);
     } else if ([@"setUserProperty" isEqualToString:call.method]) {
