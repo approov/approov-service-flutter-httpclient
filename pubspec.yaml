@@ -1,6 +1,6 @@
 name: approov_service_flutter_httpclient
 description: A new flutter plugin project.
-version: 0.0.2
+version: 0.0.3
 homepage: https://github.com/approov/approov_service_flutter_httpclient
 
 environment:
@@ -10,14 +10,14 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  asn1lib: ^1.0.0
-  crypto: ^3.0.1
+  asn1lib: ^1.5.2
+  crypto: ^3.0.3
   enum_to_string: ^2.0.1
-  http: ^0.13.2
-  logger: ^1.0.0
-  pem: ^2.0.0
-  shared_preferences: ^2.0.5
-  mutex: ^3.0.0
+  http: ^1.2.1
+  logger: ^2.0.2
+  pem: ^2.0.5
+  shared_preferences: ^2.2.2
+  mutex: ^3.1.0
 
 dev_dependencies:
   flutter_test:
