@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
     s.name             = 'approov_service_flutter_httpclient'
-    s.version          = '0.0.3'
+    s.version          = '0.0.4'
     s.summary          = 'Flutter plugin for accessing Approov SDK attestation services.'
     s.description      = <<-DESC
   A Flutter plugin using mobile API protection provided by the Approov SDK. If the provided Approov SDK is configured to protect an API, then the plugin will automatically set up pinning and add relevant headers for any request to the API.
@@ -13,7 +13,7 @@ Pod::Spec.new do |s|
     s.source_files = 'Classes/**/*'
     s.public_header_files = 'Classes/**/*.h'
     s.dependency 'Flutter'
-    s.dependency 'approov-ios-sdk', '~> 3.2.0'
+    s.dependency 'approov-ios-sdk', '~> 3.2.2'
     s.platform = :ios, '12.0'
     # Flutter.framework does not contain an i386 slice.
     s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
