@@ -205,7 +205,7 @@ class ApproovService {
 
   /// Internal method to initialize the Approov SDK if needed using a previously provided initial configuration string.
   /// Initialization is performed lazily based on the first actual use of the underlying SDK. This is necessary due to
-  /// asynchronous nature of Dart execution which makes it difficult to guarantee that initialization is cemplete before
+  /// asynchronous nature of Dart execution which makes it difficult to guarantee that initialization is complete before
   /// the first operation otherwise. 
   ///
   /// @throws ApproovException if initialization could not be completed
