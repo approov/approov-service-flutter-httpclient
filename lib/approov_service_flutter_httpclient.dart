@@ -187,6 +187,9 @@ class ApproovService {
   // initial configuration string provided
   static String? _initialConfig = null;
 
+  // optional comment provided during initialization
+  static String? _initialComment = null;
+
   // true if the interceptor should proceed on network failures and not add an Approov token
   static bool _proceedOnNetworkFail = false;
 
@@ -228,6 +231,13 @@ class ApproovService {
           };
           await _channel.invokeMethod('initialize', arguments);
 
+          // Use the comment string to initialize now immediately with the non null string
+          if (_initialComment != null) {
+            arguments = <String, dynamic>{
+              "comment": _initialComment,
+            };
+            await _channel.invokeMethod('initialize', arguments);
+          }
           // set the user property to represent the framework being used
           // set the user property
           arguments = <String, dynamic>{
@@ -250,13 +260,15 @@ class ApproovService {
   /// an error is thrown.
   ///
   /// @param config is the configuration string
+  /// @param comment is an optional comment used during initialization. It is safe to use null
   /// @throws ApproovException if the provided configuration is not valid
-  static Future<void> initialize(String config) async {
+  static Future<void> initialize(String config, [String? comment]) async {
     if (_initialConfig == null)
       Log.d("$TAG: initialize $config");
     if ((_initialConfig != null) && (config != _initialConfig))
       throw ApproovException("Attempt to reinitialize the Approov SDK with a different configuration $config");
     _initialConfig = config;
+    _initialComment = comment;
   }
 
   /// Sets a flag indicating if the network interceptor should proceed anyway if it is
@@ -1425,8 +1437,8 @@ class ApproovHttpClient implements HttpClient {
   // the original onboarding email.
   //
   // @param initialConfig is the config string for the account
-  ApproovHttpClient(String initialConfig): super() {
-    ApproovService.initialize(initialConfig);
+  ApproovHttpClient(String initialConfig, [String? initialComment]): super() {
+    ApproovService.initialize(initialConfig, initialComment);
   }
 
   @override
@@ -1623,6 +1635,9 @@ class ApproovClient extends http.BaseClient {
   // initial configuration to supply to delegate ApproovHttpClients
   late String _initialConfig;
 
+  // optional comment string to use alongside initial configuration
+  String? _initialComment;
+
   // internal client delegate used to perform the actual requests
   http.Client? _delegateClient;
 
@@ -1633,9 +1648,11 @@ class ApproovClient extends http.BaseClient {
   // the original onboarding email.
   //
   // @param initialConfig is the config string for the account
-  ApproovClient(String initialConfig): super() {
+  // @param initialComment is an optional comment string to use alongside the initial configuration
+  ApproovClient(String initialConfig, [String? initialComment]): super() {
     _initialConfig = initialConfig;
-    ApproovService.initialize(initialConfig);
+    _initialComment = initialComment;
+    ApproovService.initialize(initialConfig, initialComment);
   }
 
   @override
@@ -1643,7 +1660,7 @@ class ApproovClient extends http.BaseClient {
     // construct the client delegate on demand
     http.Client? delegateClient = _delegateClient;
     if (delegateClient == null) {
-      ApproovHttpClient httpClient = ApproovHttpClient(_initialConfig);
+      ApproovHttpClient httpClient = ApproovHttpClient(_initialConfig, _initialComment);
       delegateClient = httpio.IOClient(httpClient);
       _delegateClient = delegateClient;
     }
