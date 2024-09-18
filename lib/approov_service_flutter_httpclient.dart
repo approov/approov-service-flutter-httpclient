@@ -231,11 +231,7 @@ class ApproovService {
           await _channel.invokeMethod('initialize', arguments);
           // Use the comment string to initialize now immediately with the non null string
           if (_initialComment != null) {
-            arguments = <String, dynamic>{
-              "initialConfig": _initialConfig,
-              "updateConfig": "auto",
-              "comment": _initialComment,
-            };
+            arguments["comment"] = _initialComment;
             await _channel.invokeMethod('initialize', arguments);
           }
           // set the user property to represent the framework being used
