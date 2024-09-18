@@ -229,14 +229,13 @@ class ApproovService {
             "comment": null,
           };
           await _channel.invokeMethod('initialize', arguments);
-          // Force a token fetch
-          String s = await fetchToken("approov.io");
-          Log.d("$TAG: tokenFetch $s");
+          Log.d("$TAG: initialize: $arguments");
           // Use the comment string to initialize now immediately with the non null string
           if (_initialComment != null) {
             arguments = <String, dynamic>{
               "comment": _initialComment,
             };
+            Log.d("$TAG: initialize: $arguments");
             await _channel.invokeMethod('initialize', arguments);
           }
           // set the user property to represent the framework being used
