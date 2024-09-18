@@ -229,16 +229,14 @@ class ApproovService {
             "comment": null,
           };
           await _channel.invokeMethod('initialize', arguments);
-          Log.d("$TAG: initialize: $arguments");
           // Use the comment string to initialize now immediately with the non null string
           if (_initialComment != null) {
-            Map<String, dynamic> reinitArguments = <String, dynamic>{
+            arguments = <String, dynamic>{
               "initialConfig": _initialConfig,
               "updateConfig": "auto",
               "comment": _initialComment,
             };
-            Log.d("$TAG: initialize: $arguments");
-            await _channel.invokeMethod('initialize', arguments);
+            await _channel.invokeMethod('initialize', reinitArguments);
           }
           // set the user property to represent the framework being used
           // set the user property
@@ -250,7 +248,6 @@ class ApproovService {
           // initialization was successful
           _isInitialized = true;
         } catch (err) {
-          Log.d("$TAG: Exception during initialize: $err");
           throw ApproovException('$err');
         }
       }
