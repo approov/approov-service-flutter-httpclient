@@ -236,7 +236,11 @@ class ApproovService {
               "comment": _initialComment,
             };
             Log.d("$TAG: initialize: $arguments");
-            await _channel.invokeMethod('initialize', arguments);
+            try {
+              await _channel.invokeMethod('initialize', arguments);
+            } catch (err) {
+              Log.e("$TAG: initialize: $err");
+            }
           }
           // set the user property to represent the framework being used
           // set the user property
