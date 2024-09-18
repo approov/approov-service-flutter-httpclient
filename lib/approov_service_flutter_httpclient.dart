@@ -236,7 +236,7 @@ class ApproovService {
               "updateConfig": "auto",
               "comment": _initialComment,
             };
-            await _channel.invokeMethod('initialize', reinitArguments);
+            await _channel.invokeMethod('initialize', arguments);
           }
           // set the user property to represent the framework being used
           // set the user property
