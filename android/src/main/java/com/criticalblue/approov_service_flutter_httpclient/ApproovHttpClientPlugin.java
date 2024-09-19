@@ -74,9 +74,10 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
     if (call.method.equals("initialize")) {
       String initialConfig = call.argument("initialConfig");
-      if ((initializedConfig == null) || !initializedConfig.equals(initialConfig)) {
-        // only actually initialize if we haven't before or if there is a change in the
-        // configuration provided
+      String commentString = call.argument("comment");
+      if ((initializedConfig == null) || !initializedConfig.equals(initialConfig) || (commentString != null)) {
+        // only actually initialize if we haven't before, if there is a change in the
+        // configuration provided or we have a comment to add to the initialization
         try {
           Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), call.argument("comment"));
           initializedConfig = initialConfig;
