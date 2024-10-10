@@ -102,9 +102,9 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     if ([@"initialize" isEqualToString:call.method]) {
         NSError* error = nil;
         NSString *initialConfig = call.arguments[@"initialConfig"];
-        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig]) {
-            // only actually initialize if we haven't before or if there is a change in the
-            // configuration provided
+        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || (call.arguments[@"comment"] != [NSNull null])) {
+            // only actually initialize if we haven't before, if there is a change in the
+            // configuration provided or thi is a new renitialization
             NSString *updateConfig = nil;
             if (call.arguments[@"updateConfig"] != [NSNull null])
                 updateConfig = call.arguments[@"updateConfig"];
