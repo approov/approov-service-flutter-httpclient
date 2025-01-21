@@ -24,6 +24,7 @@ apply plugin: 'com.android.library'
 
 android {
     compileSdkVersion 29
+    namespace = "com.criticalblue.approov_service_flutter_httpclient"
     defaultConfig {
         minSdkVersion 19
     }
@@ -35,13 +36,7 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
-    // Check the AGP version and apply `namespace` if needed
-    afterEvaluate {
-        def agpVersion = com.android.builder.model.Version.ANDROID_GRADLE_PLUGIN_VERSION
-        if (agpVersion.tokenize('.')[0].toInteger() >= 7 && agpVersion.tokenize('.')[1].toInteger() >= 3) {
-            namespace = "com.criticalblue.approov_service_flutter_httpclient" 
-        }
-    }
+    
 }
 
 configurations.maybeCreate("default")
