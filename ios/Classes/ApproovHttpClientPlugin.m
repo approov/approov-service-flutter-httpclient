@@ -20,22 +20,172 @@
 #import "ApproovHttpClientPlugin.h"
 #import "Approov/Approov.h"
 
+// Timeout in seconds for a getting the host certificates
+static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 // Definition for a special class to fetch host certificates by implementing a NSURLSessionTaskDelegate that
 // is called upon initial connection to get the certificates but the connection is dropped at that point.
 @interface HostCertificatesFetcher: NSObject<NSURLSessionTaskDelegate>
 
-// Host certificates for the current connection
-@property NSArray<FlutterStandardTypedData *> *hostCertificates;
+/* Standard initialiser not applicable. */
+- (nullable instancetype)init NS_UNAVAILABLE;
 
-// Get the host certificates for an URL
-- (NSArray<FlutterStandardTypedData *> *)fetchCertificates:(NSURL *)url;
+/**
+ * Fetches the certificates for a host by setting up an HTTPS GET request and harvests the certificates
+ * that are obtained by the NSURLSessionTaskDelegate protocol. The certificates can then be obtained
+ * with a getCertificates call. Note that the certificate fetching is done in the background so this
+ * constructor will return immediately.
+ *
+ * @param url is the URL to be used for the lookup
+ */
+- (nullable instancetype)initWithURL:(NSURL *_Nonnull)url NS_DESIGNATED_INITIALIZER;
+
+/**
+ * Get the host certificates for the URL. This methods waits until the certficates are available.
+ *
+ * @return the host certificates or nil if there was an error
+ */
+- (NSArray<FlutterStandardTypedData *> *)getCertificates;
+
+// Semaphore for waiting on the certificate fetch to complete
+@property dispatch_semaphore_t certFetchComplete;
+
+// Any error that occurred during the certificate fetch
+@property NSError *certFetchError;
+
+// Host certificates that were fetched
+@property NSArray<FlutterStandardTypedData *> *hostCertificates;
 
 @end
 
+// Implementation of the HostCertificatesFetcher which obtains certificate chains for particular domains in order to implement the pinning.
+@implementation HostCertificatesFetcher
 
-// Timeout in seconds for a getting the host certificates
-static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
+// see interface for documentation
+- (nullable instancetype)initWithURL:(NSURL *_Nonnull)url
+{
+    self = [super init];
+    if (self) {
+        // Create the Session
+        NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        sessionConfig.timeoutIntervalForResource = FETCH_CERTIFICATES_TIMEOUT;
+        NSURLSession* URLSession = [NSURLSession sessionWithConfiguration:sessionConfig delegate:self delegateQueue:nil];
+
+        // Create the request
+        NSMutableURLRequest *certFetchRequest = [NSMutableURLRequest requestWithURL:url];
+        [certFetchRequest setTimeoutInterval:FETCH_CERTIFICATES_TIMEOUT];
+        [certFetchRequest setHTTPMethod:@"GET"];
+
+        // Set up a semaphore so we can detect when the request completed
+        _certFetchComplete = dispatch_semaphore_create(0);
+
+        // Get session task to issue the request, write back any error on completion and signal the semaphore
+        // to indicate that it is complete
+        NSURLSessionTask *certFetchTask = [URLSession dataTaskWithRequest:certFetchRequest
+            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error)
+            {
+                self.certFetchError = error;
+                dispatch_semaphore_signal(self.certFetchComplete);
+            }];
+
+        // Make the request
+        [certFetchTask resume];
+    }
+    return self;
+}
+
+// Collect the host certificates using the certificate check of the NSURLSessionTaskDelegate protocol
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+    didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+    completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler
+{
+    // Ignore any requests that are not related to server trust
+    if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust])
+        return;
+
+    // Check we have a server trust
+    SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
+    if (!serverTrust) {
+        completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+        return;
+    }
+
+    // Check the validity of the server trust
+    if (@available(iOS 12.0, *)) {
+        if (!SecTrustEvaluateWithError(serverTrust, nil)) {
+            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+            return;
+        }
+    }
+    else {
+        SecTrustResultType result;
+        OSStatus status = SecTrustEvaluate(serverTrust, &result);
+        if (errSecSuccess != status) {
+            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+            return;
+        }
+    }
+
+    // Collect all the certs in the chain
+    CFIndex certCount = SecTrustGetCertificateCount(serverTrust);
+    NSMutableArray<FlutterStandardTypedData *> *certs = [NSMutableArray arrayWithCapacity:(NSUInteger)certCount];
+    for (int certIndex = 0; certIndex < certCount; certIndex++) {
+        // Get the chain certificate - note that this function is deprecated from iOS 15 but the
+        // replacement function is only available from iOS 15 and has a very different interface so
+        // we can't use it yet
+        SecCertificateRef cert = SecTrustGetCertificateAtIndex(serverTrust, certIndex);
+        if (!cert) {
+            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+            return;
+        }
+        NSData *certData = (NSData *) CFBridgingRelease(SecCertificateCopyData(cert));
+        FlutterStandardTypedData *certFSTD = [FlutterStandardTypedData typedDataWithBytes:certData];
+        [certs addObject:certFSTD];
+    }
+
+    // Set the host certs to be returned from fetchCertificates
+    _hostCertificates = certs;
+
+    // Fail the challenge as we only wanted the certificates
+    completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+}
+
+// see interface for documentation
+- (NSArray<FlutterStandardTypedData *> *)getCertificates {
+    // Wait on the semaphore which shows when the network request is completed - note we do not use
+    // a timeout here since the NSURLSessionTask has its own timeouts
+    dispatch_semaphore_wait(_certFetchComplete, DISPATCH_TIME_FOREVER);
+
+    // We expect error cancelled because URLSession:task:didReceiveChallenge:completionHandler: always deliberately
+    // fails the challenge because we don't need the request to succeed to retrieve the certificates
+    if (!_certFetchError) {
+        // If no error occurred, the certificate check of the NSURLSessionTaskDelegate protocol has not been called.
+        // Don't return any host certificates
+        NSLog(@"Failed to get host certificates: Error: unknown\n");
+        return nil;
+    }
+    if (_certFetchError && (_certFetchError.code != NSURLErrorCancelled)) {
+        // If an error other than NSURLErrorCancelled occurred, don't return any host certificates
+        NSLog(@"Failed to get host certificates: Error: %@\n", _certFetchError.localizedDescription);
+        return nil;
+    }
+
+    // The host certificates have been collected by the URLSession:task:didReceiveChallenge:completionHandler: method
+    return _hostCertificates;
+}
+
+@end
+
+@interface ApproovHttpClientPlugin()
+
+// Provides any prior initial configuration supplied, to allow a reinitialization caused by
+// a hot restart if the configuration is the same
+@property NSString *initializedConfig;
+
+// Provides a map from the host name of any certificate prefetchers that are currently in flight
+@property NSMutableDictionary<NSString *, HostCertificatesFetcher *> *certPrefetchers;
+
+@end
 
 // ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
 // MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
@@ -51,6 +201,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
                         codec: [FlutterStandardMethodCodec sharedInstance]
                     taskQueue: taskQueue];
     ApproovHttpClientPlugin* instance = [[ApproovHttpClientPlugin alloc] init];
+    instance.certPrefetchers = [[NSMutableDictionary alloc] init];
     [registrar addMethodCallDelegate:instance channel:channel];
 }
 
@@ -129,6 +280,9 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         result([Approov getDeviceID]);
     } else if ([@"getPins" isEqualToString:call.method]) {
         result([Approov getPins:call.arguments[@"pinType"]]);
+     } else if ([@"fetchApproovToken" isEqualToString:call.method]) {
+        [Approov fetchApproovToken:^(ApproovTokenFetchResult *tokenFetchResult) {} :call.arguments[@"url"]];
+        result(nil);
     } else if ([@"fetchApproovTokenAndWait" isEqualToString:call.method]) {
         ApproovTokenFetchResult *tokenFetchResult = [Approov fetchApproovTokenAndWait:call.arguments[@"url"]];
         NSMutableDictionary *tokenFetchResultMap = [NSMutableDictionary dictionary];
@@ -152,16 +306,38 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     } else if ([@"setUserProperty" isEqualToString:call.method]) {
         [Approov setUserProperty:call.arguments[@"property"]];
         result(nil);
-    } else if ([@"fetchHostCertificates" isEqualToString:call.method]) {
-        NSURL *url = [NSURL URLWithString:call.arguments[@"url"]];
+    } else if ([@"prefetchHostCertificates" isEqualToString:call.method]) {
+        NSString *urlString = call.arguments[@"url"];
+        NSURL *url = [NSURL URLWithString:urlString];
         if (url == nil) {
             result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
                 message:NSURLErrorDomain
-                details:[NSString stringWithFormat:@"Fetch host certificates invalid URL: %@", call.arguments[@"url"]]]);
+                details:[NSString stringWithFormat:@"Prefetch host certificates invalid URL: %@", urlString]]);
         } else {
-            HostCertificatesFetcher *hostCertificatesFetcher = [[HostCertificatesFetcher alloc] init];
-            NSArray<FlutterStandardTypedData *> *hostCerts = [hostCertificatesFetcher fetchCertificates:url];
-            result(hostCerts);
+            HostCertificatesFetcher *certPrefetcher = _certPrefetchers[url.host];
+            if (certPrefetcher == nil) {
+                certPrefetcher = [[HostCertificatesFetcher alloc] initWithURL:url];
+                _certPrefetchers[url.host] = certPrefetcher;
+            };
+            result(nil);
+        }
+    } else if ([@"fetchHostCertificates" isEqualToString:call.method]) {
+        NSString *urlString = call.arguments[@"url"];
+        NSURL *url = [NSURL URLWithString:urlString];
+        if (url == nil) {
+            result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
+                message:NSURLErrorDomain
+                details:[NSString stringWithFormat:@"Fetch host certificates invalid URL: %@", urlString]]);
+        } else {
+            HostCertificatesFetcher *certPrefetcher = _certPrefetchers[url.host];
+            if (certPrefetcher == nil) {
+                NSLog(@"No certificate prefetch was performed for: %@\n", urlString);
+                certPrefetcher = [[HostCertificatesFetcher alloc] initWithURL:url];
+            }
+            else {
+                [_certPrefetchers removeObjectForKey:url.host];
+            }
+            result([certPrefetcher getCertificates]);
         }
     } else if ([@"fetchSecureStringAndWait" isEqualToString:call.method]) {
         NSString *newDef = nil;
@@ -193,122 +369,6 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     } else {
         result(FlutterMethodNotImplemented);
     }
-}
-
-@end
-
-// Implementation of the HostCertificatesFetcher which obtains certificate chains for part particular domains in order to implement the pinning.
-@implementation HostCertificatesFetcher
-
-// Fetches the certificates for a host by setting up an HTTPS GET request and harvesting the certificates
-- (NSArray<FlutterStandardTypedData *> *)fetchCertificates:(NSURL *)url
-{
-    // There are no certtificates initially
-    _hostCertificates = nil;
-
-    // Create the Session
-    NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    sessionConfig.timeoutIntervalForResource = FETCH_CERTIFICATES_TIMEOUT;
-    NSURLSession* URLSession = [NSURLSession sessionWithConfiguration:sessionConfig delegate:self delegateQueue:nil];
-
-    // Create the request
-    NSMutableURLRequest *certFetchRequest = [NSMutableURLRequest requestWithURL:url];
-    [certFetchRequest setTimeoutInterval:FETCH_CERTIFICATES_TIMEOUT];
-    [certFetchRequest setHTTPMethod:@"GET"];
-
-    // Set up a semaphore so we can detect when the request completed
-    dispatch_semaphore_t certFetchComplete = dispatch_semaphore_create(0);
-
-    // Get session task to issue the request, write back any error on completion and signal the semaphore
-    // to indicate that it is complete
-    __block NSError *certFetchError = nil;
-    NSURLSessionTask *certFetchTask = [URLSession dataTaskWithRequest:certFetchRequest
-        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error)
-        {
-            certFetchError = error;
-            dispatch_semaphore_signal(certFetchComplete);
-        }];
-
-    // Make the request
-    [certFetchTask resume];
-
-    // Wait on the semaphore which shows when the network request is completed - note we do not use
-    // a timeout here since the NSURLSessionTask has its own timeouts
-    dispatch_semaphore_wait(certFetchComplete, DISPATCH_TIME_FOREVER);
-
-    // We expect error cancelled because URLSession:task:didReceiveChallenge:completionHandler: always deliberately
-    // fails the challenge because we don't need the request to succeed to retrieve the certificates
-    if (!certFetchError) {
-        // If no error occurred, the certificate check of the NSURLSessionTaskDelegate protocol has not been called.
-        //  Don't return any host certificates
-        NSLog(@"Failed to get host certificates: Error: unknown\n");
-        return nil;
-    }
-    if (certFetchError && (certFetchError.code != NSURLErrorCancelled)) {
-        // If an error other than NSURLErrorCancelled occurred, don't return any host certificates
-        NSLog(@"Failed to get host certificates: Error: %@\n", certFetchError.localizedDescription);
-        return nil;
-    }
-
-    // The host certificates have been collected by the URLSession:task:didReceiveChallenge:completionHandler:
-    // method below
-    return _hostCertificates;
-}
-
-// Collect the host certificates using the certificate check of the NSURLSessionTaskDelegate protocol
-- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
-    didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
-    completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler
-{
-    // Ignore any requests that are not related to server trust
-    if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust])
-        return;
-
-    // Check we have a server trust
-    SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
-    if (!serverTrust) {
-        completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
-        return;
-    }
-
-    // Check the validity of the server trust
-    if (@available(iOS 12.0, *)) {
-        if (!SecTrustEvaluateWithError(serverTrust, nil)) {
-            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
-            return;
-        }
-    }
-    else {
-        SecTrustResultType result;
-        OSStatus status = SecTrustEvaluate(serverTrust, &result);
-        if (errSecSuccess != status) {
-            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
-            return;
-        }
-    }
-
-    // Collect all the certs in the chain
-    CFIndex certCount = SecTrustGetCertificateCount(serverTrust);
-    NSMutableArray<FlutterStandardTypedData *> *certs = [NSMutableArray arrayWithCapacity:(NSUInteger)certCount];
-    for (int certIndex = 0; certIndex < certCount; certIndex++) {
-        // Get the chain certificate - note that this function is deprecated from iOS 15 but the
-        // replacement function is only available from iOS 15 and has a very different interface so
-        // we can't use it yet
-        SecCertificateRef cert = SecTrustGetCertificateAtIndex(serverTrust, certIndex);
-        if (!cert) {
-            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
-            return;
-        }
-        NSData *certData = (NSData *) CFBridgingRelease(SecCertificateCopyData(cert));
-        FlutterStandardTypedData *certFSTD = [FlutterStandardTypedData typedDataWithBytes:certData];
-        [certs addObject:certFSTD];
-    }
-
-    // Set the host certs to be returned from fetchCertificates
-    _hostCertificates = certs;
-
-    // Fail the challenge as we only wanted the certificates
-    completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
 }
 
 @end
