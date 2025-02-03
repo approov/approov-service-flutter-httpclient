@@ -25,7 +25,9 @@ import java.net.URL;
 import java.security.cert.Certificate;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 
 import javax.net.ssl.HttpsURLConnection;
 
@@ -44,15 +46,106 @@ import io.flutter.plugin.common.MethodChannel.Result;
 // presented on any particular URL to implement the pinning. Note that the MethodChannel must run on a background
 // thread since it makes blocking calls.
 public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler {
+  // CertificatePrefetcher is a Runnable that fetches the certificates for a given URL. This allows the
+  // certificates to be fetched on a background thread in parallel with other fetches, and with an Approov
+  // token fetch.
+  private class CertificatePrefetcher implements Runnable {
+    // Connect timeout (in ms) for host certificate fetch
+    private static final int FETCH_CERTIFICATES_TIMEOUT_MS = 3000;
+
+    // URL being probed for the certificates
+    private final URL url;
+
+    // Latch to signal completion of the certificate fetch
+    private final CountDownLatch countDownLatch;
+
+    // Any exception from the fetching process, or null otherwise
+    private Exception exception;
+
+    // The host certificates that were fetched, or null if there was an error
+    private final List<byte[]> hostCertificates;
+
+    /**
+     * Constructor for the CertificatePrefetcher, which sets up ready for ansynchronous
+     * execution.
+     * 
+     * @param url The URL to fetch the certificates from.
+     */
+    public CertificatePrefetcher(URL url) {
+      this.url = url;
+      hostCertificates = new ArrayList<>();
+      exception = null;
+      countDownLatch = new CountDownLatch(1);
+    }
+
+    /**
+     * Runs the prefetcher to fetch the certificates from the URL.
+     */
+    @Override
+    public void run() {
+      try {
+        HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
+        connection.setConnectTimeout(FETCH_CERTIFICATES_TIMEOUT_MS);
+        connection.connect();
+        Certificate[] certificates = connection.getServerCertificates();
+        for (Certificate certificate: certificates) {
+          hostCertificates.add(certificate.getEncoded());
+        }
+        connection.disconnect();
+        countDownLatch.countDown();
+      } catch (Exception e) {
+        exception = e;
+        countDownLatch.countDown();
+      }
+    }
+
+    /**
+     * Waits for the certificate fetch to complete and returns the exception if there was one.
+     * 
+     * @return The exception from the fetch, or nil if there was no exception
+     */
+    public Exception getResultException() {
+      try {
+        countDownLatch.await();
+        return exception;
+      } catch (InterruptedException e) {
+        return e;
+      }
+    }
+
+    /**
+     * Returns the host certificates that were fetched. Note that this should only be called after
+     * getResultException to make sure the results have been waited on.
+     * 
+     * @return The host certificates that were fetched.
+     */
+    public List<byte[]> getResultCertificates() {
+      return hostCertificates;
+    }
+  }
+
+  /**
+   * Utility class for providing a callback handler for receiving a token fetch result on an
+   * internal asynchronous request. This is for the prefetch case where the actual result is
+   * not required.
+   */
+  private class InternalCallbackHandler implements Approov.TokenFetchCallback {
+    /**
+     * Construct a new internal callback handler.
+     */
+    InternalCallbackHandler() {
+    }
+
+    @Override
+    public void approovCallback(Approov.TokenFetchResult pResult) {
+    }
+  }
 
   // The MethodChannel for the communication between Flutter and native Android
   //
   // This local reference serves to register the plugin with the Flutter Engine and unregister it
   // when the Flutter Engine is detached from the Activity
   private MethodChannel channel;
-
-  // Connect timeout (in ms) for host certificate fetch
-  private static final int FETCH_CERTIFICATES_TIMEOUT_MS = 3000;
 
   // Application context passed to Approov initialization
   private static Context appContext;
@@ -61,6 +154,9 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // a hot restart if the configuration is the same
   private static String initializedConfig;
 
+  // Map of hostname to current in-flight certificate prefetchers
+  private static Map<String, CertificatePrefetcher> certificatePrefetchers;
+
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
     BinaryMessenger messenger = flutterPluginBinding.getBinaryMessenger();
@@ -68,6 +164,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
               StandardMethodCodec.INSTANCE, messenger.makeBackgroundTaskQueue());
     channel.setMethodCallHandler(this);
     appContext = flutterPluginBinding.getApplicationContext();
+    certificatePrefetchers = new HashMap<>();
   }
 
   @Override
@@ -106,6 +203,13 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
         result.success(Approov.getPins((String) call.argument("pinType")));
       } catch(Exception e) {
         result.error("Approov.getPins", e.getLocalizedMessage(), null);
+      }
+    } else if (call.method.equals("fetchApproovToken")) {
+      try {
+        Approov.fetchApproovToken(new InternalCallbackHandler(), call.argument("url"));
+        result.success(null);
+      } catch(Exception e) {
+        result.error("Approov.fetchApproovToken", e.getLocalizedMessage(), null);
       }
     } else if (call.method.equals("fetchApproovTokenAndWait")) {
       try {
@@ -152,21 +256,38 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       } catch(Exception e) {
         result.error("Approov.setUserProperty", e.getLocalizedMessage(), null);
       }
+    } else if (call.method.equals("prefetchHostCertificates")) {
+      try {
+        final URL url = new URL(call.argument("url"));
+        CertificatePrefetcher certPrefetcher = certificatePrefetchers.get(url.getHost());
+        if (certPrefetcher == null) {
+          certPrefetcher = new CertificatePrefetcher(url);
+          certificatePrefetchers.put(url.getHost(), certPrefetcher);
+          new Thread(certPrefetcher).start();
+        }
+        result.success(null);
+      } catch(Exception e) {
+        result.error("Approov.prefetchHostCertificates", e.getLocalizedMessage(), null);
+      }
     } else if (call.method.equals("fetchHostCertificates")) {
       try {
         final URL url = new URL(call.argument("url"));
-        HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
-        connection.setConnectTimeout(FETCH_CERTIFICATES_TIMEOUT_MS);
-        connection.connect();
-        Certificate[] certificates = connection.getServerCertificates();
-        final List<byte[]> hostCertificates = new ArrayList<>(certificates.length);
-        for (Certificate certificate: certificates) {
-          hostCertificates.add(certificate.getEncoded());
+        CertificatePrefetcher certPrefetcher = certificatePrefetchers.get(url.getHost());
+        if (certPrefetcher == null) {
+          certPrefetcher = new CertificatePrefetcher(url);
+          new Thread(certPrefetcher).start();
+        } else {
+          certificatePrefetchers.remove(url.getHost());
         }
-        connection.disconnect();
-        result.success(hostCertificates);
-      } catch (Exception e) {
-        result.error("fetchHostCertificates", e.getLocalizedMessage(), null);
+        Exception exception = certPrefetcher.getResultException();
+        if (exception != null) {
+          result.error("Approov.fetchHostCertificates", exception.getLocalizedMessage(), null);
+        } else {
+          List<byte[]> hostCertificates = certPrefetcher.getResultCertificates();
+          result.success(hostCertificates);
+        }
+      } catch(Exception e) {
+        result.error("Approov.fetchHostCertificatesy", e.getLocalizedMessage(), null);
       }
     } else if (call.method.equals("fetchSecureStringAndWait")) {
       try {

@@ -229,11 +229,14 @@ class ApproovService {
             "comment": null,
           };
           await _channel.invokeMethod('initialize', arguments);
-          // Use the comment string to initialize now immediately with the non null string
+
+          // Use the comment string to re-initialize now immediately with the non null string
+          // (it is necessary to initialize first before this can be done)
           if (_initialComment != null) {
             arguments["comment"] = _initialComment;
             await _channel.invokeMethod('initialize', arguments);
           }
+          
           // set the user property to represent the framework being used
           // set the user property
           arguments = <String, dynamic>{
@@ -384,20 +387,12 @@ class ApproovService {
     _exclusionURLRegexs.remove(urlRegex);
   }
 
-  /// Prefetches to lower the effective latency of a subsequent token or secure string fetch by
+  /// Starts a prefetch to lower the effective latency of a subsequent token or secure string fetch by
   /// starting the operation earlier so the subsequent fetch should be able to use cached data.
-  /// You should call this without using "await" so it can happen asynchronously.
   static void prefetch() async {
     try {
-      await _initializeIfRequired();
-      _TokenFetchResult result =
-          await ApproovService._fetchApproovToken("approov.io");
-      if ((result.tokenFetchStatus == _TokenFetchStatus.SUCCESS) ||
-          (result.tokenFetchStatus == _TokenFetchStatus.UNKNOWN_URL) ||
-          (result.tokenFetchStatus == _TokenFetchStatus.UNPROTECTED_URL))
-        Log.d("$TAG: prefetch success");
-      else
-        Log.d("$TAG: prefetch failure: ${result.tokenFetchStatus.name}");
+      await ApproovService._prefetchApproovToken("approov.io");
+      Log.d("$TAG: prefetch started");
     } on ApproovException catch (e) {
       Log.e("$TAG: prefetch: exception ${e.cause}");
     }
@@ -706,7 +701,25 @@ class ApproovService {
     }
   }
 
-  /// Internal method for fetching an Approov token from the SDK.
+  /// Internal method for prefetching an Approov token from the SDK. This does a
+  /// background fetch and does not wait until the token is available.
+  ///
+  /// @param url provides the top level domain URL for which a token is being fetched
+  /// @throws ApproovException if there was a problem
+  static Future<void> _prefetchApproovToken(String url) async {
+    await _initializeIfRequired();
+    final Map<String, dynamic> arguments = <String, dynamic>{
+      "url": url,
+    };
+    try {
+      await _channel.invokeMethod('fetchApproovToken', arguments);
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
+  /// Internal method for fetching an Approov token from the SDK. Note that this will
+  /// block until the token is available.
   ///
   /// @param url provides the top level domain URL for which a token is being fetched
   /// @return results of fetching a token
@@ -934,6 +947,26 @@ class ApproovService {
     }
   }
 
+  /// Determines if certificates for the host have been cached or not. If they have not been cached then a
+  /// prefetch is initiated to lower the effective latency of the probing by allowing it to run in parallel with
+  /// any Approov token fetch. Note that the prefetch is done asynchronously at the platform level.
+  ///
+  /// @param host is the URL specifying the host for which to retrieve the certificates (e.g. "www.example.com")
+  static Future<void> _prefetchHostCertificates(Uri url) async {
+    List<Uint8List>? hostCertificates = _hostCertificates[url.host];
+    if (hostCertificates == null) {
+      Log.d("$TAG: prefetching host certificates for ${url}");
+      final Map<String, dynamic> arguments = <String, dynamic>{
+        "url": url.toString(),
+      };
+      try {
+          await _channel.invokeMethod('prefetchHostCertificates', arguments);
+      } catch (err) {
+        // do not throw an exception
+      }
+    }
+  }
+
   /// Retrieves the certificates in the chain for the specified host. These are obtained at the platform level and we
   /// cache them so subsequent requests don't require another probe.
   ///
@@ -941,11 +974,11 @@ class ApproovService {
   /// @return a list of certificates (each as a Uint8list) for the host specified in the URL, null if an error occurred,
   /// or an empty list if no suitable certificates are available.
   static Future<List<Uint8List>?> _getHostCertificates(Uri url) async {
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "url": url.toString(),
-    };
     List<Uint8List>? hostCertificates = _hostCertificates[url.host];
     if (hostCertificates == null) {
+      final Map<String, dynamic> arguments = <String, dynamic>{
+        "url": url.toString(),
+      };
       try {
         // fetch the certificates using the platform layer
         List fetchedHostCertificates =
@@ -1397,11 +1430,12 @@ class ApproovHttpClient implements HttpClient {
   /// @param url for which to set up pinning
   /// @return the new HTTP client
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
+    // prefetch the host certificates for the URL so this can be done in parallel with the token fetch
+    await ApproovService._prefetchHostCertificates(url);
+
     // fetch an Approov token to get the latest configuration - but note we do not fail if a token fetch was not possible
-    _TokenFetchResult fetchResult =
-        await ApproovService._fetchApproovToken(url.host);
-    Log.d(
-        "$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+    _TokenFetchResult fetchResult = await ApproovService._fetchApproovToken(url.host);
+    Log.d("$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
     // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
     // config clears the config changed state)
@@ -1421,8 +1455,7 @@ class ApproovHttpClient implements HttpClient {
         (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
       // perform another attempted token fetch
       fetchResult = await ApproovService._fetchApproovToken(url.host);
-      Log.d(
-          "$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+      Log.d("$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
       // if we are forced to update pins then this likely means that no pins were ever fetched and in this
       // case we must force a no connection when so that another fetched can be tried again - this is because

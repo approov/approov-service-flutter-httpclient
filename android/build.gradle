@@ -23,6 +23,8 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 
 android {
+    namespace 'com.criticalblue.approov_service_flutter_httpclient'
+
     compileSdkVersion 29
 
     defaultConfig {
