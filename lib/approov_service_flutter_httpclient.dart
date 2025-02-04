@@ -36,6 +36,7 @@ import 'package:logger/logger.dart';
 import 'package:pem/pem.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mutex/mutex.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 // logger
 final Logger Log = Logger();
@@ -167,6 +168,12 @@ class ApproovService {
   // header that will be added to Approov enabled requests
   static const String APPROOV_HEADER = "Approov-Token";
 
+  // key name to be used for any cached Approov token
+  static const String CACHED_TOKEN_KEY = "io.approov.cachedToken";
+
+  // refresh interval of updating the Approov tpken cache of once per minute
+  static const int CACHE_REFRESH_INTERVAL = 60 * 1000;
+
   // any prefix to be added before the Approov token, such as "Bearer "
   static const String APPROOV_TOKEN_PREFIX = "";
 
@@ -201,9 +208,21 @@ class ApproovService {
   // map of URL regexs that should be excluded from any Approov protection, mapped to the regular expressions
   static Map<String, RegExp> _exclusionURLRegexs = {};
 
+  // any domain to be used for cached Approov tokens or null if not set
+  static String? _cachedDomain = null;
+
+  // map of URL regexs that should allow cached Approov tokens, mapped to the regular expressions
+  static Map<String, RegExp> _cachedURLRegexs = {};
+
   // cached host certificates obtaining from probing the relevant host domains
   static Map<String, List<Uint8List>?> _hostCertificates =
       Map<String, List<Uint8List>?>();
+
+  // secure storage for holding cached Approov tokens and certificates
+  static final _secureStorage = FlutterSecureStorage();
+
+  // stopwatch for timing Approov token cache refreshes
+  static Stopwatch? _cacheRefreshStopwatch = null;
 
   /// Internal method to initialize the Approov SDK if needed using a previously provided initial configuration string.
   /// Initialization is performed lazily based on the first actual use of the underlying SDK. This is necessary due to
@@ -365,11 +384,12 @@ class ApproovService {
   /// you are responsible for ensuring that there is always a possibility of calling a non-excluded
   /// URL, or you should make an explicit call to fetchToken if there are persistent pinning failures.
   /// Conversely, use of those option may allow a connection to be established before any dynamic pins
-  /// have been received via Approov, thus potentially opening the channel to a MitM.
+  /// have been received via Approov, thus potentially opening the channel to a MitM. See
+  /// https://blog.0xba1.xyz/0522/dart-flutter-regexp/ for information on regexp construction, the
+  /// implementation looks for a hasMatch on the URL.
   ///
   /// @param urlRegex is the regular expression that will be compared against URLs to exclude them
   static void addExclusionURLRegex(String urlRegex) {
-    Log.d("$TAG: addExclusionURLRegex $urlRegex");
     try {
       RegExp regExp = RegExp(urlRegex);
       _exclusionURLRegexs[urlRegex] = regExp;
@@ -385,6 +405,53 @@ class ApproovService {
   static void removeExclusionURLRegex(String urlRegex) {
     Log.d("$TAG: removeExclusionURLRegex $urlRegex");
     _exclusionURLRegexs.remove(urlRegex);
+  }
+
+  /// Sets a cached domain to be used for cached URLs. These are URLs where cached Approov tokens
+  /// may be used to accelerate the request. This sets a domain that should be used for those
+  /// requests rather than the one derived from the URL. It is necessary to use this method in order
+  /// to enable Approov token caching. This makes it possible for the cached requests to use an
+  /// Approov token with a different signing secret to the Approov tokens used on uncached requests.
+  /// The account configuration to ensure this must be done using the Approov CLI. This aspect is
+  /// important because the use of cached Approov tokens opens an attacker vector whereby cached
+  /// unexpired Approov tokens might be exfiltrated from the app, and this ensures that Approov tokens
+  /// that are cached use a different signing key to weaken the impact of such an attack.
+  ///
+  /// @param domin is the domain to be used for cached Approov tokens
+  static void setCachedDomain(String domain) {
+    Log.d("$TAG: setCachedDomain $domain");
+    _cachedDomain = domain;
+  }
+
+  /// Adds an cached URL regular expression. If a URL for a request matches this regular expression
+  /// then it may use cached Approov tokens for the request to substantially lower the latency before
+  /// the request can be made. This is particularly useful for accelerating cold start times for URLs
+  /// that need to be accessed immediately and any delay might impact the user experience. Note though
+  /// that this option must be used with EXTREME CAUTION and will require corresponding changes on
+  /// the backend. In particular, the use of cached Approov tokens means that these requests may
+  /// actually receive expired tokens, and in the backend integration must be able to deal with this.
+  /// It is also NECESSARY that the setCachedDomain method is used to ensure that cached tokens
+  /// are from a different domain, with Approov tokens used a different signing secret from those used
+  /// for uncached requests. See https://blog.0xba1.xyz/0522/dart-flutter-regexp/ for information on
+  /// regexp construction, the implementation looks for a hasMatch on the URL.
+  ///
+  /// @param urlRegex is the regular expression that will be compared against URLs to cache them
+  static void addCachedURLRegex(String urlRegex) {
+    try {
+      RegExp regExp = RegExp(urlRegex);
+      _cachedURLRegexs[urlRegex] = regExp;
+      Log.d("$TAG: addCachedURLRegex $urlRegex");
+    } on FormatException catch (e) {
+      Log.d("$TAG: addCachedURLRegex $urlRegex: ${e.message}");
+    }
+  }
+
+  /// Removes a cached URL regular expression previously added using addCachedURLRegex.
+  ///
+  /// @param urlRegex is the regular expression that will be compared against URLs to exclude them
+  static void removeCachedURLRegex(String urlRegex) {
+    Log.d("$TAG: removeCachedURLRegex $urlRegex");
+    _cachedURLRegexs.remove(urlRegex);
   }
 
   /// Starts a prefetch to lower the effective latency of a subsequent token or secure string fetch by
@@ -506,8 +573,9 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
     // fetch the Approov token
-    _TokenFetchResult fetchResult = await _fetchApproovToken(url);
-    Log.d("$TAG: fetchToken for $url: ${fetchResult.loggableToken}");
+    final uri = Uri.parse(url);
+    _TokenFetchResult fetchResult = await _fetchApproovToken(uri);
+    Log.d("$TAG: fetchToken for ${uri.host}: ${fetchResult.loggableToken}");
 
     // check the status of Approov token fetch
     if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) ||
@@ -521,11 +589,11 @@ class ApproovService {
       // we are unable to get an Approov token due to network conditions so the request can
       // be retried by the user later
       throw new ApproovNetworkException(
-          "fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
+          "fetchToken for ${uri.host}: ${fetchResult.tokenFetchStatus.name}");
     } else {
       // we have failed to get an Approov token with a more serious permanent error
       throw ApproovException(
-          "fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
+          "fetchToken for ${uri.host}: ${fetchResult.tokenFetchStatus.name}");
     }
   }
 
@@ -719,21 +787,109 @@ class ApproovService {
   }
 
   /// Internal method for fetching an Approov token from the SDK. Note that this will
-  /// block until the token is available.
+  /// block until the token is available. This also checks if the URL is one that can
+  /// use a cached token and manages reading and writing Approov tokens from
+  /// secure app storage.
   ///
-  /// @param url provides the top level domain URL for which a token is being fetched
+  /// @param uri provides the URI for which a token is being fetched
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
-  static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
+  static Future<_TokenFetchResult> _fetchApproovToken(Uri uri) async {
+    // the SDK must always be initialized
     await _initializeIfRequired();
+
+    // check if the URL matches one of the cached regexs and a cached domain is setup
+    bool isCachable = false;
+    if (_cachedDomain != null) {
+      final urlString = uri.toString();
+      for (RegExp regExp in _cachedURLRegexs.values) {
+        if (regExp.hasMatch(urlString)) {
+          isCachable = true;
+        }
+      }
+    }
+
+    // setup the arguments for the Approov token fetch
     final Map<String, dynamic> arguments = <String, dynamic>{
-      "url": url,
+      "url": uri.host,
     };
+
+    // handle potential exceptions
     try {
+      // on iOS ensure that the keychain is accessible even if the app is running
+      // in the background
+      final options = IOSOptions(accessibility: KeychainAccessibility.first_unlock);
+
+      // if the request is cacheable then lookup to see if we have a cached token
+      // and use it if so
+      if (isCachable) {
+        String? cachedFetchResults = await _secureStorage.read(key: CACHED_TOKEN_KEY, iOptions: options);
+        if (cachedFetchResults != null) {
+          // we have a cached fetch results so decode them back into a map
+          Map cachedFetchResultsMap = jsonDecode(cachedFetchResults);
+          if (cachedFetchResultsMap != null) {
+            // we start a prefetch of a new Approov token in the background to make
+            // any subsequent call for an uncached URL faster
+            await _channel.invokeMethod('fetchApproovToken', arguments);
+
+            // provide the cached results
+            Log.d("$TAG: using cached Approov token from $_cachedDomain for domain ${uri.host}");
+            return _TokenFetchResult.fromTokenFetchResultMap(cachedFetchResultsMap);
+          }
+          else {
+            Log.d("$TAG: invalid cached Approov token from $_cachedDomain for domain ${uri.host}");
+          }
+        }
+        else {
+          Log.d("$TAG: no cached Approov token from $_cachedDomain for domain ${uri.host}");
+        }
+      }
+
+      // fetch the Approov token
       Map tokenFetchResultMap =
           await _channel.invokeMethod('fetchApproovTokenAndWait', arguments);
       _TokenFetchResult tokenFetchResult =
           _TokenFetchResult.fromTokenFetchResultMap(tokenFetchResultMap);
+
+      // if the fetch was successfu and we are doing any token caching then we might
+      // also need to do a fetch from the cached domain to update the cached token
+      if ((tokenFetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) && (_cachedDomain != null)) {
+        // check if enough time has passed since the last refresh to perform another one
+        bool performRefresh = true;
+        if (_cacheRefreshStopwatch != null) {
+          performRefresh = (_cacheRefreshStopwatch!.elapsedMilliseconds > CACHE_REFRESH_INTERVAL);
+        }
+
+        // perform the Approov token refresh if required
+        if (performRefresh) {
+          // create a URL for fetching the cached domain
+          final Map<String, dynamic> cachedRefreshArgs = <String, dynamic>{
+            "url": _cachedDomain!,
+          };
+
+          // fetch the Approov token
+          Map cachedFetchResultMap =
+            await _channel.invokeMethod('fetchApproovTokenAndWait', cachedRefreshArgs);
+          _TokenFetchResult cachedFetchResult =
+            _TokenFetchResult.fromTokenFetchResultMap(cachedFetchResultMap);
+
+          // store the results for the domain if it was successful
+          if (cachedFetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+            String jsonFetchResults = jsonEncode(cachedFetchResultMap);
+            await _secureStorage.write(key: CACHED_TOKEN_KEY, value: jsonFetchResults,
+                    iOptions: options);
+            Log.d("$TAG: updated cached Approov token from ${_cachedDomain!}");
+          }
+          else {
+            Log.d("$TAG: failed to update cached Approov token from ${_cachedDomain!}");
+          }
+
+          // update the stopwatch for timing the next update
+          _cacheRefreshStopwatch = Stopwatch()..start();
+        }
+      }
+
+      // return the token fetch result
       return tokenFetchResult;
     } catch (err) {
       throw ApproovException('$err');
@@ -840,12 +996,12 @@ class ApproovService {
     }
 
     // request an Approov token for the host domain
-    String host = request.uri.host;
-    _TokenFetchResult fetchResult = await _fetchApproovToken(host);
+    _TokenFetchResult fetchResult = await _fetchApproovToken(request.uri);
 
     // provide information about the obtained token or error (note "approov token -check" can
     // be used to check the validity of the token and if you use token annotations they
     // will appear here to determine why a request is being rejected)
+    String host = request.uri.host;
     Log.d("$TAG: updateRequest for $host: ${fetchResult.loggableToken}");
 
     // if there was a configuration change we clear it by fetching the new config and clearing
@@ -1434,7 +1590,7 @@ class ApproovHttpClient implements HttpClient {
     await ApproovService._prefetchHostCertificates(url);
 
     // fetch an Approov token to get the latest configuration - but note we do not fail if a token fetch was not possible
-    _TokenFetchResult fetchResult = await ApproovService._fetchApproovToken(url.host);
+    _TokenFetchResult fetchResult = await ApproovService._fetchApproovToken(url);
     Log.d("$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
     // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
@@ -1454,7 +1610,7 @@ class ApproovHttpClient implements HttpClient {
     if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
         (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
       // perform another attempted token fetch
-      fetchResult = await ApproovService._fetchApproovToken(url.host);
+      fetchResult = await ApproovService._fetchApproovToken(url);
       Log.d("$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
       // if we are forced to update pins then this likely means that no pins were ever fetched and in this
