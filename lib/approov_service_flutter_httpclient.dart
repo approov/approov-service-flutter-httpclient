@@ -236,7 +236,7 @@ class ApproovService {
             arguments["comment"] = _initialComment;
             await _channel.invokeMethod('initialize', arguments);
           }
-          
+
           // set the user property to represent the framework being used
           // set the user property
           arguments = <String, dynamic>{
@@ -369,7 +369,6 @@ class ApproovService {
   ///
   /// @param urlRegex is the regular expression that will be compared against URLs to exclude them
   static void addExclusionURLRegex(String urlRegex) {
-    Log.d("$TAG: addExclusionURLRegex $urlRegex");
     try {
       RegExp regExp = RegExp(urlRegex);
       _exclusionURLRegexs[urlRegex] = regExp;
@@ -947,35 +946,40 @@ class ApproovService {
     }
   }
 
-  /// Determines if certificates for the host have been cached or not. If they have not been cached then a
-  /// prefetch is initiated to lower the effective latency of the probing by allowing it to run in parallel with
-  /// any Approov token fetch. Note that the prefetch is done asynchronously at the platform level.
+  /// Prefetches the certificates for the specified URL if they have not been previously
+  /// cached for the host used in the URL. This prefetch mey be initiated to lower the
+  /// effective latency of the probing by allowing it to run in parallel with any Approov
+  /// token fetch. Note that the prefetch is done asynchronously at the platform level.
   ///
-  /// @param host is the URL specifying the host for which to retrieve the certificates (e.g. "www.example.com")
+  /// @param url for where to retrieve the certificates with a GET request
   static Future<void> _prefetchHostCertificates(Uri url) async {
     List<Uint8List>? hostCertificates = _hostCertificates[url.host];
     if (hostCertificates == null) {
+      // certificates are not cached so we need to prefetch them
       Log.d("$TAG: prefetching host certificates for ${url}");
       final Map<String, dynamic> arguments = <String, dynamic>{
         "url": url.toString(),
       };
       try {
-          await _channel.invokeMethod('prefetchHostCertificates', arguments);
+        await _channel.invokeMethod('prefetchHostCertificates', arguments);
       } catch (err) {
         // do not throw an exception
       }
     }
   }
 
-  /// Retrieves the certificates in the chain for the specified host. These are obtained at the platform level and we
-  /// cache them so subsequent requests don't require another probe.
+  /// Retrieves the certificates in the chain for the specified URL. These may be cached based on the host
+  /// used in the URL (since the certificates are host rather than URL specific). If the certificates are
+  /// not cached then they are obtained at the platform level and we cache them so subsequent requests don't
+  /// require another probe.
   ///
-  /// @param host is the URL specifying the host for which to retrieve the certificates (e.g. "www.example.com")
+  /// @param url for where to retrieve the certificates with a GET request
   /// @return a list of certificates (each as a Uint8list) for the host specified in the URL, null if an error occurred,
   /// or an empty list if no suitable certificates are available.
   static Future<List<Uint8List>?> _getHostCertificates(Uri url) async {
     List<Uint8List>? hostCertificates = _hostCertificates[url.host];
     if (hostCertificates == null) {
+      // the certificates are not cached so we need to fetch them
       final Map<String, dynamic> arguments = <String, dynamic>{
         "url": url.toString(),
       };
@@ -1029,9 +1033,9 @@ class ApproovService {
   /// Gets all certificates of a host that match the Approov pins for that host. A match is determined by comparing
   /// the certificate's SPKI's SHA256 digest with the Approov pins. We firstly get the certificate chain for the
   /// host (which may have been previously cached) and then we restrict it to those corresponding to pinned
-  /// certifificates.
+  /// certificates).
   ///
-  /// @param url of the host that is being pinned
+  /// @param url to be used to obtain certificates for a particular host that is being pinned
   /// @param approovPins is the set of pins for the host as configured in Approov
   /// @return a list of host certificates that match the Approov pins
   static Future<List<Uint8List>> _hostPinCertificates(
@@ -1431,11 +1435,17 @@ class ApproovHttpClient implements HttpClient {
   /// @return the new HTTP client
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
     // prefetch the host certificates for the URL so this can be done in parallel with the token fetch
+    final stopWatch = Stopwatch();
+    stopWatch.start();
     await ApproovService._prefetchHostCertificates(url);
+    final prefetchTime = stopWatch.elapsedMilliseconds;
 
     // fetch an Approov token to get the latest configuration - but note we do not fail if a token fetch was not possible
-    _TokenFetchResult fetchResult = await ApproovService._fetchApproovToken(url.host);
-    Log.d("$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+    _TokenFetchResult fetchResult =
+        await ApproovService._fetchApproovToken(url.host);
+    final tokenFetchTime = stopWatch.elapsedMilliseconds - prefetchTime;
+    Log.d(
+        "$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}, prefetch ${prefetchTime}ms, tokenFetch ${tokenFetchTime}ms");
 
     // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
     // config clears the config changed state)
@@ -1455,7 +1465,8 @@ class ApproovHttpClient implements HttpClient {
         (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
       // perform another attempted token fetch
       fetchResult = await ApproovService._fetchApproovToken(url.host);
-      Log.d("$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+      Log.d(
+          "$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
       // if we are forced to update pins then this likely means that no pins were ever fetched and in this
       // case we must force a no connection when so that another fetched can be tried again - this is because
@@ -1497,6 +1508,9 @@ class ApproovHttpClient implements HttpClient {
       SecurityContext securityContext =
           await ApproovService._pinnedSecurityContext(url, approovPins);
       newHttpClient = HttpClient(context: securityContext);
+      final pinningTime =
+          stopWatch.elapsedMilliseconds - tokenFetchTime - prefetchTime;
+      Log.d("$TAG: client ready for ${url.host}, pinning ${pinningTime}ms");
     }
 
     // remember the connected host so we don't have to repeat this for connections to the same host
