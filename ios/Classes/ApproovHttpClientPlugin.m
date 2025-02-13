@@ -27,8 +27,10 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // is called upon initial connection to get the certificates but the connection is dropped at that point.
 @interface HostCertificatesFetcher: NSObject<NSURLSessionTaskDelegate>
 
-/* Standard initialiser not applicable. */
-- (nullable instancetype)init NS_UNAVAILABLE;
+/**
+ * Initialize ready to fetch certificates for a host.
+ */
+- (nullable instancetype)init;
 
 /**
  * Fetches the certificates for a host by setting up an HTTPS GET request and harvests the certificates
@@ -38,7 +40,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
  *
  * @param url is the URL to be used for the lookup
  */
-- (nullable instancetype)initWithURL:(NSURL *_Nonnull)url NS_DESIGNATED_INITIALIZER;
+- (void)fetchWithURL:(NSURL *_Nonnull)url;
 
 /**
  * Get the host certificates for the URL. This methods waits until the certficates are available.
@@ -46,6 +48,9 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
  * @return the host certificates or nil if there was an error
  */
 - (NSArray<FlutterStandardTypedData *> *)getCertificates;
+
+// NSURLSession to use for the certificate fetch
+@property NSURLSession *session;
 
 // Semaphore for waiting on the certificate fetch to complete
 @property dispatch_semaphore_t certFetchComplete;
@@ -62,36 +67,43 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 @implementation HostCertificatesFetcher
 
 // see interface for documentation
-- (nullable instancetype)initWithURL:(NSURL *_Nonnull)url
+- (nullable instancetype)init
 {
     self = [super init];
     if (self) {
         // Create the Session
         NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         sessionConfig.timeoutIntervalForResource = FETCH_CERTIFICATES_TIMEOUT;
-        NSURLSession* URLSession = [NSURLSession sessionWithConfiguration:sessionConfig delegate:self delegateQueue:nil];
-
-        // Create the request
-        NSMutableURLRequest *certFetchRequest = [NSMutableURLRequest requestWithURL:url];
-        [certFetchRequest setTimeoutInterval:FETCH_CERTIFICATES_TIMEOUT];
-        [certFetchRequest setHTTPMethod:@"GET"];
+        NSOperationQueue *queue = [[NSOperationQueue alloc] init];
+        queue.qualityOfService = NSQualityOfServiceUserInteractive;
+        _session = [NSURLSession sessionWithConfiguration:sessionConfig delegate:self delegateQueue:queue];
 
         // Set up a semaphore so we can detect when the request completed
         _certFetchComplete = dispatch_semaphore_create(0);
-
-        // Get session task to issue the request, write back any error on completion and signal the semaphore
-        // to indicate that it is complete
-        NSURLSessionTask *certFetchTask = [URLSession dataTaskWithRequest:certFetchRequest
-            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error)
-            {
-                self.certFetchError = error;
-                dispatch_semaphore_signal(self.certFetchComplete);
-            }];
-
-        // Make the request
-        [certFetchTask resume];
     }
     return self;
+}
+
+// see interface for documentation
+- (void)fetchWithURL:(NSURL *_Nonnull)url
+{
+    // Create the request
+    NSMutableURLRequest *certFetchRequest = [NSMutableURLRequest requestWithURL:url];
+    [certFetchRequest setTimeoutInterval:FETCH_CERTIFICATES_TIMEOUT];
+    [certFetchRequest setHTTPMethod:@"GET"];
+
+    // Get session task to issue the request, write back any error on completion and signal the semaphore
+    // to indicate that it is complete
+    NSURLSessionDataTask *certFetchTask = [_session dataTaskWithRequest:certFetchRequest
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error)
+        {
+            self.certFetchError = error;
+            dispatch_semaphore_signal(self.certFetchComplete);
+        }];
+
+    // Make the request
+    certFetchTask.priority = NSURLSessionTaskPriorityHigh;
+    [certFetchTask resume];
 }
 
 // Collect the host certificates using the certificate check of the NSURLSessionTaskDelegate protocol
@@ -160,18 +172,19 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     // fails the challenge because we don't need the request to succeed to retrieve the certificates
     if (!_certFetchError) {
         // If no error occurred, the certificate check of the NSURLSessionTaskDelegate protocol has not been called.
-        // Don't return any host certificates
-        NSLog(@"Failed to get host certificates: Error: unknown\n");
+        // Don't return any host certificates.
+        NSLog(@"Failed to get host certificates\n");
         return nil;
     }
-    if (_certFetchError && (_certFetchError.code != NSURLErrorCancelled)) {
+    else if (_certFetchError.code != NSURLErrorCancelled) {
         // If an error other than NSURLErrorCancelled occurred, don't return any host certificates
         NSLog(@"Failed to get host certificates: Error: %@\n", _certFetchError.localizedDescription);
         return nil;
     }
-
-    // The host certificates have been collected by the URLSession:task:didReceiveChallenge:completionHandler: method
-    return _hostCertificates;
+    else {
+        // The host certificates have been collected by the URLSession:task:didReceiveChallenge:completionHandler: method
+        return _hostCertificates;
+    }
 }
 
 @end
@@ -316,7 +329,8 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         } else {
             HostCertificatesFetcher *certPrefetcher = _certPrefetchers[url.host];
             if (certPrefetcher == nil) {
-                certPrefetcher = [[HostCertificatesFetcher alloc] initWithURL:url];
+                certPrefetcher = [[HostCertificatesFetcher alloc] init];
+                [certPrefetcher fetchWithURL:url];
                 _certPrefetchers[url.host] = certPrefetcher;
             };
             result(nil);
@@ -332,7 +346,8 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             HostCertificatesFetcher *certPrefetcher = _certPrefetchers[url.host];
             if (certPrefetcher == nil) {
                 NSLog(@"No certificate prefetch was performed for: %@\n", urlString);
-                certPrefetcher = [[HostCertificatesFetcher alloc] initWithURL:url];
+                certPrefetcher = [[HostCertificatesFetcher alloc] init];
+                [certPrefetcher fetchWithURL:url];
             }
             else {
                 [_certPrefetchers removeObjectForKey:url.host];
