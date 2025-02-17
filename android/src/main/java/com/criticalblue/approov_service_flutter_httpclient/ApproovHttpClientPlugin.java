@@ -18,6 +18,8 @@
 package com.criticalblue.approov_service_flutter_httpclient;
 
 import android.content.Context;
+import android.os.Looper;
+import android.os.Handler;
 
 import com.criticalblue.approovsdk.Approov;
 
@@ -49,37 +51,35 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // CertificatePrefetcher is a Runnable that fetches the certificates for a given URL. This allows the
   // certificates to be fetched on a background thread in parallel with other fetches, and with an Approov
   // token fetch.
-  private class CertificatePrefetcher implements Runnable {
+  private class CertificateFetcher implements Runnable {
     // Connect timeout (in ms) for host certificate fetch
     private static final int FETCH_CERTIFICATES_TIMEOUT_MS = 3000;
+
+    // Handler to be used to call back on the main thread
+    private Handler handler;
+
+    // ID for the transaction
+    private final String transactionID;
 
     // URL being probed for the certificates
     private final URL url;
 
-    // Latch to signal completion of the certificate fetch
-    private final CountDownLatch countDownLatch;
-
-    // Any exception from the fetching process, or null otherwise
-    private Exception exception;
-
-    // The host certificates that were fetched, or null if there was an error
-    private final List<byte[]> hostCertificates;
-
     /**
-     * Constructor for the CertificatePrefetcher, which sets up ready for ansynchronous
+     * Constructor for the CertificateFetcher, which sets up ready for ansynchronous
      * execution.
      * 
+     * @param handler is the Handler to be used to call back on the main thread
+     * @param transactionID is the String ID to be used to identify the transaction
      * @param url The URL to fetch the certificates from.
      */
-    public CertificatePrefetcher(URL url) {
+    public CertificateFetcher(Handler handler, String transactionID, URL url) {
+      this.handler = handler;
+      this.transactionID = transactionID;
       this.url = url;
-      hostCertificates = new ArrayList<>();
-      exception = null;
-      countDownLatch = new CountDownLatch(1);
     }
 
     /**
-     * Runs the prefetcher to fetch the certificates from the URL.
+     * Runs to fetch the certificates from the URL and send then back to Dart.
      */
     @Override
     public void run() {
@@ -88,39 +88,21 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
         connection.setConnectTimeout(FETCH_CERTIFICATES_TIMEOUT_MS);
         connection.connect();
         Certificate[] certificates = connection.getServerCertificates();
+        List<byte[]> hostCertificates = new ArrayList<>();
         for (Certificate certificate: certificates) {
           hostCertificates.add(certificate.getEncoded());
         }
         connection.disconnect();
-        countDownLatch.countDown();
+        Map<String, Object> resultMap = new HashMap<>();
+        resultMap.put("TransactionID", transactionID);
+        resultMap.put("Certificates", hostCertificates);
+        handler.post(() -> channel.invokeMethod("response", resultMap));
       } catch (Exception e) {
-        exception = e;
-        countDownLatch.countDown();
+        Map<String, Object> resultMap = new HashMap<>();
+        resultMap.put("TransactionID", transactionID);
+        resultMap.put("Exception", e.getLocalizedMessage());
+        handler.post(() -> channel.invokeMethod("response", resultMap));
       }
-    }
-
-    /**
-     * Waits for the certificate fetch to complete and returns the exception if there was one.
-     * 
-     * @return The exception from the fetch, or nil if there was no exception
-     */
-    public Exception getResultException() {
-      try {
-        countDownLatch.await();
-        return exception;
-      } catch (InterruptedException e) {
-        return e;
-      }
-    }
-
-    /**
-     * Returns the host certificates that were fetched. Note that this should only be called after
-     * getResultException to make sure the results have been waited on.
-     * 
-     * @return The host certificates that were fetched.
-     */
-    public List<byte[]> getResultCertificates() {
-      return hostCertificates;
     }
   }
 
@@ -129,15 +111,38 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
    * internal asynchronous request. This is for the prefetch case where the actual result is
    * not required.
    */
-  private class InternalCallbackHandler implements Approov.TokenFetchCallback {
+  private class InternalCallBackHandler implements Approov.TokenFetchCallback {
+    // Handler to be used to call back on the main thread
+    private Handler handler;
+
+    // handle identfifer for the transaction
+    private final String transactionID;
+
     /**
      * Construct a new internal callback handler.
+     * 
+     * @param handler is the Handler to be used to call back on the main thread
+     * @param transactionID is the String ID to be used to identify the transaction
      */
-    InternalCallbackHandler() {
+    InternalCallBackHandler(Handler handler, String transactionID) {
+      this.handler = handler;
+      this.transactionID = transactionID;
     }
 
     @Override
-    public void approovCallback(Approov.TokenFetchResult pResult) {
+    public void approovCallback(Approov.TokenFetchResult tokenFetchResult) {
+      Map<String, Object> resultMap = new HashMap<>();
+      resultMap.put("TransactionID", transactionID);
+      resultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
+      resultMap.put("Token", tokenFetchResult.getToken());
+      resultMap.put("SecureString", tokenFetchResult.getSecureString());
+      resultMap.put("ARC", tokenFetchResult.getARC());
+      resultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());
+      resultMap.put("IsConfigChanged", tokenFetchResult.isConfigChanged());
+      resultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
+      resultMap.put("MeasurementConfig", tokenFetchResult.getMeasurementConfig());
+      resultMap.put("LoggableToken", tokenFetchResult.getLoggableToken());
+      handler.post(() -> channel.invokeMethod("response", resultMap));
     }
   }
 
@@ -154,17 +159,28 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // a hot restart if the configuration is the same
   private static String initializedConfig;
 
-  // Map of hostname to current in-flight certificate prefetchers
-  private static Map<String, CertificatePrefetcher> certificatePrefetchers;
+  // Handler for the main thread to allow call backs since they must be in the context of that thread
+  private Handler handler;
+
+  // Next transaction ID to be used for asynchronous operations
+  private static int nextID;
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
     BinaryMessenger messenger = flutterPluginBinding.getBinaryMessenger();
-    channel = new MethodChannel(messenger, "approov_service_flutter_httpclient",
-              StandardMethodCodec.INSTANCE, messenger.makeBackgroundTaskQueue());
+    channel = new MethodChannel(messenger, "approov_service_flutter_httpclient");
     channel.setMethodCallHandler(this);
     appContext = flutterPluginBinding.getApplicationContext();
-    certificatePrefetchers = new HashMap<>();
+    handler = new Handler(Looper.getMainLooper());
+  }
+
+  /**
+   * Gets the next unique transaction ID to be used for asynchronous operations.
+   * 
+   * @return the next transaction ID to be used
+   */
+  private String getNextID() {
+    return Integer.toString(nextID++);
   }
 
   @Override
@@ -204,30 +220,6 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       } catch(Exception e) {
         result.error("Approov.getPins", e.getLocalizedMessage(), null);
       }
-    } else if (call.method.equals("fetchApproovToken")) {
-      try {
-        Approov.fetchApproovToken(new InternalCallbackHandler(), call.argument("url"));
-        result.success(null);
-      } catch(Exception e) {
-        result.error("Approov.fetchApproovToken", e.getLocalizedMessage(), null);
-      }
-    } else if (call.method.equals("fetchApproovTokenAndWait")) {
-      try {
-        Approov.TokenFetchResult tokenFetchResult = Approov.fetchApproovTokenAndWait(call.argument("url"));
-        HashMap<String, Object> tokenFetchResultMap = new HashMap<>();
-        tokenFetchResultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
-        tokenFetchResultMap.put("Token", tokenFetchResult.getToken());
-        tokenFetchResultMap.put("SecureString", tokenFetchResult.getSecureString());
-        tokenFetchResultMap.put("ARC", tokenFetchResult.getARC());
-        tokenFetchResultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());
-        tokenFetchResultMap.put("IsConfigChanged", tokenFetchResult.isConfigChanged());
-        tokenFetchResultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
-        tokenFetchResultMap.put("MeasurementConfig", tokenFetchResult.getMeasurementConfig());
-        tokenFetchResultMap.put("LoggableToken", tokenFetchResult.getLoggableToken());
-        result.success(tokenFetchResultMap);
-      } catch(Exception e) {
-        result.error("Approov.fetchApproovTokenAndWait", e.getLocalizedMessage(), null);
-      }
     } else if (call.method.equals("setDataHashInToken")) {
       try {
         Approov.setDataHashInToken((String) call.argument("data"));
@@ -256,71 +248,42 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       } catch(Exception e) {
         result.error("Approov.setUserProperty", e.getLocalizedMessage(), null);
       }
-    } else if (call.method.equals("prefetchHostCertificates")) {
-      try {
-        final URL url = new URL(call.argument("url"));
-        CertificatePrefetcher certPrefetcher = certificatePrefetchers.get(url.getHost());
-        if (certPrefetcher == null) {
-          certPrefetcher = new CertificatePrefetcher(url);
-          certificatePrefetchers.put(url.getHost(), certPrefetcher);
-          new Thread(certPrefetcher).start();
-        }
-        result.success(null);
-      } catch(Exception e) {
-        result.error("Approov.prefetchHostCertificates", e.getLocalizedMessage(), null);
-      }
     } else if (call.method.equals("fetchHostCertificates")) {
       try {
         final URL url = new URL(call.argument("url"));
-        CertificatePrefetcher certPrefetcher = certificatePrefetchers.get(url.getHost());
-        if (certPrefetcher == null) {
-          certPrefetcher = new CertificatePrefetcher(url);
-          new Thread(certPrefetcher).start();
-        } else {
-          certificatePrefetchers.remove(url.getHost());
-        }
-        Exception exception = certPrefetcher.getResultException();
-        if (exception != null) {
-          result.error("Approov.fetchHostCertificates", exception.getLocalizedMessage(), null);
-        } else {
-          List<byte[]> hostCertificates = certPrefetcher.getResultCertificates();
-          result.success(hostCertificates);
-        }
+        String aID = getNextID();
+        CertificateFetcher certFetcher = new CertificateFetcher(handler, aID, url);
+        new Thread(certFetcher).start();
+        result.success(aID);
       } catch(Exception e) {
-        result.error("Approov.fetchHostCertificatesy", e.getLocalizedMessage(), null);
+        result.error("Approov.fetchHostCertificates", e.getLocalizedMessage(), null);
       }
-    } else if (call.method.equals("fetchSecureStringAndWait")) {
+    } else if (call.method.equals("fetchApproovToken")) {
       try {
-        Approov.TokenFetchResult tokenFetchResult = Approov.fetchSecureStringAndWait(call.argument("key"), call.argument("newDef"));
-        HashMap<String, Object> fetchResultMap = new HashMap<>();
-        fetchResultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
-        fetchResultMap.put("Token", tokenFetchResult.getToken());
-        fetchResultMap.put("SecureString", tokenFetchResult.getSecureString());
-        fetchResultMap.put("ARC", tokenFetchResult.getARC());
-        fetchResultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());
-        fetchResultMap.put("IsConfigChanged", tokenFetchResult.isConfigChanged());
-        fetchResultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
-        fetchResultMap.put("LoggableToken", tokenFetchResult.getLoggableToken());
-        result.success(fetchResultMap);
+        String aID = getNextID();
+        InternalCallBackHandler aCallBackHandler = new InternalCallBackHandler(handler, aID);
+        Approov.fetchApproovToken(aCallBackHandler, call.argument("url"));
+        result.success(aID);
       } catch(Exception e) {
-        result.error("Approov.fetchSecureStringAndWait", e.getLocalizedMessage(), null);
+        result.error("Approov.fetchApproovToken", e.getLocalizedMessage(), null);
       }
-    } else if (call.method.equals("fetchCustomJWTAndWait")) {
+    } else if (call.method.equals("fetchSecureString")) {
       try {
-        Approov.TokenFetchResult tokenFetchResult = Approov.fetchCustomJWTAndWait(call.argument("payload"));
-        HashMap<String, Object> tokenFetchResultMap = new HashMap<>();
-        tokenFetchResultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
-        tokenFetchResultMap.put("Token", tokenFetchResult.getToken());
-        tokenFetchResultMap.put("SecureString", tokenFetchResult.getSecureString());
-        tokenFetchResultMap.put("ARC", tokenFetchResult.getARC());
-        tokenFetchResultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());
-        tokenFetchResultMap.put("IsConfigChanged", tokenFetchResult.isConfigChanged());
-        tokenFetchResultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
-        tokenFetchResultMap.put("MeasurementConfig", tokenFetchResult.getMeasurementConfig());
-        tokenFetchResultMap.put("LoggableToken", tokenFetchResult.getLoggableToken());
-        result.success(tokenFetchResultMap);
+        String aID = getNextID();
+        InternalCallBackHandler aCallBackHandler = new InternalCallBackHandler(handler, aID);
+        Approov.fetchSecureString(aCallBackHandler, call.argument("key"), call.argument("newDef"));
+        result.success(aID);
       } catch(Exception e) {
-        result.error("Approov.fetchCustomJWTAndWait", e.getLocalizedMessage(), null);
+        result.error("Approov.fetchSecureString", e.getLocalizedMessage(), null);
+      }
+    } else if (call.method.equals("fetchCustomJWT")) {
+      try {
+        String aID = getNextID();
+        InternalCallBackHandler aCallBackHandler = new InternalCallBackHandler(handler, aID);
+        Approov.fetchCustomJWT(aCallBackHandler, call.argument("payload"));
+        result.success(aID);
+      } catch(Exception e) {
+        result.error("Approov.fetchCustomJWT", e.getLocalizedMessage(), null);
       }
     } else {
       result.notImplemented();
