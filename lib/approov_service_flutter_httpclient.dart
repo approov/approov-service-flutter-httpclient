@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 CriticalBlue Ltd.
+ * Copyright (c) 2022-2025 Approov Ltd.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
  * documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
@@ -25,6 +25,7 @@ import 'package:asn1lib/asn1lib.dart';
 import 'package:crypto/crypto.dart';
 import 'package:collection/collection.dart';
 import 'package:enum_to_string/enum_to_string.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart' as httpio;
@@ -197,6 +198,9 @@ class ApproovService {
   // cached host certificates obtaining from probing the relevant host domains
   static Map<String, List<Uint8List>?> _hostCertificates = Map<String, List<Uint8List>?>();
 
+  // next transaction ID to be used for the next asynchronous transaction
+  static int transactionID = 0;
+
   // map of transactions that are being performed asynchronously in the platform layer
   static Map<String, Completer<dynamic>> _platformTransactions = Map<String, Completer<dynamic>>();
 
@@ -256,15 +260,20 @@ class ApproovService {
     });
   }
 
+  /**
+   * Handles a response from the platform layer for an asynchronous transaction. This
+   * provides arguments including a unique transaction ID which is used to match up
+   * with the request. Each transaction is associated with a Completer which is used
+   * to mark when the request is complete.
+   * 
+   * @param arguments are the arguments provided by the platform layer
+   */
   static void _handleResponse(dynamic arguments) {
-    final results = arguments as Map<Object?, Object?>;
-    if (results["TransactionID"] is String) {
-      final String transactionID = results["TransactionID"] as String;
-      final Completer<dynamic>? transaction = _platformTransactions[transactionID];
-      if (transaction != null) {
-        transaction.complete(results);
-        _platformTransactions.remove(transactionID);
-      }
+    final String transactionID = arguments["TransactionID"] as String;
+    final Completer<dynamic>? transaction = _platformTransactions[transactionID];
+    if (transaction != null) {
+      transaction.complete(arguments);
+      _platformTransactions.remove(transactionID);
     }
   }
 
@@ -424,13 +433,31 @@ class ApproovService {
   static Future<void> precheck() async {
     // try and fetch a non-existent secure string in order to check for a rejection
     await _initializeIfRequired();
+
+    // setup a Completer for the transaction ID we are going to use
+    Completer<dynamic> completer = new Completer<dynamic>();
+    String transactionID = ApproovService.transactionID.toString();
+    ApproovService.transactionID++;
+    _platformTransactions[transactionID] = completer;
+
+    // setup the arguments for the fetch
     final Map<String, dynamic> arguments = <String, dynamic>{
+      "transactionID": transactionID,
       "key": "precheck-dummy-key",
       "newDef": null,
     };
+
+    // initiate the fetch at the platform layer
+    try {
+      await _channel.invokeMethod('fetchSecureString', arguments);
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+
+    // wait for the secure string fetch to complete
     _TokenFetchResult fetchResult;
     try {
-      Map fetchResultMap = await _channel.invokeMethod('fetchSecureStringAndWait', arguments);
+      Map fetchResultMap = await completer.future;
       fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
       Log.d("$TAG: precheck: ${fetchResult.tokenFetchStatus.name}");
     } catch (err) {
@@ -579,15 +606,33 @@ class ApproovService {
     String type = "lookup";
     if (newDef != null) type = "definition";
 
-    // fetch the secure string synchronously from the platform layer
+    // ensure the SDK is initialized
     await _initializeIfRequired();
+
+    // setup a Completer for the transaction ID we are going to use
+    Completer<dynamic> completer = new Completer<dynamic>();
+    String transactionID = ApproovService.transactionID.toString();
+    ApproovService.transactionID++;
+    _platformTransactions[transactionID] = completer;
+
+    // setup the arguments for the fetch
     final Map<String, dynamic> arguments = <String, dynamic>{
+      "transactionID": transactionID,
       "key": key,
       "newDef": newDef,
     };
+
+    // start the secure string fetch in the platform layer
+    try {
+      await _channel.invokeMethod('fetchSecureString', arguments);
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+
+    // wait for the secure string fetch to complete
     _TokenFetchResult fetchResult;
     try {
-      Map fetchResultMap = await _channel.invokeMethod('fetchSecureStringAndWait', arguments);
+      Map fetchResultMap = await completer.future;
       fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
       Log.d("$TAG: fetchSecureString $type: $key, ${fetchResult.tokenFetchStatus.name}");
     } catch (err) {
@@ -626,20 +671,35 @@ class ApproovService {
   static Future<String> fetchCustomJWT(String payload) async {
     // start the custom JWT creation in the platform layer
     await _initializeIfRequired();
+
+    // setup a Completer for the transaction ID we are going to use
+    Completer<dynamic> completer = new Completer<dynamic>();
+    String transactionID = ApproovService.transactionID.toString();
+    ApproovService.transactionID++;
+    _platformTransactions[transactionID] = completer;
+
+    // setup the arguments for the fetch
     final Map<String, dynamic> arguments = <String, dynamic>{
+      "transactionID": transactionID,
       "payload": payload,
     };
-    _TokenFetchResult fetchResult;
+
+    // start the custom JWT creation in the platform layer
     try {
-      Map fetchResultMap = await _channel.invokeMethod('fetchCustomJWTAndWait', arguments);
-      fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
-      Log.d("$TAG: fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
+      await _channel.invokeMethod('fetchCustomJWT', arguments);
     } catch (err) {
       throw ApproovException('$err');
     }
 
     // wait until the custom JWT creation is completed
-     _TokenFetchResult fetchResult = await 
+    _TokenFetchResult fetchResult;
+    try {
+      Map fetchResultMap = await completer.future;
+      fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+      Log.d("$TAG: fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
+    } catch (err) {
+      throw ApproovException('$err');
+    }
 
     // process the returned Approov status
     if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
@@ -703,29 +763,32 @@ class ApproovService {
     }
   }
 
-  /// Internal method for fetching an Approov token from the SDK. Note that this will
-  /// block until the token is available.
+  /// Internal method for fetching an Approov token from the SDK.
   ///
   /// @param url provides the top level domain URL for which a token is being fetched
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
     await _initializeIfRequired();
-    final Map<String, dynamic> arguments = <String, dynamic>{
-      "url": url,
-    };
     try {
-      // start the fetching process
-      final transactionID = await _channel.invokeMethod('fetchApproovToken', arguments);
-
-      // add the certificate fetching as a pending transaction
+      // setup a Completer for the transaction ID we are going to use
       Completer<dynamic> completer = new Completer<dynamic>();
+      String transactionID = ApproovService.transactionID.toString();
+      ApproovService.transactionID++;
       _platformTransactions[transactionID] = completer;
+
+      // create the arguments for the transaction
+      final Map<String, dynamic> arguments = <String, dynamic>{
+        "transactionID": transactionID,
+        "url": url,
+      };
+
+      // start the Approov token fetching process
+      await _channel.invokeMethod('fetchApproovToken', arguments);
 
       // wait for the transaction to complete
       final results = await completer.future;
-      final resultsMap = results as Map<Object?, Object?>;
-      _TokenFetchResult tokenFetchResult = _TokenFetchResult.fromTokenFetchResultMap(resultsMap);
+      _TokenFetchResult tokenFetchResult = _TokenFetchResult.fromTokenFetchResultMap(results);
       return tokenFetchResult;
     } catch (err) {
       throw ApproovException('$err');
@@ -757,15 +820,31 @@ class ApproovService {
       // perform SDK initialization if required
       await _initializeIfRequired();
 
+      // setup a Completer for the transaction ID we are going to use
+      Completer<dynamic> completer = new Completer<dynamic>();
+      String transactionID = ApproovService.transactionID.toString();
+      ApproovService.transactionID++;
+      _platformTransactions[transactionID] = completer;
+
       // we have found an occurrence of the query parameter to be replaced so we look up the existing
       // value as a key for a secure string
       final Map<String, dynamic> arguments = <String, dynamic>{
+        "transactionID": transactionID,
         "key": queryValue,
         "newDef": null,
       };
+
+      // initiate the secure string fetch in the platform layer
+      try {
+        await _channel.invokeMethod('fetchSecureString', arguments);
+      } catch (err) {
+        throw ApproovException('$err');
+      }
+
+      // wait for the secure string fetch to complete
       _TokenFetchResult fetchResult;
       try {
-        Map fetchResultMap = await _channel.invokeMethod('fetchSecureStringAndWait', arguments);
+        Map fetchResultMap = await completer.future;
         fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
         Log.d("$TAG: substituting query parameter $queryParameter: ${fetchResult.tokenFetchStatus.name}");
       } catch (err) {
@@ -880,14 +959,30 @@ class ApproovService {
       String prefix = entry.value;
       String? value = request.headers.value(header);
       if ((value != null) && value.startsWith(prefix) && (value.length > prefix.length)) {
-        // perform the request to get the secure string for the header value
+        // setup a Completer for the transaction ID we are going to use
+        Completer<dynamic> completer = new Completer<dynamic>();
+        String transactionID = ApproovService.transactionID.toString();
+        ApproovService.transactionID++;
+        _platformTransactions[transactionID] = completer;
+
+        // setup the arguments to perform a request to get the secure string for the header value
         final Map<String, dynamic> arguments = <String, dynamic>{
+          "transactionID": transactionID,
           "key": value.substring(prefix.length),
           "newDef": null,
         };
+
+        // initiate the secure string fetch in the platform layer
+        try {
+          await _channel.invokeMethod('fetchSecureString', arguments);
+        } catch (err) {
+          throw ApproovException('$err');
+        }
+
+        // wait for the secure string fetch to complete
         _TokenFetchResult fetchResult;
         try {
-          Map fetchResultMap = await _channel.invokeMethod('fetchSecureStringAndWait', arguments);
+          Map fetchResultMap = await completer.future;
           fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
           Log.d("$TAG: updateRequest substituting header $header: ${fetchResult.tokenFetchStatus.name}");
         } catch (err) {
@@ -931,16 +1026,21 @@ class ApproovService {
     if (hostCertificates == null) {
       // certificates are not cached so we need to fetch them
       Log.d("$TAG: fetching host certificates for ${url}");
-      final Map<String, dynamic> arguments = <String, dynamic>{
-        "url": url.toString(),
-      };
       try {
-        // start the fetching process
-        final transactionID = await _channel.invokeMethod('fetchHostCertificates', arguments);
-
-        // add the certificate fetching as a pending transaction
+        // setup a Completer for the transaction ID we are going to use
         Completer<dynamic> completer = new Completer<dynamic>();
+        String transactionID = ApproovService.transactionID.toString();
+        ApproovService.transactionID++;
         _platformTransactions[transactionID] = completer;
+
+        // create the arguments for the transaction
+        final Map<String, dynamic> arguments = <String, dynamic>{
+          "transactionID": transactionID,
+          "url": url.toString(),
+        };
+
+        // start the certificate fetching process
+        await _channel.invokeMethod('fetchHostCertificates', arguments);
 
         // wait on the transaction to complete
         final results = await completer.future;
@@ -1126,6 +1226,8 @@ class _PendingWriteOp {
         break;
       case _WriteOpType.writeln:
         delegateRequest.writeln(object);
+        break;
+      default:
         break;
     }
   }
@@ -1376,7 +1478,7 @@ class ApproovHttpClient implements HttpClient {
   /// @param url for which to set up pinning
   /// @return the new HTTP client
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
-    // start the process of fetching an Approov token
+    // start the process of fetching an Approov token to get the latest configuration
     final stopWatch = Stopwatch();
     stopWatch.start();
     final approovToken = ApproovService._fetchApproovToken(url.host);
@@ -1386,7 +1488,7 @@ class ApproovHttpClient implements HttpClient {
     final hostCerts = ApproovService._fetchHostCertificates(url);
     final certStartTime = stopWatch.elapsedMilliseconds - tokenStartTime;
 
-    // fetch an Approov token to get the latest configuration - but note we do not fail if a token fetch was not possible
+    // wait on the Approov token fetching to complete - but note we do not fail if a token fetch was not possible
     _TokenFetchResult fetchResult = await approovToken;
     final tokenFinishTime = stopWatch.elapsedMilliseconds - certStartTime - tokenStartTime;
     Log.d(
