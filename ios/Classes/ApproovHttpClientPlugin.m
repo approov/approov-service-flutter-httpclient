@@ -1,5 +1,5 @@
 /**
-* Copyright 2022 CriticalBlue Ltd.
+* Copyright (c) 2022-2025 Approov Ltd.
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
 * associated documentation files (the "Software"), to deal in the Software without restriction,
@@ -29,14 +29,16 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 /**
  * Initialize ready to fetch certificates for a host.
+ *
+ * @param transactionID is the transaction ID to use for the fetch
+ * @param channel is the FlutterMethodChannel to use for the communication with Flutter
  */
-- (nullable instancetype)init;
+- (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel;
 
 /**
  * Fetches the certificates for a host by setting up an HTTPS GET request and harvests the certificates
- * that are obtained by the NSURLSessionTaskDelegate protocol. The certificates can then be obtained
- * with a getCertificates call. Note that the certificate fetching is done in the background so this
- * constructor will return immediately.
+ * that are obtained by the NSURLSessionTaskDelegate protocol. The certificates are then provided back to
+ * the Dart Flutter layer using a callback. A transaction ID is used to identify the request.
  *
  * @param url is the URL to be used for the lookup
  */
@@ -64,11 +66,11 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 {
     self = [super init];
     if (self) {
-        // Hold the parameters for when the request is made
+        // hold the parameters for when the request is made
         _transactionID = transactionID;
         _channel = channel;
 
-        // Create the Session for the subsequent request
+        // create the Session for the subsequent request
         NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         sessionConfig.timeoutIntervalForResource = FETCH_CERTIFICATES_TIMEOUT;
         _session = [NSURLSession sessionWithConfiguration:sessionConfig delegate:self delegateQueue:nil];
@@ -79,36 +81,35 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // see interface for documentation
 - (void)fetchWithURL:(NSURL *_Nonnull)url
 {
-    // Create the request
+    // create the request
     NSMutableURLRequest *certFetchRequest = [NSMutableURLRequest requestWithURL:url];
     [certFetchRequest setTimeoutInterval:FETCH_CERTIFICATES_TIMEOUT];
     [certFetchRequest setHTTPMethod:@"GET"];
 
-    // Get session task to issue the request, write back any error on completion and signal the semaphore
-    // to indicate that it is complete
+    // get session task to issue the request and write back the results to the Flutter Dart layer
     NSURLSessionDataTask *certFetchTask = [_session dataTaskWithRequest:certFetchRequest
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error)
         {
-            // Create a dicitonary for returning the results
+            // create a dicitonary for returning the results
             NSMutableDictionary *results = [NSMutableDictionary dictionary];
             results[@"TransactionID"] = _transactionID;
 
-            // We expect error cancelled because URLSession:task:didReceiveChallenge:completionHandler: always deliberately
+            // we expect error cancelled because URLSession:task:didReceiveChallenge:completionHandler: always deliberately
             // fails the challenge because we don't need the request to succeed to retrieve the certificates
             if (error == nil) {
-                // If no error occurred, the certificate check of the NSURLSessionTaskDelegate protocol has not been called.
+                // if no error occurred, the certificate check of the NSURLSessionTaskDelegate protocol has not been called.
                 // Don't provide any host certificates.
                 results[@"Error"] = @"Failed to get host certificates";
             } else if (error.code != NSURLErrorCancelled) {
-                // If an error other than NSURLErrorCancelled occurred, don't return any host certificates
+                // if an error other than NSURLErrorCancelled occurred, don't return any host certificates
                 results[@"Error"] = [NSString stringWithFormat:@"Failed to get host certificates with error: %@",
                     error.localizedDescription];
             } else {
-                // The host certificates have been collected by the URLSession:task:didReceiveChallenge:completionHandler: method
+                // the host certificates have been collected by the URLSession:task:didReceiveChallenge:completionHandler: method
                 results[@"Certificates"] = _hostCertificates;
             }
 
-            // Send the results back to the Flutter layer but we can only do this on the main thread
+            // send the results back to the Flutter layer but we can only do this on the main thread
             dispatch_async(dispatch_get_main_queue(), ^{
                [_channel invokeMethod:@"response" arguments:results];
             });
@@ -123,18 +124,18 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
     completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler
 {
-    // Ignore any requests that are not related to server trust
+    // ignore any requests that are not related to server trust
     if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust])
         return;
 
-    // Check we have a server trust
+    // check we have a server trust
     SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
     if (!serverTrust) {
         completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
         return;
     }
 
-    // Check the validity of the server trust
+    // check the validity of the server trust
     if (@available(iOS 12.0, *)) {
         if (!SecTrustEvaluateWithError(serverTrust, nil)) {
             completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
@@ -150,11 +151,11 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         }
     }
 
-    // Collect all the certs in the chain
+    // collect all the certs in the chain
     CFIndex certCount = SecTrustGetCertificateCount(serverTrust);
     NSMutableArray<FlutterStandardTypedData *> *certs = [NSMutableArray arrayWithCapacity:(NSUInteger)certCount];
     for (int certIndex = 0; certIndex < certCount; certIndex++) {
-        // Get the chain certificate - note that this function is deprecated from iOS 15 but the
+        // get the chain certificate - note that this function is deprecated from iOS 15 but the
         // replacement function is only available from iOS 15 and has a very different interface so
         // we can't use it yet
         SecCertificateRef cert = SecTrustGetCertificateAtIndex(serverTrust, certIndex);
@@ -167,10 +168,10 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         [certs addObject:certFSTD];
     }
 
-    // Set the host certs to be returned
+    // set the host certs to be returned
     _hostCertificates = certs;
 
-    // Fail the challenge as we only wanted the certificates
+    // fail the challenge as we only wanted the certificates
     completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
 }
 
@@ -180,9 +181,6 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 // The method channel to use for the communication with Flutter
 @property FlutterMethodChannel *channel;
-
-// The next transaction ID to use for asynchronous operations
-@property int nextTransactionID;
 
 // Provides any prior initial configuration supplied, to allow a reinitialization caused by
 // a hot restart if the configuration is the same
@@ -203,14 +201,6 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     ApproovHttpClientPlugin* instance = [[ApproovHttpClientPlugin alloc] init];
     instance.channel = channel;
     [registrar addMethodCallDelegate:instance channel:channel];
-}
-
-// Provides the next unique transaction ID to use for an asynchronous operation.
-//
-// @return string representation of the ID
-- (nonnull NSString *)getNextTransactionID;
-{
-    return [NSString stringWithFormat:@"%d", _nextTransactionID++];
 }
 
 // Provides string mappings for the token fetch status with strings that are compatible with the common dart layer. This
@@ -302,19 +292,21 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         NSString *urlString = call.arguments[@"url"];
         NSURL *url = [NSURL URLWithString:urlString];
         if (url == nil) {
+            // return an error if the URL is invalid
             result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
                 message:NSURLErrorDomain
                 details:[NSString stringWithFormat:@"Fetch host certificates invalid URL: %@", urlString]]);
         } else {
-            NSString *transactionID = [self getNextTransactionID];
+            // start the certificate fetch process asynchronously
+            NSString *transactionID = call.arguments[@"transactionID"];
             HostCertificatesFetcher *certFetcher = [[HostCertificatesFetcher alloc] initWithTransactionID:transactionID channel:_channel];
             [certFetcher fetchWithURL:url];
-            result(transactionID);
+            result(nil);
         }
     } else if ([@"fetchApproovToken" isEqualToString:call.method]) {
-        NSString *transactionID = [self getNextTransactionID];
+        NSString *transactionID = call.arguments[@"transactionID"];
         [Approov fetchApproovToken:^(ApproovTokenFetchResult *tokenFetchResult) {
-            // Collect the results from the token fetch
+            // collect the results from the token fetch
             NSMutableDictionary *results = [NSMutableDictionary dictionary];
             results[@"TransactionID"] = transactionID;
             results[@"TokenFetchStatus"] = [ApproovHttpClientPlugin stringFromApproovTokenFetchStatus:tokenFetchResult.status];
@@ -326,19 +318,19 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             results[@"MeasurementConfig"] = tokenFetchResult.measurementConfig;
             results[@"LoggableToken"] = tokenFetchResult.loggableToken;
 
-            // Send the results back to the Flutter layer but we can only do this on the main thread
+            // send the results back to the Flutter layer but we can only do this on the main thread
             dispatch_async(dispatch_get_main_queue(), ^{
                [_channel invokeMethod:@"response" arguments:results];
             });
         } :call.arguments[@"url"]];
-        result(transactionID);
-    } else if ([@"fetchSecureStringAndWait" isEqualToString:call.method]) {
-        NSString *transactionID = [self getNextTransactionID];
+        result(nil);
+    } else if ([@"fetchSecureString" isEqualToString:call.method]) {
+        NSString *transactionID = call.arguments[@"transactionID"];
         NSString *newDef = nil;
         if (call.arguments[@"newDef"] != [NSNull null])
             newDef = call.arguments[@"newDef"];
         [Approov fetchSecureString:^(ApproovTokenFetchResult *tokenFetchResult) {
-            // Collect the results from the secure string fetch
+            // collect the results from the secure string fetch
             NSMutableDictionary *results = [NSMutableDictionary dictionary];
             results[@"TransactionID"] = transactionID;
             results[@"TokenFetchStatus"] = [ApproovHttpClientPlugin  stringFromApproovTokenFetchStatus:tokenFetchResult.status];
@@ -351,16 +343,16 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             results[@"IsForceApplyPins"] = [NSNumber numberWithBool:tokenFetchResult.isForceApplyPins];
             results[@"LoggableToken"] = tokenFetchResult.loggableToken;
 
-            // Send the results back to the Flutter layer but we can only do this on the main thread
+            // send the results back to the Flutter layer but we can only do this on the main thread
             dispatch_async(dispatch_get_main_queue(), ^{
                [_channel invokeMethod:@"response" arguments:results];
             });
         } :call.arguments[@"key"] :newDef];
-        result(transactionID);
-    } else if ([@"fetchCustomJWTAndWait" isEqualToString:call.method]) {
-        NSString *transactionID = [self getNextTransactionID];
+        result(nil);
+    } else if ([@"fetchCustomJWT" isEqualToString:call.method]) {
+        NSString *transactionID = call.arguments[@"transactionID"];
         [Approov fetchCustomJWT:^(ApproovTokenFetchResult *tokenFetchResult) {
-            // Collect the results from the custom JWT fetch
+            // collect the results from the custom JWT fetch
             NSMutableDictionary *results = [NSMutableDictionary dictionary];
             results[@"TransactionID"] = transactionID;
             results[@"TokenFetchStatus"] = [ApproovHttpClientPlugin stringFromApproovTokenFetchStatus:tokenFetchResult.status];
@@ -371,12 +363,12 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             results[@"IsForceApplyPins"] = [NSNumber numberWithBool:tokenFetchResult.isForceApplyPins];
             results[@"LoggableToken"] = tokenFetchResult.loggableToken;
 
-            // Send the results back to the Flutter layer but we can only do this on the main thread
+            // send the results back to the Flutter layer but we can only do this on the main thread
             dispatch_async(dispatch_get_main_queue(), ^{
                [_channel invokeMethod:@"response" arguments:results];
             });
         } :call.arguments[@"payload"]];
-        result(transactionID);
+        result(nil);
     } else {
         result(FlutterMethodNotImplemented);
     }
