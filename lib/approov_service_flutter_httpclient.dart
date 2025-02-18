@@ -907,13 +907,15 @@ class ApproovService {
     }
 
     // request an Approov token for the host domain
+    final stopWatch = Stopwatch();
+    stopWatch.start();
     String host = request.uri.host;
     _TokenFetchResult fetchResult = await _fetchApproovToken(host);
 
     // provide information about the obtained token or error (note "approov token -check" can
     // be used to check the validity of the token and if you use token annotations they
     // will appear here to determine why a request is being rejected)
-    Log.d("$TAG: updateRequest for $host: ${fetchResult.loggableToken}");
+    Log.d("$TAG: updateRequest for $host: ${fetchResult.loggableToken}, ${stopWatch.elapsedMilliseconds}ms");
 
     // if there was a configuration change we clear it by fetching the new config and clearing
     // all the cached certificates which will force re-evaluation for new connections
@@ -1478,47 +1480,63 @@ class ApproovHttpClient implements HttpClient {
   /// @param url for which to set up pinning
   /// @return the new HTTP client
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
-    // start the process of fetching an Approov token to get the latest configuration
+    // prefetch the host certificates for the URL so this can be done in parallel with the token fetch
     final stopWatch = Stopwatch();
     stopWatch.start();
-    final approovToken = ApproovService._fetchApproovToken(url.host);
-    final tokenStartTime = stopWatch.elapsedMilliseconds;
-
-    // prefetch the host certificates for the URL so this can be done in parallel with the token fetch
     final hostCerts = ApproovService._fetchHostCertificates(url);
-    final certStartTime = stopWatch.elapsedMilliseconds - tokenStartTime;
+    final certStartTime = stopWatch.elapsedMilliseconds;
 
-    // wait on the Approov token fetching to complete - but note we do not fail if a token fetch was not possible
-    _TokenFetchResult fetchResult = await approovToken;
-    final tokenFinishTime = stopWatch.elapsedMilliseconds - certStartTime - tokenStartTime;
-    Log.d(
-        "$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}, tokenStart ${tokenStartTime}ms, certStart ${certStartTime}ms, tokenFinish ${tokenFinishTime}ms");
-
-    // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
-    // config clears the config changed state)
-    if (fetchResult.isConfigChanged) {
-      await ApproovService._fetchConfig();
-      ApproovService._removeAllCertificates();
+    // check if the URL matches one of the exclusion regexs
+    bool isExcluded = false;
+    String urlString = url.toString();
+    for (RegExp regExp in ApproovService._exclusionURLRegexs.values) {
+      if (regExp.hasMatch(urlString)) isExcluded = true;
     }
 
-    // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
-    // have are available, in which case we detect that at the time we are processing a request to add Approov
-    Map allPins = await ApproovService._getPins("public-key-sha256");
-
-    // if we didn't manage to fetch a token before then it is possible we have never fetched a token and therefore
-    // not have any available pins - we force another token fetch in that case so that we can check
+    // perform an Approov token fetching unless the URL is excluded
     bool forceNoConnection = false;
-    if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
-        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
-      // perform another attempted token fetch
-      fetchResult = await ApproovService._fetchApproovToken(url.host);
-      Log.d("$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+    int tokenStartTime = 0;
+    int tokenFinishTime = 0;
+    Map<dynamic, dynamic> allPins = {};
+    if (isExcluded) {
+      // get whatever pins we currrently have without forcing a fetch of new ones
+      allPins = await ApproovService._getPins("public-key-sha256");
+    } else {
+      // start the process of fetching an Approov token to get the latest configuration
+      final approovToken = ApproovService._fetchApproovToken(url.host);
+      tokenStartTime = stopWatch.elapsedMilliseconds - certStartTime;
 
-      // if we are forced to update pins then this likely means that no pins were ever fetched and in this
-      // case we must force a no connection when so that another fetched can be tried again - this is because
-      // once a connection is made it might not be dropped until the app is executed so there is no possibility
-      // to retry and get the pins without restarting the app
-      forceNoConnection = fetchResult.isForceApplyPins;
+      // wait on the Approov token fetching to complete - but note we do not fail if a token fetch was not possible
+      _TokenFetchResult fetchResult = await approovToken;
+      tokenFinishTime = stopWatch.elapsedMilliseconds - tokenStartTime - certStartTime;
+      Log.d(
+          "$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}, tokenStart ${tokenStartTime}ms, certStart ${certStartTime}ms, tokenFinish ${tokenFinishTime}ms");
+
+      // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
+      // config clears the config changed state)
+      if (fetchResult.isConfigChanged) {
+        await ApproovService._fetchConfig();
+        ApproovService._removeAllCertificates();
+      }
+
+      // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
+      // have are available, in which case we detect that at the time we are processing a request to add Approov
+      allPins = await ApproovService._getPins("public-key-sha256");
+
+      // if we didn't manage to fetch a token before then it is possible we have never fetched a token and therefore
+      // not have any available pins - we force another token fetch in that case so that we can check
+      if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
+          (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
+        // perform another attempted token fetch
+        fetchResult = await ApproovService._fetchApproovToken(url.host);
+        Log.d("$TAG: pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+
+        // if we are forced to update pins then this likely means that no pins were ever fetched and in this
+        // case we must force a no connection so that another fetch can be tried again - this is because
+        // once a connection is made it might not be dropped until the app is executed so there is no possibility
+        // to retry and get the pins without restarting the app
+        forceNoConnection = fetchResult.isForceApplyPins;
+      }
     }
 
     // get any pins defined for the host domain
@@ -1552,8 +1570,8 @@ class ApproovHttpClient implements HttpClient {
       }
       SecurityContext securityContext = await ApproovService._pinnedSecurityContext(url, approovPins, hostCerts);
       newHttpClient = HttpClient(context: securityContext);
-      final certFinishTime = stopWatch.elapsedMilliseconds - tokenFinishTime - certStartTime - tokenStartTime;
-      Log.d("$TAG: client ready for ${url.host}, certFinish ${certFinishTime}ms");
+      final pinningFinishTime = stopWatch.elapsedMilliseconds - tokenFinishTime - tokenStartTime - certStartTime;
+      Log.d("$TAG: client ready for ${url.host}, pinningFinish ${pinningFinishTime}ms");
     }
 
     // remember the connected host so we don't have to repeat this for connections to the same host
