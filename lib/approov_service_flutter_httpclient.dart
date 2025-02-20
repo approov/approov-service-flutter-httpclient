@@ -1510,7 +1510,7 @@ class ApproovHttpClient implements HttpClient {
       _TokenFetchResult fetchResult = await approovToken;
       tokenFinishTime = stopWatch.elapsedMilliseconds - tokenStartTime - certStartTime;
       Log.d(
-          "$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}, tokenStart ${tokenStartTime}ms, certStart ${certStartTime}ms, tokenFinish ${tokenFinishTime}ms");
+          "$TAG: pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}, certStart ${certStartTime}ms, tokenStart ${tokenStartTime}ms, tokenFinish ${tokenFinishTime}ms");
 
       // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
       // config clears the config changed state)
