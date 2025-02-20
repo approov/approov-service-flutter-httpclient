@@ -47,7 +47,7 @@ import io.flutter.plugin.common.MethodChannel.Result;
 // MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
 // presented on any particular URL to implement the pinning.
 public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler {
-  // CertificatePrefetcher is a Runnable that fetches the certificates for a given URL. This allows the
+  // CertificateFetcher is a Runnable that fetches the certificates for a given URL. This allows the
   // certificates to be fetched on a background thread in parallel with other fetches, and with an Approov
   // token fetch.
   private class CertificateFetcher implements Runnable {
