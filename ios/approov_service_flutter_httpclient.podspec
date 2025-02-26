@@ -8,14 +8,18 @@ Pod::Spec.new do |s|
     s.homepage         = 'https://github.com/approov/approov_service_flutter_httpclient'
     s.license          = { :type => 'BSD', :file => '../LICENSE' }
     s.author           = { 'CriticalBlue' => 'ivol@criticalblue.com' }
-    s.source           = { :http => 'https://github.com/approov/approov-service-flutter-httpclient' }
+    s.source           = { :path => '.' }
     #s.documentation_url = 'https://pub.dev/packages/approov-service-flutter-httpclient'
     s.source_files = 'Classes/**/*'
     s.public_header_files = 'Classes/**/*.h'
     s.dependency 'Flutter'
     s.dependency 'approov-ios-sdk', '3.3.3'
+
+    # Define platform support
+    s.ios.deployment_target = '12.0'
+    s.watchos.deployment_target = '9.0'
     s.platform = :ios, '12.0'
     # Flutter.framework does not contain an i386 slice.
     s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
-    s.xcconfig = { 'OTHER_LDFLAGS' => '$(inherited) -framework Approov', 'ENABLE_BITCODE' => 'NO' }
+    #s.xcconfig = { 'OTHER_LDFLAGS' => '$(inherited) -framework Approov', 'ENABLE_BITCODE' => 'NO' }
   end
