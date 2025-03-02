@@ -3,7 +3,7 @@ description: Approov enabled HttpClient
 version: 0.0.5
 repository: https://github.com/approov/approov_service_flutter_httpclient
 homepage: https://pub.dev/publishers/approov.io/packages
-publish_to: https://pub.dev
+
 
 environment:
   sdk: ">=2.15.0 <4.0.0"
