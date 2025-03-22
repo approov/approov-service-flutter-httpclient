@@ -252,7 +252,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         NSString *initialConfig = call.arguments[@"initialConfig"];
         if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || (call.arguments[@"comment"] != [NSNull null])) {
             // only actually initialize if we haven't before, if there is a change in the
-            // configuration provided or thi is a new renitialization
+            // configuration provided or thi is a new reinitialization
             NSString *updateConfig = nil;
             if (call.arguments[@"updateConfig"] != [NSNull null])
                 updateConfig = call.arguments[@"updateConfig"];
@@ -264,8 +264,16 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
                 _initializedConfig = initialConfig;
                 result(nil);
             } else {
-                result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
-                    message:error.domain details:error.localizedDescription]);
+                // Check if the error message contains "Approov SDK already initialised"
+                if ([error.localizedDescription rangeOfString:@"Approov SDK already initialised" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                    NSLog(@"ApproovService: Ignoring initialization error in Approov SDK: %@", error.localizedDescription);
+                    _initializedConfig = initialConfig;
+                    result(nil);
+                } else {
+                    result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
+                                            message:error.domain
+                                            details:error.localizedDescription]);
+                }
             }
         } else {
             // the previous initialization is compatible

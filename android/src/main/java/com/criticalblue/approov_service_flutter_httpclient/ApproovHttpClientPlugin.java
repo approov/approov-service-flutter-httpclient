@@ -188,12 +188,17 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
           Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), call.argument("comment"));
           initializedConfig = initialConfig;
           result.success(null);
+        } catch (IllegalStateException e) {
+          // Log and ignore the error if the SDK is already initialized
+          Log.w("ApproovService", "Ignoring initialization error in Approov SDK: " + e.getLocalizedMessage());
+          initializedConfig = initialConfig;
+          result.success(null);
         } catch(Exception e) {
-          result.error("Approov.initialize", e.getLocalizedMessage(), null);
-        }
-      } else {
-        // the previous initialization is compatible
-        result.success(null);
+            result.error("Approov.initialize", e.getLocalizedMessage(), null);
+          }
+        } else {
+          // the previous initialization is compatible
+          result.success(null);
       }
     } else if (call.method.equals("fetchConfig")) {
       try {
