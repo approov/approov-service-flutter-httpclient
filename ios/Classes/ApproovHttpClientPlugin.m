@@ -250,31 +250,38 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     if ([@"initialize" isEqualToString:call.method]) {
         NSError* error = nil;
         NSString *initialConfig = call.arguments[@"initialConfig"];
-        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || (call.arguments[@"comment"] != [NSNull null])) {
-            // only actually initialize if we haven't before, if there is a change in the
-            // configuration provided or thi is a new reinitialization
+        NSString *comment = nil;
+        if (call.arguments[@"comment"] != [NSNull null])
+            comment = call.arguments[@"comment"];
+        else
+            comment = @"";
+        // check if initialization is permitted: no previous config or a
+        // comment starting with "reinit"
+        if ((_initializedConfig != nil) && ![comment hasPrefix:@"reinit"]) {
+            result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
+                message:@"ApproovService layer already initialized"
+                details:@"The ApproovService may only be reinitialized in specific circumstances"]);
+            return;
+        }
+        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig]) {
+            // this is a new config or a reinitialization
             NSString *updateConfig = nil;
             if (call.arguments[@"updateConfig"] != [NSNull null])
                 updateConfig = call.arguments[@"updateConfig"];
-            NSString *comment = nil;
-            if (call.arguments[@"comment"] != [NSNull null])
-                comment = call.arguments[@"comment"];
             [Approov initialize:initialConfig updateConfig:updateConfig comment:comment error:&error];
-            if (error == nil) {
-                _initializedConfig = initialConfig;
-                result(nil);
-            } else {
+            if (error != nil) {
                 // Check if the error message contains "Approov SDK already initialised"
                 if ([error.localizedDescription rangeOfString:@"Approov SDK already initialised" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                     NSLog(@"ApproovService: Ignoring initialization error in Approov SDK: %@", error.localizedDescription);
-                    _initializedConfig = initialConfig;
-                    result(nil);
                 } else {
                     result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
                                             message:error.domain
                                             details:error.localizedDescription]);
+                    return;
                 }
             }
+            _initializedConfig = initialConfig;
+            result(nil);
         } else {
             // the previous initialization is compatible
             result(nil);

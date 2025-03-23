@@ -181,22 +181,30 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
     if (call.method.equals("initialize")) {
       String initialConfig = call.argument("initialConfig");
       String commentString = call.argument("comment");
-      if ((initializedConfig == null) || !initializedConfig.equals(initialConfig) || (commentString != null)) {
-        // only actually initialize if we haven't before, if there is a change in the
-        // configuration provided or we have a comment to add to the initialization
+      if (commentString == null) {
+        commentString = "";
+      }
+      // check if initialization is permitted: no previous config or a
+      // comment starting with "reinit"
+      if (initializedConfig != null && !commentString.startsWith("reinit")) {
+        result.error("Approov.initialize", "ApproovService layer is already initialized.", null);
+        return;
+      }
+      if ((initializedConfig == null) || !initializedConfig.equals(initialConfig)) {
+        // this is a new config or a reinitialization
         try {
-          Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), call.argument("comment"));
-          initializedConfig = initialConfig;
-          result.success(null);
+          initializedConfig = null;
+          Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
         } catch (IllegalStateException e) {
           // Log and ignore the error if the SDK is already initialized
           Log.w("ApproovService", "Ignoring initialization error in Approov SDK: " + e.getLocalizedMessage());
-          initializedConfig = initialConfig;
-          result.success(null);
         } catch(Exception e) {
             result.error("Approov.initialize", e.getLocalizedMessage(), null);
-          }
-        } else {
+            return;
+        }
+        initializedConfig = initialConfig;
+        result.success(null);
+      } else {
           // the previous initialization is compatible
           result.success(null);
       }

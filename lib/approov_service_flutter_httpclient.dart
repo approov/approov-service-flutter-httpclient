@@ -181,9 +181,6 @@ class ApproovService {
   // initial configuration string provided
   static String? _initialConfig = null;
 
-  // optional comment provided during initialization
-  static String? _initialComment = null;
-
   // true if the interceptor should proceed on network failures and not add an Approov token
   static bool _proceedOnNetworkFail = false;
 
@@ -208,63 +205,6 @@ class ApproovService {
   static Map<String, Completer<dynamic>> _platformTransactions =
       Map<String, Completer<dynamic>>();
 
-  /// Internal method to initialize the Approov SDK if needed using a previously provided initial configuration string.
-  /// Initialization is performed lazily based on the first actual use of the underlying SDK. This is necessary due to
-  /// asynchronous nature of Dart execution which makes it difficult to guarantee that initialization is cemplete before
-  /// the first operation otherwise.
-  ///
-  /// @throws ApproovException if initialization could not be completed
-  static Future<void> _initializeIfRequired() async {
-    // protect the initialization in a critical section to avoid multiple initializations
-    await _initMutex.protect(() async {
-      // only perform the initialization if required
-      if (!_isInitialized) {
-        // check an initial configuration has been supplied
-        if (_initialConfig == null)
-          throw ApproovException("ApproovService has not been initialized");
-
-        // perform the actual initialization
-        try {
-          // initialize the Approov SDK
-          Map<String, dynamic> arguments = <String, dynamic>{
-            "initialConfig": _initialConfig,
-            "updateConfig": "auto",
-            "comment": null,
-          };
-          await _channel.invokeMethod('initialize', arguments);
-
-          // Use the comment string to re-initialize now immediately with the non null string
-          // (it is necessary to initialize first before this can be done)
-          if (_initialComment != null) {
-            arguments["comment"] = _initialComment;
-            await _channel.invokeMethod('initialize', arguments);
-          }
-
-          // set the user property to represent the framework being used
-          // set the user property
-          arguments = <String, dynamic>{
-            "property": "approov-service-flutter-httpclient",
-          };
-          await _channel.invokeMethod('setUserProperty', arguments);
-
-          // setup ready for callbacks from the platform layer
-          _channel.setMethodCallHandler((call) async {
-            switch (call.method) {
-              case "response":
-                _handleResponse(call.arguments);
-            }
-            return null;
-          });
-
-          // initialization was successful
-          _isInitialized = true;
-        } catch (err) {
-          throw ApproovException('$err');
-        }
-      }
-    });
-  }
-
   /**
    * Handles a response from the platform layer for an asynchronous transaction. This
    * provides arguments including a unique transaction ID which is used to match up
@@ -283,6 +223,18 @@ class ApproovService {
     }
   }
 
+  /// Internal method to ensure that the Approov SDK has been initialized before any other methods are called.
+  ///
+  /// @throws ApproovException if the SDK has not been initialized
+  static _requireInitialized() {
+        // ensure any inflight initialization completes before proceeding
+    await _initMutex.protect(() async {
+      if (!_isInitialized) {
+        throw ApproovException("ApproovService has not been initialized");
+      }
+    });
+  }
+
   /// Provide the initialization config for the Approov SDK. This must be called prior to any other methods on the
   /// ApproovService. This does not actually initialize the SDK at this point, as this is done lazily on the first
   /// actual use of the SDK. If an initial configuration has been provided previously and this one is different then
@@ -292,14 +244,52 @@ class ApproovService {
   /// @param comment is an optional comment used during initialization. It is safe to use null
   /// @throws ApproovException if the provided configuration is not valid
   static Future<void> initialize(String config, [String? comment]) async {
-    if (_initialConfig == null) Log.d("$TAG: initialize $config");
-    if ((_initialConfig != null) && (config != _initialConfig))
-      throw ApproovException(
-          "Attempt to reinitialize the Approov SDK with a different configuration $config");
-    _initialConfig = config;
-    _initialComment = comment;
-  }
+    // protect the initialization in a critical section to avoid multiple initializations
+    await _initMutex.protect(() async {
+      // determine if initialization/reinitialization is permitted
+      if (_isInitialized && (comment == null || !comment!.startsWith("reinit"))) {
+        if (_initialConfig != config) {
+          throw ApproovException(
+              "Attempt to reinitialize the Approov SDK with a different configuration $config");
+        }
+        Log.d("$TAG: Ignoring multiple ApproovService layer initializations with the same config");
+      }
 
+      // perform the actual initialization
+      try {
+        // initialize the Approov SDK
+        Map<String, dynamic> arguments = <String, dynamic>{
+          "initialConfig": config,
+          "updateConfig": "auto",
+          "comment": comment,
+        };
+        await _channel.invokeMethod('initialize', arguments);
+
+        // set the user property to represent the framework being used
+        // set the user property
+        arguments = <String, dynamic>{
+          "property": "approov-service-flutter-httpclient",
+        };
+        await _channel.invokeMethod('setUserProperty', arguments);
+
+        // setup ready for callbacks from the platform layer
+        _channel.setMethodCallHandler((call) async {
+          switch (call.method) {
+            case "response":
+              _handleResponse(call.arguments);
+          }
+          return null;
+        });
+
+        // initialization was successful
+        _isInitialized = true;
+        _initialConfig = config;
+      } catch (err) {
+        throw ApproovException('$err');
+      }
+    });
+  }
+  
   /// Sets a flag indicating if the network interceptor should proceed anyway if it is
   /// not possible to obtain an Approov token due to a networking failure. If this is set
   /// then your backend API can receive calls without the expected Approov token header
@@ -325,7 +315,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<void> setDevKey(String devKey) async {
     Log.d("$TAG: setDevKey");
-    await _initializeIfRequired();
+    _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "devKey": devKey,
     };
@@ -438,9 +428,9 @@ class ApproovService {
   ///
   /// @throws ApproovException if there was a problem
   static Future<void> precheck() async {
-    // try and fetch a non-existent secure string in order to check for a rejection
-    await _initializeIfRequired();
+    _requireInitialized();
 
+    // try and fetch a non-existent secure string in order to check for a rejection
     // setup a Completer for the transaction ID we are going to use
     Completer<dynamic> completer = new Completer<dynamic>();
     String transactionID = ApproovService.transactionID.toString();
@@ -498,7 +488,7 @@ class ApproovService {
   ///
   /// @return String representation of the device ID
   static Future<String> getDeviceID() async {
-    await _initializeIfRequired();
+    _requireInitialized();
     try {
       String deviceID = await _channel.invokeMethod('getDeviceID');
       Log.d("$TAG: getDeviceID: $deviceID");
@@ -520,7 +510,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<void> setDataHashInToken(String data) async {
     Log.d("$TAG: setDataHashInToken");
-    await _initializeIfRequired();
+    _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "data": data,
     };
@@ -587,7 +577,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<String> getMessageSignature(String message) async {
     Log.d("$TAG: getMessageSignature");
-    await _initializeIfRequired();
+    _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "message": message,
     };
@@ -615,12 +605,12 @@ class ApproovService {
   /// @return secure string (should not be cached by your app) or null if it was not defined
   /// @throws ApproovException if there was a problem
   static Future<String?> fetchSecureString(String key, String? newDef) async {
+    // ensure the SDK is initialized
+    _requireInitialized();
+
     // determine the type of operation as the values themselves cannot be logged
     String type = "lookup";
     if (newDef != null) type = "definition";
-
-    // ensure the SDK is initialized
-    await _initializeIfRequired();
 
     // setup a Completer for the transaction ID we are going to use
     Completer<dynamic> completer = new Completer<dynamic>();
@@ -685,9 +675,9 @@ class ApproovService {
   /// @return custom JWT string
   /// @throws ApproovException if there was a problem
   static Future<String> fetchCustomJWT(String payload) async {
-    // start the custom JWT creation in the platform layer
-    await _initializeIfRequired();
+    _requireInitialized();
 
+    // start the custom JWT creation in the platform layer
     // setup a Completer for the transaction ID we are going to use
     Completer<dynamic> completer = new Completer<dynamic>();
     String transactionID = ApproovService.transactionID.toString();
@@ -749,7 +739,7 @@ class ApproovService {
   /// @return String representation of the configuration
   /// @throws ApproovException if there was a problem
   static Future<String> _fetchConfig() async {
-    await _initializeIfRequired();
+    _requireInitialized();
     try {
       String config = await _channel.invokeMethod('fetchConfig');
       return config;
@@ -769,7 +759,7 @@ class ApproovService {
   /// @return Map from domain to the list of strings providing the pins
   /// @throws ApproovException if there was a problem
   static Future<Map> _getPins(String pinType) async {
-    await _initializeIfRequired();
+    _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "pinType": pinType,
     };
@@ -787,7 +777,7 @@ class ApproovService {
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
-    await _initializeIfRequired();
+    _requireInitialized();
     try {
       // setup a Completer for the transaction ID we are going to use
       Completer<dynamic> completer = new Completer<dynamic>();
@@ -829,6 +819,8 @@ class ApproovService {
   /// @throws ApproovException if it is not possible to obtain secure strings for substitution
   static Future<Uri> substituteQueryParam(
       Uri uri, String queryParameter) async {
+    _requireInitialized();
+
     String? queryValue = uri.queryParameters[queryParameter];
     if (queryValue != null) {
       // check if the URL matches one of the exclusion regexs and just return the provided Uri if so
@@ -836,9 +828,6 @@ class ApproovService {
       for (RegExp regExp in _exclusionURLRegexs.values) {
         if (regExp.hasMatch(url)) return uri;
       }
-
-      // perform SDK initialization if required
-      await _initializeIfRequired();
 
       // setup a Completer for the transaction ID we are going to use
       Completer<dynamic> completer = new Completer<dynamic>();
@@ -912,14 +901,12 @@ class ApproovService {
   /// @param request is the HttpClientRequest to which Approov is being added
   /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
   static Future<void> _updateRequest(HttpClientRequest request) async {
+    _requireInitialized();
     // check if the URL matches one of the exclusion regexs and just return if so
     String url = request.uri.toString();
     for (RegExp regExp in _exclusionURLRegexs.values) {
       if (regExp.hasMatch(url)) return;
     }
-
-    // perform SDK initialization if required
-    await _initializeIfRequired();
 
     // update the data hash based on any token binding header that is present
     String? bindingHeader = _bindingHeader;
@@ -1669,16 +1656,9 @@ class ApproovHttpClient implements HttpClient {
     return newHttpClient;
   }
 
-  // Don't allow use of the default constructor without an initial configuration.
-  ApproovHttpClient._() {}
-
   // Constructor for a custom Approov HttpClient. The config can be obtained using the Approov CLI or is also available in
   // the original onboarding email.
-  //
-  // @param initialConfig is the config string for the account
-  ApproovHttpClient(String initialConfig, [String? initialComment]) : super() {
-    ApproovService.initialize(initialConfig, initialComment);
-  }
+  ApproovHttpClient() : super() {}
 
   @override
   Future<HttpClientRequest> open(
@@ -1891,16 +1871,10 @@ class ApproovClient extends http.BaseClient {
   // logging tag
   static const String TAG = "ApproovClient";
 
-  // initial configuration to supply to delegate ApproovHttpClients
-  late String _initialConfig;
-
-  // optional comment string to use alongside initial configuration
-  String? _initialComment;
-
   // internal client delegate used to perform the actual requests
   http.Client? _delegateClient;
 
-  // DOn't allow construction of an ApproovClient without an initial configuration.
+  // Don't allow construction of an ApproovClient without an initial configuration.
   ApproovClient._() {}
 
   // Constructor for a custom Approov client. The config can be obtained using the Approov CLI or is also available in
@@ -1909,8 +1883,6 @@ class ApproovClient extends http.BaseClient {
   // @param initialConfig is the config string for the account
   // @param initialComment is an optional comment string to use alongside the initial configuration
   ApproovClient(String initialConfig, [String? initialComment]) : super() {
-    _initialConfig = initialConfig;
-    _initialComment = initialComment;
     ApproovService.initialize(initialConfig, initialComment);
   }
 
@@ -1919,8 +1891,7 @@ class ApproovClient extends http.BaseClient {
     // construct the client delegate on demand
     http.Client? delegateClient = _delegateClient;
     if (delegateClient == null) {
-      ApproovHttpClient httpClient =
-          ApproovHttpClient(_initialConfig, _initialComment);
+      ApproovHttpClient httpClient = ApproovHttpClient();
       delegateClient = httpio.IOClient(httpClient);
       _delegateClient = delegateClient;
     }
