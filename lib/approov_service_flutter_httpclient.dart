@@ -226,8 +226,8 @@ class ApproovService {
   /// Internal method to ensure that the Approov SDK has been initialized before any other methods are called.
   ///
   /// @throws ApproovException if the SDK has not been initialized
-  static _requireInitialized() {
-        // ensure any inflight initialization completes before proceeding
+  static Future<void> _requireInitialized() async {
+    // ensure any inflight initialization completes before proceeding
     await _initMutex.protect(() async {
       if (!_isInitialized) {
         throw ApproovException("ApproovService has not been initialized");
@@ -315,7 +315,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<void> setDevKey(String devKey) async {
     Log.d("$TAG: setDevKey");
-    _requireInitialized();
+    await _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "devKey": devKey,
     };
@@ -428,7 +428,7 @@ class ApproovService {
   ///
   /// @throws ApproovException if there was a problem
   static Future<void> precheck() async {
-    _requireInitialized();
+    await _requireInitialized();
 
     // try and fetch a non-existent secure string in order to check for a rejection
     // setup a Completer for the transaction ID we are going to use
@@ -488,7 +488,7 @@ class ApproovService {
   ///
   /// @return String representation of the device ID
   static Future<String> getDeviceID() async {
-    _requireInitialized();
+    await _requireInitialized();
     try {
       String deviceID = await _channel.invokeMethod('getDeviceID');
       Log.d("$TAG: getDeviceID: $deviceID");
@@ -510,7 +510,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<void> setDataHashInToken(String data) async {
     Log.d("$TAG: setDataHashInToken");
-    _requireInitialized();
+    await _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "data": data,
     };
@@ -577,7 +577,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<String> getMessageSignature(String message) async {
     Log.d("$TAG: getMessageSignature");
-    _requireInitialized();
+    await _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "message": message,
     };
@@ -606,7 +606,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<String?> fetchSecureString(String key, String? newDef) async {
     // ensure the SDK is initialized
-    _requireInitialized();
+    await _requireInitialized();
 
     // determine the type of operation as the values themselves cannot be logged
     String type = "lookup";
@@ -675,7 +675,7 @@ class ApproovService {
   /// @return custom JWT string
   /// @throws ApproovException if there was a problem
   static Future<String> fetchCustomJWT(String payload) async {
-    _requireInitialized();
+    await _requireInitialized();
 
     // start the custom JWT creation in the platform layer
     // setup a Completer for the transaction ID we are going to use
@@ -739,7 +739,7 @@ class ApproovService {
   /// @return String representation of the configuration
   /// @throws ApproovException if there was a problem
   static Future<String> _fetchConfig() async {
-    _requireInitialized();
+    await _requireInitialized();
     try {
       String config = await _channel.invokeMethod('fetchConfig');
       return config;
@@ -759,7 +759,7 @@ class ApproovService {
   /// @return Map from domain to the list of strings providing the pins
   /// @throws ApproovException if there was a problem
   static Future<Map> _getPins(String pinType) async {
-    _requireInitialized();
+    await _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "pinType": pinType,
     };
@@ -777,7 +777,7 @@ class ApproovService {
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
-    _requireInitialized();
+    await _requireInitialized();
     try {
       // setup a Completer for the transaction ID we are going to use
       Completer<dynamic> completer = new Completer<dynamic>();
@@ -819,7 +819,7 @@ class ApproovService {
   /// @throws ApproovException if it is not possible to obtain secure strings for substitution
   static Future<Uri> substituteQueryParam(
       Uri uri, String queryParameter) async {
-    _requireInitialized();
+    await _requireInitialized();
 
     String? queryValue = uri.queryParameters[queryParameter];
     if (queryValue != null) {
@@ -901,7 +901,7 @@ class ApproovService {
   /// @param request is the HttpClientRequest to which Approov is being added
   /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
   static Future<void> _updateRequest(HttpClientRequest request) async {
-    _requireInitialized();
+    await _requireInitialized();
     // check if the URL matches one of the exclusion regexs and just return if so
     String url = request.uri.toString();
     for (RegExp regExp in _exclusionURLRegexs.values) {
