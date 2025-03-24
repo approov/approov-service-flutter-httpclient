@@ -20,6 +20,7 @@ package com.criticalblue.approov_service_flutter_httpclient;
 import android.content.Context;
 import android.os.Looper;
 import android.os.Handler;
+import android.util.Log;
 
 import com.criticalblue.approovsdk.Approov;
 
