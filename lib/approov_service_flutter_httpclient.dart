@@ -1656,9 +1656,22 @@ class ApproovHttpClient implements HttpClient {
     return newHttpClient;
   }
 
-  // Constructor for a custom Approov HttpClient. The config can be obtained using the Approov CLI or is also available in
-  // the original onboarding email.
-  ApproovHttpClient() : super() {}
+  // Constructor for a custom Approov HttpClient. Either providing the initial
+  //configuration string or not. If the config string is missing then the SDK
+  // must have been previously initialized, else there will be exceptions when
+  // the client is used.
+  //
+  // @param initialConfig optionally provide the config string for account
+  //     initialization. If provided, the config must be obtained using the
+  //     Approov CLI or from the original onboarding email.
+  // @param initialComment optionally provide the comment string for account
+  //     initialization. If no config is provided the comment string is
+  //     ignored.
+  ApproovHttpClient([String? initialConfig, String? initialComment]) : super() {
+    if (initialConfig != null) {
+      ApproovService.initialize(initialConfig, initialComment);
+    }
+  }
 
   @override
   Future<HttpClientRequest> open(
@@ -1874,37 +1887,35 @@ class ApproovClient extends http.BaseClient {
   // internal client delegate used to perform the actual requests
   http.Client? _delegateClient;
 
-  // Don't allow construction of an ApproovClient without an initial configuration.
-  ApproovClient._() {}
-
-  // Constructor for a custom Approov client. The config can be obtained using the Approov CLI or is also available in
-  // the original onboarding email.
+  // Constructor for a custom Approov Client. Either providing the initial
+  // configuration string or not. If the config string is missing then the SDK
+  // must have been previously initialized, else there will be exceptions when
+  // the client is used.
   //
-  // @param initialConfig is the config string for the account
-  // @param initialComment is an optional comment string to use alongside the initial configuration
-  ApproovClient(String initialConfig, [String? initialComment]) : super() {
-    ApproovService.initialize(initialConfig, initialComment);
-  }
+  // @param initialConfig optionally provide the config string for account
+  //     initialization. If provided, the config must be obtained using the
+  //     Approov CLI or from the original onboarding email.
+  // @param initialComment optionally provide the comment string for account
+  //     initialization. If no config is provided the comment string is
+  //     ignored.
+  ApproovClient([String? initialConfig, String? initialComment])
+      : _delegateClient = httpio.IOClient(ApproovHttpClient(initialConfig, initialComment)),
+        super(){}
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) {
-    // construct the client delegate on demand
-    http.Client? delegateClient = _delegateClient;
-    if (delegateClient == null) {
-      ApproovHttpClient httpClient = ApproovHttpClient();
-      delegateClient = httpio.IOClient(httpClient);
-      _delegateClient = delegateClient;
+    // preserve old behavior - if the client was closed and then used again,
+    // reinitialize the delegate now send using the delegate http client
+    if (_delegateClient == null) {
+      _delegateClient = httpio.IOClient(ApproovHttpClient());
     }
-
-    // now send using the delegate http client
-    return delegateClient.send(request);
+    return _delegateClient!.send(request);
   }
 
   @override
   void close() {
-    http.Client? delegateClient = _delegateClient;
-    if (delegateClient != null) {
-      delegateClient.close();
+    if (_delegateClient != null) {
+      _delegateClient!.close();
       _delegateClient = null;
     }
   }
