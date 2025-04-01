@@ -253,6 +253,7 @@ class ApproovService {
               "Attempt to reinitialize the Approov SDK with a different configuration $config");
         }
         Log.d("$TAG: Ignoring multiple ApproovService layer initializations with the same config");
+        return;
       }
 
       // perform the actual initialization
