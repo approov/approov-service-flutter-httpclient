@@ -247,12 +247,14 @@ class ApproovService {
     // protect the initialization in a critical section to avoid multiple initializations
     await _initMutex.protect(() async {
       // determine if initialization/reinitialization is permitted
-      if (_isInitialized && (comment == null || !comment!.startsWith("reinit"))) {
+      if (_isInitialized &&
+          (comment == null || !comment!.startsWith("reinit"))) {
         if (_initialConfig != config) {
           throw ApproovException(
               "Attempt to reinitialize the Approov SDK with a different configuration $config");
         }
-        Log.d("$TAG: Ignoring multiple ApproovService layer initializations with the same config");
+        Log.d(
+            "$TAG: Ignoring multiple ApproovService layer initializations with the same config");
         return;
       }
 
@@ -290,7 +292,7 @@ class ApproovService {
       }
     });
   }
-  
+
   /// Sets a flag indicating if the network interceptor should proceed anyway if it is
   /// not possible to obtain an Approov token due to a networking failure. If this is set
   /// then your backend API can receive calls without the expected Approov token header
@@ -1074,6 +1076,8 @@ class ApproovService {
         // wait on the transaction to complete
         final results = await completer.future;
         if (results is Map<Object?, Object?>) {
+          // Check if results object contains "Certificates" key
+          if (!(results.containsKey("Certificates"))) return null;
           List fetchedHostCertificates =
               results["Certificates"] as List<dynamic>;
           hostCertificates = [];
@@ -1900,8 +1904,9 @@ class ApproovClient extends http.BaseClient {
   //     initialization. If no config is provided the comment string is
   //     ignored.
   ApproovClient([String? initialConfig, String? initialComment])
-      : _delegateClient = httpio.IOClient(ApproovHttpClient(initialConfig, initialComment)),
-        super(){}
+      : _delegateClient =
+            httpio.IOClient(ApproovHttpClient(initialConfig, initialComment)),
+        super() {}
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) {
