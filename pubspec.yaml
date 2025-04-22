@@ -21,6 +21,7 @@ dependencies:
   shared_preferences: ^2.2.2
   mutex: ^3.1.0
   collection: ^1.15.0
+  http_sfv: ^0.1.0  #https://pub.dev/packages/http_sfv
 
 dev_dependencies:
   flutter_test:
