@@ -120,6 +120,11 @@ class ApproovException implements Exception {
   ApproovException(String cause) {
     this.cause = cause;
   }
+
+  @override
+  String toString() {
+    return "ApproovException: $cause";
+  }
 }
 
 /// ApproovNetworkException indicates an exception caused by networking conditions which is likely to be
@@ -129,6 +134,11 @@ class ApproovNetworkException extends ApproovException {
   ///
   /// @param cause is a message giving the cause of the exception
   ApproovNetworkException(String cause) : super(cause) {}
+
+  @override
+  String toString() {
+    return "ApproovNetworkException: $cause";
+  }
 }
 
 /// ApproovRejectionException provides additional information if the app has been rejected by Approov.
@@ -147,6 +157,11 @@ class ApproovRejectionException extends ApproovException {
   ApproovRejectionException(String cause, String arc, String rejectionReasons) : super(cause) {
     this.arc = arc;
     this.rejectionReasons = rejectionReasons;
+  }
+
+  @override
+  String toString() {
+    return "ApproovRejectionException: $cause ARC:$arc reasons:$rejectionReasons";
   }
 }
 
@@ -1135,8 +1150,7 @@ class ApproovService {
   /// require another probe.
   ///
   /// @param url for where to retrieve the certificates with a GET request
-  /// @return a list of certificates (each as a Uint8list) for the host specified in the URL, null if an error occurred,
-  /// or an empty list if no suitable certificates are available.
+  /// @return a list of certificates (each as a Uint8list) for the host specified in the URL or null if an error occurred
   static Future<List<Uint8List>?> _fetchHostCertificates(Uri url) async {
     List<Uint8List>? hostCertificates = _hostCertificates[url.host];
     if (hostCertificates == null) {
@@ -1177,17 +1191,32 @@ class ApproovService {
           _platformTransactions.remove(transactionID);
         }
 
-        // wait on the transaction to complete
+        // wait on the transaction to complete and process the results
         final results = await completer.future;
         if (results is Map<Object?, Object?>) {
-          List fetchedHostCertificates = results["Certificates"] as List<dynamic>;
-          hostCertificates = [];
-          for (final cert in fetchedHostCertificates) {
-            hostCertificates.add(cert as Uint8List);
+          if (results.containsKey("Certificates")) {
+            // certificate were fetched so we cache them
+            List fetchedHostCertificates = results["Certificates"] as List<dynamic>;
+            hostCertificates = [];
+            for (final cert in fetchedHostCertificates) {
+              hostCertificates.add(cert as Uint8List);
+            }
+            _hostCertificates[url.host] = hostCertificates;
+            Log.d("$TAG: $isolate fetchHostCertificates ${url.host} obtained ${hostCertificates.length} certificates");
+          } else if (results.containsKey("Error")) {
+            // there was a specific error fetching the certificates
+            String error = results["Error"] as String;
+            Log.d("$TAG: $isolate fetchHostCertificates ${url.host}: $error");
+            return null;
+          } else {
+            // there was an unknown error fetching the certificates
+            Log.d("$TAG: $isolate fetchHostCertificates ${url.host} error");
+            return null;
           }
-
-          // cache the obtained host certificates
-          _hostCertificates[url.host] = hostCertificates;
+        } else {
+          // there was an unknown return format fetching the certificates
+          Log.d("$TAG: $isolate fetchHostCertificates ${url.host} bad response");
+          return null;
         }
       } catch (err) {
         throw ApproovException('$err');
@@ -1557,7 +1586,7 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
 /// Dart IO library's HttpClient.
 class ApproovHttpClient implements HttpClient {
   // logging tag
-  static const String TAG = "ApproovHttpClient";
+  static const String TAG = "ApproovService:ApproovHttpClient";
 
   // internal HttpClient delegate, will be rebuilt if pinning fails (or pins change). It is not set to a pinned
   // HttpClient initially, but this is just used to hold any state updates that might occur before a connection
@@ -1572,7 +1601,7 @@ class ApproovHttpClient implements HttpClient {
   // re-create the delegate pinned HttpClient.
   String? _connectedHost;
 
-  // indicates whether the ApproovHttpClient has been closed by calling close().
+  // indicates whether the ApproovHttpClient has been closed by calling close()
   bool _isClosed = false;
 
   // state required to implement getters and setters required by the HttpClient interface
@@ -1594,17 +1623,20 @@ class ApproovHttpClient implements HttpClient {
   /// @param cert is the certificate which could not be authenticated
   /// @param host is the host name of the server to which the request is being sent
   /// @param port is the port of the server
+  /// @return false to prevent the request from being sent
   bool _pinningFailureCallback(X509Certificate cert, String host, int port) {
+    // reset host certificates and delegate pinned HttpClient connected host to force them to be recreated
+    Log.d("$TAG: pinning failure callback for $host");
+    ApproovService._removeCertificates(host);
+    _connectedHost = null;
+
+    // call any user defined function for its side effects only (as we are going to reject anyway)
     Function(X509Certificate cert, String host, int port)? badCertificateCallback = _badCertificateCallback;
     if (badCertificateCallback != null) {
-      // call the user defined function for its side effects only (as we are going to reject anyway)
       badCertificateCallback(cert, host, port);
     }
 
-    // reset host certificates and delegate pinned HttpClient connected host to force them to be recreated
-    Log.d("$TAG: Pinning failure callback for $host");
-    ApproovService._removeCertificates(host);
-    _connectedHost = null;
+    // prevent the request from being sent
     return false;
   }
 
@@ -1637,7 +1669,7 @@ class ApproovHttpClient implements HttpClient {
     Map<dynamic, dynamic> allPins = {};
     String isolate = ApproovService._isRootIsolate ? "root" : "background";
     if (isExcluded) {
-      // get whatever pins we currrently have without forcing a fetch of new ones
+      // get whatever pins we currently have without forcing a fetch of new ones
       allPins = await ApproovService._getPins("public-key-sha256");
     } else {
       // start the process of fetching an Approov token to get the latest configuration
@@ -1655,6 +1687,7 @@ class ApproovHttpClient implements HttpClient {
       if (fetchResult.isConfigChanged) {
         await ApproovService._fetchConfig();
         ApproovService._removeAllCertificates();
+        Log.d("$TAG: $isolate configuration change");
       }
 
       // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
@@ -1771,6 +1804,8 @@ class ApproovHttpClient implements HttpClient {
     // if we have an active connection to a different host we need to tear down the delegate
     // pinned HttpClient and create a new one with the correct pinning
     if (_connectedHost != host) {
+      String isolate = ApproovService._isRootIsolate ? "root" : "background";
+      Log.d("$TAG: $isolate open pinned delegate creation for $host:$port");
       Uri url = Uri(scheme: "https", host: host, port: port, path: path);
       Future<HttpClient> futureDelegatePinnedHttpClient = _createPinnedHttpClient(url);
       _futureDelegatePinnedHttpClient = futureDelegatePinnedHttpClient;
@@ -1802,6 +1837,8 @@ class ApproovHttpClient implements HttpClient {
     // if we have an active connection to a different host we need to tear down the delegate
     // pinned HttpClient and create a new one with the correct pinning
     if (_connectedHost != url.host) {
+      String isolate = ApproovService._isRootIsolate ? "root" : "background";
+      Log.d("$TAG: $isolate openUrl pinned delegate creation for $url.host:$url.port");
       Future<HttpClient> futureDelegatePinnedHttpClient = _createPinnedHttpClient(url);
       _futureDelegatePinnedHttpClient = futureDelegatePinnedHttpClient;
       HttpClient httpClient = await futureDelegatePinnedHttpClient;
@@ -1937,7 +1974,7 @@ class ApproovHttpClient implements HttpClient {
 // and adds the desired behavior.
 class ApproovClient extends http.BaseClient {
   // logging tag
-  static const String TAG = "ApproovClient";
+  static const String TAG = "ApproovService:ApproovClient";
 
   // internal client delegate used to perform the actual requests
   http.Client? _delegateClient;

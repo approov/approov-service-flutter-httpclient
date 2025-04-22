@@ -118,7 +118,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
         // send any exception back to the Flutter Dart layer using the handler to
         // ensure it is done on the main thread
         resultMap.put("TransactionID", transactionID);
-        resultMap.put("Exception", e.getLocalizedMessage());
+        resultMap.put("Error", e.getLocalizedMessage());
         countDownLatch.countDown();
         if (handler != null)
           handler.post(() -> fgChannel.invokeMethod("response", resultMap));
