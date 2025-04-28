@@ -190,7 +190,7 @@ class ApproovService {
   // mutex to control access to the initialization process
   static final _initMutex = Mutex();
 
-  // any future initialization that should be awaited on before performing any other SDK operations
+  // future for the SDK initialization that should be awaited on before performing any other SDK operations
   static Future<void>? _futureInitialization = null;
 
   // header used when adding the Approov Token to network requests
@@ -204,6 +204,12 @@ class ApproovService {
 
   // initial configuration string provided
   static String? _initialConfig = null;
+
+  // configuration epoch used to determine if the configuration has changed to allow caches at
+  // higher levels to be invalidated. This is actually obtained from the platform layer since
+  // only it can provide common state between all isolates and we want a dynamic configuration
+  // upddate in one isolate to impact the caching of all of them.
+  static int _configEpoch = 0;
 
   // shows if this is the root or a background isolate
   static bool _isRootIsolate = false;
@@ -227,7 +233,6 @@ class ApproovService {
   // next transaction ID to be used for the next asynchronous transaction - we choose this randomly for
   // each isolate to avoid collisions between transactions in isolates since they share a common native plugin
   static int transactionID = Random().nextInt(1000000);
-  //static int transactionID = 0;
 
   // map of transactions that are being performed asynchronously in the platform layer
   static Map<String, Completer<dynamic>> _platformTransactions = Map<String, Completer<dynamic>>();
@@ -267,16 +272,10 @@ class ApproovService {
   ///
   /// @throws ApproovException if the SDK has not been initialized
   static Future<void> _requireInitialized() async {
-    // await on any inflight initialization
-    if (_futureInitialization != null) {
-      await _futureInitialization;
-      _futureInitialization = null;
-    }
-
-    // ensure the SDK is intialization
-    if (!_isInitialized) {
+    if (_futureInitialization == null)
       throw ApproovException("ApproovService has not been initialized");
-    }
+    else
+      await _futureInitialization;
   }
 
   /// Provide the initialization config for the Approov SDK. This is done asynchronously and other methods called in the SDK may
@@ -477,10 +476,9 @@ class ApproovService {
   ///
   /// @throws ApproovException if there was a problem
   static Future<void> precheck() async {
-    await _requireInitialized();
-
     // try and fetch a non-existent secure string in order to check for a rejection
     // setup a Completer for the transaction ID we are going to use
+    await _requireInitialized();
     Completer<dynamic> completer = new Completer<dynamic>();
     String transactionID = ApproovService.transactionID.toString();
     ApproovService.transactionID++;
@@ -816,7 +814,8 @@ class ApproovService {
   /// available and is cached in the SDK. Thus the method will return quickly. However, if this method is called when
   /// there has been no prior call to fetch an Approov token then a network request to the Approov cloud service will be
   /// made to obtain any latest configuration update. The maximum timeout period is set to be quite short but the caller
-  /// must be aware that this delay may occur.
+  /// must be aware that this delay may occur. This also updates the current configuration epoch which is stored at
+  /// the platform layer and used to determine if the configuration has changed across isolates.
   ///
   /// @return String representation of the configuration
   /// @throws ApproovException if there was a problem
@@ -824,6 +823,7 @@ class ApproovService {
     await _requireInitialized();
     try {
       String config = await _fgChannel.invokeMethod('fetchConfig');
+      _configEpoch = await _fgChannel.invokeMethod('getConfigEpoch');
       return config;
     } catch (err) {
       throw ApproovException('$err');
@@ -891,6 +891,7 @@ class ApproovService {
 
       // wait for the transaction to complete
       final results = await completer.future;
+      _configEpoch = results['ConfigEpoch'];
       _TokenFetchResult tokenFetchResult = _TokenFetchResult.fromTokenFetchResultMap(results);
       return tokenFetchResult;
     } catch (err) {
@@ -913,7 +914,6 @@ class ApproovService {
   /// @throws ApproovException if it is not possible to obtain secure strings for substitution
   static Future<Uri> substituteQueryParam(Uri uri, String queryParameter) async {
     await _requireInitialized();
-
     String? queryValue = uri.queryParameters[queryParameter];
     if (queryValue != null) {
       // check if the URL matches one of the exclusion regexs and just return the provided Uri if so
@@ -1006,8 +1006,8 @@ class ApproovService {
   /// @param request is the HttpClientRequest to which Approov is being added
   /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
   static Future<void> _updateRequest(HttpClientRequest request) async {
-    await _requireInitialized();
     // check if the URL matches one of the exclusion regexs and just return if so
+    await _requireInitialized();
     String url = request.uri.toString();
     for (RegExp regExp in _exclusionURLRegexs.values) {
       if (regExp.hasMatch(url)) return;
@@ -1032,18 +1032,13 @@ class ApproovService {
     String isolate = _isRootIsolate ? "root" : "background";
     Log.d("$TAG: $isolate updateRequest for $host: ${fetchResult.loggableToken}, ${stopWatch.elapsedMilliseconds}ms");
 
-    // if there was a configuration change we clear it by fetching the new config and clearing
-    // all the cached certificates which will force re-evaluation for new connections
+    // if there was a configuration change we fetch a new configuration, which will update
+    // the configuration epoch across all isolates and cause all delegate HttpClient caches to be
+    // cleared since the pins may have changed
     if (fetchResult.isConfigChanged) {
       await _fetchConfig();
-      _removeAllCertificates();
-      Log.d("$TAG: updateRequest, dynamic configuration update");
+      Log.d("$TAG: $isolate updateRequest, dynamic configuration update");
     }
-
-    // if a pin update is forced then this indicates the pins have been updated since the last time they
-    // where read, or that we never had any valid pins when the pinned client was created so we cannot allow
-    // the update to complete as this could leak an Approov token via an unpinned connection
-    if (fetchResult.isForceApplyPins) throw new ApproovNetworkException("Forced pin update required");
 
     // check the status of Approov token fetch
     if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
@@ -1233,11 +1228,6 @@ class ApproovService {
     _hostCertificates[host] = null;
   }
 
-  /// Removes all certificates from the cache. This is required when the Approov pins change.
-  static Future<void> _removeAllCertificates() async {
-    _hostCertificates.clear();
-  }
-
   /// Computes the SHA256 digest of the Subject Public Key Info (SPKI) of an ASN1.DER encoded certificate.
   ///
   /// @param certificate for which to compute the SPKI digest
@@ -1256,25 +1246,16 @@ class ApproovService {
   /// host (which may have been previously cached) and then we restrict it to those corresponding to pinned
   /// certificates).
   ///
-  /// @param url to be used to obtain certificates for a particular host that is being pinned
+  /// @param host is the hostname being pinned
   /// @param approovPins is the set of pins for the host as configured in Approov
-  /// @param hostCerts is a future that will return the certificates for the host
+  /// @param hostCerts are the certificates obtained for the host
   /// @return a list of host certificates that match the Approov pins
   static Future<List<Uint8List>> _hostPinCertificates(
-      Uri url, Set<String> approovPins, Future<List<Uint8List>?> hostCerts) async {
-    // get certificates for host
-    List<Uint8List>? hostCertificates = await hostCerts;
-    if (hostCertificates == null) {
-      // if there are none then we return an empty list, which will cause a failure when we try and connect
-      Log.d("$TAG: Cannot get certificates for $url");
-      return [];
-    }
-
-    // collect only those certificates for pinning that match the Approov pins
-    String info = "Certificate chain for $url: ";
+      String host, Set<String> approovPins, List<Uint8List> hostCerts) async {
+    String info = "certificate chain for $host: ";
     bool isFirst = true;
     List<Uint8List> hostPinCerts = [];
-    for (final cert in hostCertificates) {
+    for (final cert in hostCerts) {
       Uint8List serverSpkiSha256Digest = Uint8List.fromList(_spkiSha256Digest(cert).bytes);
       if (!isFirst) info += ", ";
       isFirst = false;
@@ -1295,18 +1276,18 @@ class ApproovService {
   /// connection to the host will fail. These certificates that match a pin are set to the trusted certificates for the
   /// security context so that connections are restricted to ensure one of those certificates is present.
   ///
-  /// @param url of the host that is being pinned
+  /// @param host that is being pinned
   /// @param approovPins is the set of pins for the host as configured in Approov
-  /// @param hostCerts is a future that will return the certificates for the host
+  /// @param hostCerts are the fetech certificates for the host
   /// @return a security context that enforces pinning by using the host certificates that match the pins set in Approov
   static Future<SecurityContext> _pinnedSecurityContext(
-    Uri url,
+    String host,
     Set<String> approovPins,
-    Future<List<Uint8List>?> hostCerts,
+    List<Uint8List> hostCerts,
   ) async {
     // determine the list of X.509 ASN.1 DER host certificates that match any Approov pins for the host - if this
     // returns an empty list then nothing will be trusted
-    List<Uint8List> pinCerts = await ApproovService._hostPinCertificates(url, approovPins, hostCerts);
+    List<Uint8List> pinCerts = await ApproovService._hostPinCertificates(host, approovPins, hostCerts);
 
     // add the certificates to create the security context of trusted certs
     SecurityContext securityContext = SecurityContext(withTrustedRoots: false);
@@ -1581,25 +1562,32 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
 }
 
 /// ApproovHttpClient is a drop-in replacement for the Dart IO library's HttpClient. If Approov is configured to protect
-/// an API on a host, then an ApproovHTTPClient will automatically set up pinning and add relevant headers for a request,
+/// an API on a host, then an ApproovHttpClient will automatically set up pinning and add relevant headers for a request,
 /// and also provide secret substitution if required. Otherwise the behaviour of ApproovHttpClient is the same as for the
 /// Dart IO library's HttpClient.
 class ApproovHttpClient implements HttpClient {
   // logging tag
   static const String TAG = "ApproovService:ApproovHttpClient";
 
-  // internal HttpClient delegate, will be rebuilt if pinning fails (or pins change). It is not set to a pinned
-  // HttpClient initially, but this is just used to hold any state updates that might occur before a connection
-  // request forces a pinned HttpClient to be used.
-  HttpClient _delegatePinnedHttpClient = HttpClient();
+  // global configuration epoch for the delegate HttpClient cache. If the global configuration epoch changes then
+  // the cache must be cleared because the pins may have changed that are embodied in the pinned security context.
+  int _cachedConfigEpoch = 0;
 
-  // any future delegated pinned HttpClient that is currently being created - this is used to force serialization
-  // of delegate creation in case there are many open operations in flight concurrently
-  Future<HttpClient>? _futureDelegatePinnedHttpClient;
+  // internal HttpClient delegates for each host domain that is connected to. These will be rebuilt if pinning
+  // fails, pins change or configurable attributes on the client are modified. We need to have a different delegate
+  // per host because they will have different pinning sets. Changes to the properties of the HttpClient need to be
+  // delegated to all of the active clients.  Note that a null entry indicates that the no connection client should be used.
+  Map<String, Future<HttpClient?>> _delegatePinnedHttpClients = {};
 
-  // the host to which the delegate pinned HttpClient delegate is connected and, optionally, pinning. Used to detect when to
-  // re-create the delegate pinned HttpClient.
-  String? _connectedHost;
+  // list of all delegate HttpClients that have been created. This is used to make sure all delegates are closed
+  // when the ApproovHttpClient is closed. We cannot use the map since entries may be removed due to pinning or
+  // configuration changes. Note that a null entry indicates that the no connection client should be used.
+  List<Future<HttpClient?>> _createdPinnedHttpClients = [];
+
+  // a special client that is used when we want to force a no connection, such as when there is a forced pin
+  // update required or if we have failed to fetch the certificates for a host. Note we don't update its
+  // attribute state since it is not relevant given it will never actually connect.
+  HttpClient _noConnectionClient = HttpClient(context: SecurityContext(withTrustedRoots: false));
 
   // indicates whether the ApproovHttpClient has been closed by calling close()
   bool _isClosed = false;
@@ -1613,6 +1601,11 @@ class ApproovHttpClient implements HttpClient {
   Future<bool> Function(String host, int port, String scheme, String? realm)? _authenticateProxy;
   final List _proxyCredentials = [];
   bool Function(X509Certificate cert, String host, int port)? _badCertificateCallback;
+  Duration _idleTimeout = const Duration(seconds: 15);
+  Duration? _connectionTimeout;
+  int? _maxConnectionsPerHost;
+  bool _autoUncompress = true;
+  String? _userAgent;
 
   /// Pinning failure callback function for the badCertificateCallback of HttpClient. This is called if the pinning
   /// certificate check failed, which can indicate a certificate update on the server or a Man-in-the-Middle (MitM)
@@ -1625,10 +1618,11 @@ class ApproovHttpClient implements HttpClient {
   /// @param port is the port of the server
   /// @return false to prevent the request from being sent
   bool _pinningFailureCallback(X509Certificate cert, String host, int port) {
-    // reset host certificates and delegate pinned HttpClient connected host to force them to be recreated
+    // reset host certificates and delegate pinned HttpClient for the host to force
+    // them to be recreated
     Log.d("$TAG: pinning failure callback for $host");
     ApproovService._removeCertificates(host);
-    _connectedHost = null;
+    _delegatePinnedHttpClients.remove(host);
 
     // call any user defined function for its side effects only (as we are going to reject anyway)
     Function(X509Certificate cert, String host, int port)? badCertificateCallback = _badCertificateCallback;
@@ -1644,15 +1638,15 @@ class ApproovHttpClient implements HttpClient {
   /// HTTP client is copied from the current delegate.
   ///
   /// @param url for which to set up pinning
-  /// @return the new HTTP client
-  Future<HttpClient> _createPinnedHttpClient(Uri url) async {
+  /// @return the future delegate HTTP client, or null if the no connnection client should be used
+  Future<HttpClient?> _createPinnedHttpClient(Uri url) async {
     // enusre the SDK has been initialized at this point
     await ApproovService._requireInitialized();
 
     // prefetch the host certificates for the URL so this can be done in parallel with the token fetch
     final stopWatch = Stopwatch();
     stopWatch.start();
-    final hostCerts = ApproovService._fetchHostCertificates(url);
+    final futureHostCerts = ApproovService._fetchHostCertificates(url);
     final certStartTime = stopWatch.elapsedMilliseconds;
 
     // check if the URL matches one of the exclusion regexs
@@ -1663,7 +1657,6 @@ class ApproovHttpClient implements HttpClient {
     }
 
     // perform an Approov token fetching unless the URL is excluded
-    bool forceNoConnection = false;
     int tokenStartTime = 0;
     int tokenFinishTime = 0;
     Map<dynamic, dynamic> allPins = {};
@@ -1673,21 +1666,20 @@ class ApproovHttpClient implements HttpClient {
       allPins = await ApproovService._getPins("public-key-sha256");
     } else {
       // start the process of fetching an Approov token to get the latest configuration
-      final approovToken = ApproovService._fetchApproovToken(url.host);
+      final futureApproovToken = ApproovService._fetchApproovToken(url.host);
       tokenStartTime = stopWatch.elapsedMilliseconds - certStartTime;
 
       // wait on the Approov token fetching to complete - but note we do not fail if a token fetch was not possible
-      _TokenFetchResult fetchResult = await approovToken;
+      _TokenFetchResult fetchResult = await futureApproovToken;
       tokenFinishTime = stopWatch.elapsedMilliseconds - tokenStartTime - certStartTime;
       Log.d(
           "$TAG: $isolate pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}, certStart ${certStartTime}ms, tokenStart ${tokenStartTime}ms, tokenFinish ${tokenFinishTime}ms");
 
-      // if the config has changed (and therefore pins may have updated) then clear any cached certificates - fetching the
-      // config clears the config changed state)
+      // if the config has changed then fetch a new configuration which will cause the configuration epoch to change
+      // across all isolates, which will cause pinned delegate clients to be cleared since the pins may have changed
       if (fetchResult.isConfigChanged) {
         await ApproovService._fetchConfig();
-        ApproovService._removeAllCertificates();
-        Log.d("$TAG: $isolate configuration change");
+        Log.d("$TAG: $isolate creating pinning delegate client, dynamic configuration update");
       }
 
       // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
@@ -1703,10 +1695,14 @@ class ApproovHttpClient implements HttpClient {
         Log.d("$TAG: $isolate pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
         // if we are forced to update pins then this likely means that no pins were ever fetched and in this
-        // case we must force a no connection so that another fetch can be tried again - this is because
+        // case we must force a no connection so that another fetch can be tried again. This is because
         // once a connection is made it might not be dropped until the app is executed so there is no possibility
-        // to retry and get the pins without restarting the app
-        forceNoConnection = fetchResult.isForceApplyPins;
+        // to retry and get the pins without restarting the app. We just return the no connection client
+        // in this case.
+        if (fetchResult.isForceApplyPins) {
+          Log.d("$TAG: $isolate force apply pins asserted so forcing no connection");
+          return null;
+        }
       }
     }
 
@@ -1721,42 +1717,44 @@ class ApproovHttpClient implements HttpClient {
       if (pins.isEmpty && (allPins["*"] != null)) pins = (allPins["*"] as List);
     }
 
+    // get the fetched certificates and just force a no connection if they couldn't be obtained
+    List<Uint8List>? hostCerts = await futureHostCerts;
+    if (hostCerts == null) {
+      Log.d("$TAG: $isolate cannot get certificates by probing $url");
+      return null;
+    }
+
     // construct a new http client
     HttpClient? newHttpClient;
-    if (forceNoConnection) {
-      // we have been unable to obtain the pins so we need to force the client to not connect
-      // by not trusting anything - this will give us a further opportunity to fetch pins again
-      // later when network connectivity may have resumed
-      SecurityContext securityContext = SecurityContext(withTrustedRoots: false);
-      newHttpClient = HttpClient(context: securityContext);
-      Log.d("$TAG: $isolate forcing no connection for ${url.host}");
-    } else if (pins.isEmpty)
+    if (pins.isEmpty) {
       // if there are no pins then we can just use a standard http client
       newHttpClient = HttpClient();
-    else {
+      Log.d("$TAG: $isolate client ready for ${url.host}, without pinning restriction");
+    } else {
       // create HttpClient with pinning enabled by determining the particular certificates we should trust
       Set<String> approovPins = HashSet();
       for (final pin in pins) {
         approovPins.add(pin);
       }
-      SecurityContext securityContext = await ApproovService._pinnedSecurityContext(url, approovPins, hostCerts);
+      SecurityContext securityContext = await ApproovService._pinnedSecurityContext(url.host, approovPins, hostCerts!);
       newHttpClient = HttpClient(context: securityContext);
       final pinningFinishTime = stopWatch.elapsedMilliseconds - tokenFinishTime - tokenStartTime - certStartTime;
       Log.d("$TAG: $isolate client ready for ${url.host}, pinningFinish ${pinningFinishTime}ms");
     }
 
-    // remember the connected host so we don't have to repeat this for connections to the same host
-    _connectedHost = url.host;
-
-    // copy state from old HttpClient to the new one, including state held on this class which cannot be retrieved
-    HttpClient? oldHttpClient = _delegatePinnedHttpClient;
-    newHttpClient.idleTimeout = oldHttpClient.idleTimeout;
-    newHttpClient.connectionTimeout = oldHttpClient.connectionTimeout;
-    newHttpClient.maxConnectionsPerHost = oldHttpClient.maxConnectionsPerHost;
-    newHttpClient.autoUncompress = oldHttpClient.autoUncompress;
+    // copy state to the new delegate HttpClient
+    newHttpClient.idleTimeout = _idleTimeout!;
+    newHttpClient.connectionTimeout = _connectionTimeout;
+    if (_maxConnectionsPerHost != null) {
+      newHttpClient.maxConnectionsPerHost = _maxConnectionsPerHost;
+    }
+    newHttpClient.autoUncompress = _autoUncompress;
     newHttpClient.authenticate = _authenticate;
     newHttpClient.connectionFactory = _connectionFactory;
     newHttpClient.keyLog = _keyLog;
+    if (_userAgent != null) {
+      newHttpClient.userAgent = _userAgent;
+    }
     for (var credential in _credentials) {
       newHttpClient.addCredentials(credential[0], credential[1], credential[2]);
     }
@@ -1788,67 +1786,83 @@ class ApproovHttpClient implements HttpClient {
     }
   }
 
+  // Gets the delegate HttpClient to be used for the given URL. This looks up the
+  // cache of clients per host and creates a new one if there is no entry for the host.
+  // The cache is populated with Futures since we want to be able to cache as soon as
+  // possible to avoid parallel Http operations from also creating unnecesary new
+  // delegate clients for the same host. Any given host may be forced to a no connection
+  // client and in this case we don't want to cache this as we want to quickly recover
+  // from these cases, e.g. if we were unable to successfully fetch the certificates
+  // for the host.
+  //
+  // @param url for which to get the delegate HttpClient
+  // @return the future delegate HttpClient (which will be null for no connection)
+  Future<HttpClient?> _getDelegateHttpClient(Uri url) async {
+    // check that the cache is still valid and hasn't been fully invalidated due to
+    // a cnnfiguration epoch change which invalidates all clients because the pins
+    // may have changed which impacts the pinned security contexts
+    if (ApproovService._configEpoch != _cachedConfigEpoch) {
+      _delegatePinnedHttpClients.clear();
+      _cachedConfigEpoch = ApproovService._configEpoch;
+      String isolate = ApproovService._isRootIsolate ? "root" : "background";
+      Log.d("$TAG: $isolate configuration epoch changed, clearing delegate cache");
+    }
+
+    // lookup the cache and see if a new delegate is required - note that we
+    // want to do this without an awaits because we wish parallel fetch operations
+    // to the same domain to share the same delegate client if possible
+    var createNewDelegate = false;
+    var futureDelegateClient = _delegatePinnedHttpClients[url.host];
+    if (futureDelegateClient == null) {
+      // if the cache is empty for the host then we definitely need to create a new delegate
+      // and we don't need to await on its result
+      createNewDelegate = true;
+    } else {
+      // if there is any entry then we await on it to see if it is null (no connection)
+      // since we don't want to use the cached version of this because we want to force
+      // a reprobing of the certificates in case that was the issue
+      final delegateClient = await futureDelegateClient;
+      if (delegateClient == null) createNewDelegate = true;
+    }
+
+    // create a new delegate if required
+    if (createNewDelegate) {
+      // don't create new delegates if the ApproovHttpClient has been closed
+      if (_isClosed) {
+        throw StateError("ApproovHttpClient is closed");
+      }
+
+      // create a new delegate client and add its future to the cache
+      String isolate = ApproovService._isRootIsolate ? "root" : "background";
+      Log.d("$TAG: $isolate creating pinned delegate creation for $url.host:$url.port");
+      futureDelegateClient = _createPinnedHttpClient(url);
+      _createdPinnedHttpClients.add(futureDelegateClient);
+      _delegatePinnedHttpClients[url.host] = futureDelegateClient;
+    }
+
+    // provide the future delegate client
+    return futureDelegateClient;
+  }
+
   @override
   Future<HttpClientRequest> open(String method, String host, int port, String path) async {
-    // serialize if we are already creating a future delegate pinned http client - we
-    // might be able to use that if it is for the same host
-    if (_futureDelegatePinnedHttpClient != null) {
-      await _futureDelegatePinnedHttpClient;
-    }
-
-    // if already closed then just delegate
-    if (_isClosed) {
-      return _delegatePinnedHttpClient.open(method, host, port, path);
-    }
-
-    // if we have an active connection to a different host we need to tear down the delegate
-    // pinned HttpClient and create a new one with the correct pinning
-    if (_connectedHost != host) {
-      String isolate = ApproovService._isRootIsolate ? "root" : "background";
-      Log.d("$TAG: $isolate open pinned delegate creation for $host:$port");
-      Uri url = Uri(scheme: "https", host: host, port: port, path: path);
-      Future<HttpClient> futureDelegatePinnedHttpClient = _createPinnedHttpClient(url);
-      _futureDelegatePinnedHttpClient = futureDelegatePinnedHttpClient;
-      HttpClient httpClient = await futureDelegatePinnedHttpClient;
-      _futureDelegatePinnedHttpClient = null;
-      _delegatePinnedHttpClient.close();
-      _delegatePinnedHttpClient = httpClient;
-    }
-
-    // delegate the open operation to the pinned http client and then wrap the provided HttpClientRequest
-    return _delegatePinnedHttpClient.open(method, host, port, path).then((request) {
+    // obtain the delegate HttpClient to be used (with null meaning no connection should
+    // be forcdd) and then wrap the provided HttpClientRequest
+    Uri url = Uri(scheme: "https", host: host, port: port, path: path);
+    var delegateClient = await _getDelegateHttpClient(url);
+    if (delegateClient == null) delegateClient = _noConnectionClient;
+    return delegateClient.open(method, host, port, path).then((request) {
       return _ApproovHttpClientRequest(request);
     });
   }
 
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
-    // serialize if we are already creating a future delegate pinned http client - we
-    // might be able to use that if it is for the same host
-    if (_futureDelegatePinnedHttpClient != null) {
-      await _futureDelegatePinnedHttpClient;
-    }
-
-    // if already closed then just delegate
-    if (_isClosed) {
-      return _delegatePinnedHttpClient.openUrl(method, url);
-    }
-
-    // if we have an active connection to a different host we need to tear down the delegate
-    // pinned HttpClient and create a new one with the correct pinning
-    if (_connectedHost != url.host) {
-      String isolate = ApproovService._isRootIsolate ? "root" : "background";
-      Log.d("$TAG: $isolate openUrl pinned delegate creation for $url.host:$url.port");
-      Future<HttpClient> futureDelegatePinnedHttpClient = _createPinnedHttpClient(url);
-      _futureDelegatePinnedHttpClient = futureDelegatePinnedHttpClient;
-      HttpClient httpClient = await futureDelegatePinnedHttpClient;
-      _futureDelegatePinnedHttpClient = null;
-      _delegatePinnedHttpClient.close();
-      _delegatePinnedHttpClient = httpClient;
-    }
-
-    // delegate the open operation to the pinned http client and then wrap the provided HttpClientRequest
-    return _delegatePinnedHttpClient.openUrl(method, url).then((request) {
+    // obtain the delegate HttpClient to be used (with null meaning no connection should
+    // be forcdd) and then wrap the provided HttpClientRequest
+    var delegateClient = await _getDelegateHttpClient(url);
+    if (delegateClient == null) delegateClient = _noConnectionClient;
+    return delegateClient.openUrl(method, url).then((request) {
       return _ApproovHttpClientRequest(request);
     });
   }
@@ -1890,70 +1904,90 @@ class ApproovHttpClient implements HttpClient {
   Future<HttpClientRequest> patchUrl(Uri url) => openUrl("patch", url);
 
   @override
-  set idleTimeout(Duration timeout) => _delegatePinnedHttpClient.idleTimeout = timeout;
-  @override
-  Duration get idleTimeout => _delegatePinnedHttpClient.idleTimeout;
+  set idleTimeout(Duration timeout) {
+    _idleTimeout = timeout;
+    _delegatePinnedHttpClients.clear();
+  }
 
   @override
-  set connectionTimeout(Duration? timeout) => _delegatePinnedHttpClient.connectionTimeout = timeout;
-  @override
-  Duration? get connectionTimeout => _delegatePinnedHttpClient.connectionTimeout;
+  Duration get idleTimeout => _idleTimeout;
 
   @override
-  set maxConnectionsPerHost(int? maxConnections) => _delegatePinnedHttpClient.maxConnectionsPerHost = maxConnections;
-  @override
-  int? get maxConnectionsPerHost => _delegatePinnedHttpClient.maxConnectionsPerHost;
+  set connectionTimeout(Duration? timeout) {
+    _connectionTimeout = timeout;
+    _delegatePinnedHttpClients.clear();
+  }
 
   @override
-  set autoUncompress(bool autoUncompress) => _delegatePinnedHttpClient.autoUncompress = autoUncompress;
-  @override
-  bool get autoUncompress => _delegatePinnedHttpClient.autoUncompress;
+  Duration? get connectionTimeout => _connectionTimeout;
 
   @override
-  set userAgent(String? userAgent) => _delegatePinnedHttpClient.userAgent = userAgent;
+  set maxConnectionsPerHost(int? maxConnections) {
+    _maxConnectionsPerHost = maxConnections;
+    _delegatePinnedHttpClients.clear();
+  }
+
   @override
-  String? get userAgent => _delegatePinnedHttpClient.userAgent;
+  int? get maxConnectionsPerHost => _maxConnectionsPerHost;
+
+  @override
+  set autoUncompress(bool autoUncompress) {
+    _autoUncompress = autoUncompress;
+    _delegatePinnedHttpClients.clear();
+  }
+
+  @override
+  bool get autoUncompress => _autoUncompress;
+
+  @override
+  set userAgent(String? userAgent) {
+    _userAgent = userAgent;
+    _delegatePinnedHttpClients.clear();
+  }
+
+  @override
+  String? get userAgent => _userAgent;
 
   @override
   set authenticate(Future<bool> f(Uri url, String scheme, String? realm)?) {
     _authenticate = f;
-    _delegatePinnedHttpClient.authenticate = f;
+    _delegatePinnedHttpClients.clear();
   }
 
   @override
   set connectionFactory(Future<ConnectionTask<Socket>> f(Uri url, String? proxyHost, int? proxyPort)?) {
     _connectionFactory = f;
-    _delegatePinnedHttpClient.connectionFactory = f;
+    _delegatePinnedHttpClients.clear();
   }
 
   @override
   set keyLog(void f(String line)?) {
     _keyLog = f;
-    _delegatePinnedHttpClient.keyLog = f;
+    _delegatePinnedHttpClients.clear();
   }
 
   @override
   void addCredentials(Uri url, String realm, HttpClientCredentials credentials) {
     _credentials.add({url, realm, credentials});
-    _delegatePinnedHttpClient.addCredentials(url, realm, credentials);
+    _delegatePinnedHttpClients.clear();
   }
 
   @override
   set findProxy(String f(Uri url)?) {
     _findProxy = f;
-    _delegatePinnedHttpClient.findProxy = f;
+    _delegatePinnedHttpClients.clear();
   }
 
   @override
   set authenticateProxy(Future<bool> f(String host, int port, String scheme, String? realm)?) {
     _authenticateProxy = f;
-    _delegatePinnedHttpClient.authenticateProxy = f;
+    _delegatePinnedHttpClients.clear();
   }
 
   @override
   void addProxyCredentials(String host, int port, String realm, HttpClientCredentials credentials) {
     _proxyCredentials.add({host, port, realm, credentials});
-    _delegatePinnedHttpClient.addProxyCredentials(host, port, realm, credentials);
+    _delegatePinnedHttpClients.clear();
   }
 
   @override
@@ -1963,8 +1997,18 @@ class ApproovHttpClient implements HttpClient {
 
   @override
   void close({bool force = false}) async {
-    _delegatePinnedHttpClient.close(force: force);
     _isClosed = true;
+    var closeNoConnectionClient = false;
+    for (var futureDelegateClient in _createdPinnedHttpClients) {
+      final delegateClient = await futureDelegateClient;
+      if (delegateClient == null)
+        closeNoConnectionClient = true;
+      else
+        delegateClient.close(force: force);
+    }
+    if (closeNoConnectionClient) {
+      _noConnectionClient.close(force: force);
+    }
   }
 }
 

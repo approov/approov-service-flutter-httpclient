@@ -186,6 +186,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       resultMap.put("IsForceApplyPins", tokenFetchResult.isForceApplyPins());
       resultMap.put("MeasurementConfig", tokenFetchResult.getMeasurementConfig());
       resultMap.put("LoggableToken", tokenFetchResult.getLoggableToken());
+      resultMap.put("ConfigEpoch", configEpoch);
       countDownLatch.countDown();
       if (handler != null)
         handler.post(() -> fgChannel.invokeMethod("response", resultMap));
@@ -226,6 +227,11 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
 
   // Provides any prior initial comment supplied, or empty string if none was provided
   private String initializedComment;
+
+  // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
+  // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
+  // across multiple different isolates which have independent Dart level state.
+  private int configEpoch = 0;
 
   // Handler for the main thread to allow call backs since they must be in the context of that thread
   private Handler handler;
@@ -295,10 +301,13 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       }
     } else if (call.method.equals("fetchConfig")) {
       try {
+        configEpoch++;
         result.success(Approov.fetchConfig());
       } catch(Exception e) {
         result.error("Approov.fetchConfig", e.getLocalizedMessage(), null);
       }
+    } else if (call.method.equals("getConfigEpoch")) {
+        result.success(configEpoch);
     } else if (call.method.equals("getDeviceID")) {
       try {
         result.success(Approov.getDeviceID());

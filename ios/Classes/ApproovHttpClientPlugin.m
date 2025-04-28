@@ -213,8 +213,9 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
  *
  * @param transactionID is the transaction ID to use for the fetch
  * @param channel is the FlutterMethodChannel to use any callback to Flutter or nil if not required
+ * @param configEpoch is the configuration epoch that the fetch was made within
  */
-- (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel;
+- (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel configEpoch:(int)configEpoch;
 
 /**
  * Provides string mappings for the token fetch status with strings that are compatible with the common dart layer. This
@@ -245,6 +246,9 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // FlutterMethodChannel to use for any callback to Flutter or nil if no callback is needed
 @property FlutterMethodChannel *channel;
 
+// configuration epoch that the fetch was made within
+@property int configEpoch;
+
 // Dispatch group to indicate when the fetch is complete
 @property dispatch_group_t group;
 
@@ -258,12 +262,13 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 @implementation InternalCallBackHandler
 
 // see interface for documentation
-- (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel
+- (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel configEpoch:(int)configEpoch
 {
     self = [super init];
     if (self) {
         _transactionID = transactionID;
         _channel = channel;
+        _configEpoch = configEpoch;
         _group = dispatch_group_create();
         _results = [NSMutableDictionary dictionary];
         dispatch_group_enter(_group);
@@ -330,6 +335,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         _results[@"MeasurementConfig"] = tokenFetchResult.measurementConfig;
     if (tokenFetchResult.loggableToken != nil)
         _results[@"LoggableToken"] = tokenFetchResult.loggableToken;
+    _results[@"ConfigEpoch"] = [NSNumber numberWithInt:_configEpoch];
 
     // leave the dispatch group to indicate that the results are available
     dispatch_group_leave(_group);
@@ -367,6 +373,11 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // Provides any prior initial comment supplied, or empty string if none was provided
 @property NSString *initializedComment;
 
+// Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
+// track of dynamic configuration changes and the state is held in the platform layer as we want this to work
+// across multiple different isolates which have independent Dart level state.
+@property int configEpoch;
+
 // Active set of callback handlers to the Approov SDK - accessess to this must be protected as it could be
 // accessed from multiple threads
 @property NSMutableDictionary<NSString*, InternalCallBackHandler*> *activeCallBackHandlers;
@@ -398,6 +409,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     [registrar addMethodCallDelegate:instance channel:fgChannel];
     instance.bgChannel = bgChannel;
     [registrar addMethodCallDelegate:instance channel:bgChannel];
+    instance.configEpoch = 0;
     instance.activeCallBackHandlers = [NSMutableDictionary dictionary];
     instance.activeCertFetches = [NSMutableDictionary dictionary];
 }
@@ -445,7 +457,10 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             result(nil);
         }
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
+        _configEpoch++;
         result([Approov fetchConfig]);
+    } else if ([@"getConfigEpoch" isEqualToString:call.method]) {
+        result([NSNumber numberWithInt:_configEpoch]);
     } else if ([@"getDeviceID" isEqualToString:call.method]) {
         result([Approov getDeviceID]);
     } else if ([@"getPins" isEqualToString:call.method]) {
@@ -504,7 +519,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         NSString *transactionID = call.arguments[@"transactionID"];
         BOOL performCallBack = [call.arguments[@"performCallBack"] isEqualToString:@"YES"];
         InternalCallBackHandler *callBackHandler = [[InternalCallBackHandler alloc] initWithTransactionID:transactionID
-            channel:(performCallBack ? _fgChannel : nil)];
+            channel:(performCallBack ? _fgChannel : nil) configEpoch:_configEpoch];
         [Approov fetchApproovToken:^(ApproovTokenFetchResult *tokenFetchResult) {
             [callBackHandler postWithTokenFetchResult:tokenFetchResult];
         } :call.arguments[@"url"]];
@@ -521,7 +536,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             newDef = call.arguments[@"newDef"];
         BOOL performCallBack = [call.arguments[@"performCallBack"] isEqualToString:@"YES"];
         InternalCallBackHandler *callBackHandler = [[InternalCallBackHandler alloc] initWithTransactionID:transactionID
-            channel:(performCallBack ? _fgChannel : nil)];
+            channel:(performCallBack ? _fgChannel : nil) configEpoch:_configEpoch];
         [Approov fetchSecureString:^(ApproovTokenFetchResult *tokenFetchResult) {
             [callBackHandler postWithTokenFetchResult:tokenFetchResult];
         } :call.arguments[@"key"] :newDef];
@@ -535,7 +550,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         NSString *transactionID = call.arguments[@"transactionID"];
         BOOL performCallBack = [call.arguments[@"performCallBack"] isEqualToString:@"YES"];
         InternalCallBackHandler *callBackHandler = [[InternalCallBackHandler alloc] initWithTransactionID:transactionID
-            channel:(performCallBack ? _fgChannel : nil)];
+            channel:(performCallBack ? _fgChannel : nil) configEpoch:_configEpoch];
         [Approov fetchCustomJWT:^(ApproovTokenFetchResult *tokenFetchResult) {
             [callBackHandler postWithTokenFetchResult:tokenFetchResult];
         } :call.arguments[@"payload"]];
