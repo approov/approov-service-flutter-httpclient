@@ -1847,7 +1847,7 @@ class ApproovHttpClient implements HttpClient {
   @override
   Future<HttpClientRequest> open(String method, String host, int port, String path) async {
     // obtain the delegate HttpClient to be used (with null meaning no connection should
-    // be forcdd) and then wrap the provided HttpClientRequest
+    // be forced) and then wrap the provided HttpClientRequest
     Uri url = Uri(scheme: "https", host: host, port: port, path: path);
     var delegateClient = await _getDelegateHttpClient(url);
     if (delegateClient == null) delegateClient = _noConnectionClient;
@@ -1859,7 +1859,7 @@ class ApproovHttpClient implements HttpClient {
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
     // obtain the delegate HttpClient to be used (with null meaning no connection should
-    // be forcdd) and then wrap the provided HttpClientRequest
+    // be fored) and then wrap the provided HttpClientRequest
     var delegateClient = await _getDelegateHttpClient(url);
     if (delegateClient == null) delegateClient = _noConnectionClient;
     return delegateClient.openUrl(method, url).then((request) {
