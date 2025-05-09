@@ -25,13 +25,13 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 // Definition for a special class to fetch host certificates by implementing a NSURLSessionTaskDelegate that
 // is called upon initial connection to get the certificates but the connection is dropped at that point.
-@interface HostCertificatesFetcher: NSObject<NSURLSessionTaskDelegate>
+@interface CertificatesFetcher: NSObject<NSURLSessionTaskDelegate>
 
 /**
  * Initialize ready to fetch certificates for a host.
  *
  * @param transactionID is the transaction ID to use for the fetch
- * @param channel is the FlutterMethodChannel to use for the communication with Flutter
+ * @param channel is the FlutterMethodChannel to use any callback to Flutter or nil if not required
  */
 - (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel;
 
@@ -44,10 +44,17 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
  */
 - (void)fetchWithURL:(NSURL *_Nonnull)url;
 
+/**
+ * Get the result from the certificate fetch, waiting if the result is not yet available.
+ *
+ * @return result map provided after connection
+ */
+- (NSDictionary *)getResult;
+
 // NSString of the transaction ID for the fetch
 @property NSString *transactionID;
 
-// FlutterMethodChannel to use for the communication with Flutter
+// FlutterMethodChannel to use for any callback to Flutter or nil if no callback is needed
 @property FlutterMethodChannel *channel;
 
 // NSURLSession to use for the certificate fetch
@@ -56,10 +63,17 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // Host certificates that were fetched
 @property NSArray<FlutterStandardTypedData *> *hostCertificates;
 
+// Dispatch group to indicate when the fetch is complete
+@property dispatch_group_t group;
+
+// The results from the fetch operation
+@property NSMutableDictionary *results;
+
 @end
 
-// Implementation of the HostCertificatesFetcher which obtains certificate chains for particular domains in order to implement the pinning.
-@implementation HostCertificatesFetcher
+// Implementation of the CertificatesFetcher which obtains certificate chains for a particular domain
+// in order to implement the pinning.
+@implementation CertificatesFetcher
 
 // see interface for documentation
 - (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel
@@ -69,11 +83,16 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         // hold the parameters for when the request is made
         _transactionID = transactionID;
         _channel = channel;
+        _results = [NSMutableDictionary dictionary];
 
         // create the Session for the subsequent request
         NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         sessionConfig.timeoutIntervalForResource = FETCH_CERTIFICATES_TIMEOUT;
         _session = [NSURLSession sessionWithConfiguration:sessionConfig delegate:self delegateQueue:nil];
+
+        // create a dispatch group and enter it to determine when the fetch is complete
+        _group = dispatch_group_create();
+        dispatch_group_enter(_group);
     }
     return self;
 }
@@ -90,33 +109,41 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     NSURLSessionDataTask *certFetchTask = [_session dataTaskWithRequest:certFetchRequest
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error)
         {
-            // create a dicitonary for returning the results
-            NSMutableDictionary *results = [NSMutableDictionary dictionary];
-            results[@"TransactionID"] = _transactionID;
-
             // we expect error cancelled because URLSession:task:didReceiveChallenge:completionHandler: always deliberately
             // fails the challenge because we don't need the request to succeed to retrieve the certificates
+            self->_results[@"TransactionID"] = self->_transactionID;
             if (error == nil) {
                 // if no error occurred, the certificate check of the NSURLSessionTaskDelegate protocol has not been called.
                 // Don't provide any host certificates.
-                results[@"Error"] = @"Failed to get host certificates";
+                self->_results[@"Error"] = @"Failed to get host certificates";
             } else if (error.code != NSURLErrorCancelled) {
                 // if an error other than NSURLErrorCancelled occurred, don't return any host certificates
-                results[@"Error"] = [NSString stringWithFormat:@"Failed to get host certificates with error: %@",
+                self->_results[@"Error"] = [NSString stringWithFormat:@"Failed to get host certificates with error: %@",
                     error.localizedDescription];
             } else {
                 // the host certificates have been collected by the URLSession:task:didReceiveChallenge:completionHandler: method
-                results[@"Certificates"] = _hostCertificates;
+                self->_results[@"Certificates"] = self->_hostCertificates;
             }
 
-            // send the results back to the Flutter layer but we can only do this on the main thread
-            dispatch_async(dispatch_get_main_queue(), ^{
-               [_channel invokeMethod:@"response" arguments:results];
-            });
+            // leave the dispatch group to indicate that the results are available
+            dispatch_group_leave(self->_group);
+
+            // send the results back to the Flutter layer if required, but we can only do this on the main thread
+            if (self->_channel != nil) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self->_channel invokeMethod:@"response" arguments:self->_results];
+                });
+            }
         }];
 
     // Make the request
     [certFetchTask resume];
+}
+
+// see interface for documentation
+- (NSDictionary *)getResult {
+    dispatch_group_wait(_group, DISPATCH_TIME_FOREVER);
+    return _results;
 }
 
 // Collect the host certificates using the certificate check of the NSURLSessionTaskDelegate protocol
@@ -177,38 +204,80 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 @end
 
-@interface ApproovHttpClientPlugin()
+// Definition for a utility class for providing a callback handler for receiving an Approov fetch
+// result on an internal asynchronous request.
+@interface InternalCallBackHandler: NSObject
 
-// The method channel to use for the communication with Flutter
+/**
+ * Initialize ready to handle asynchronous results.
+ *
+ * @param transactionID is the transaction ID to use for the fetch
+ * @param channel is the FlutterMethodChannel to use any callback to Flutter or nil if not required
+ * @param configEpoch is the configuration epoch that the fetch was made within
+ */
+- (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel configEpoch:(int)configEpoch;
+
+/**
+ * Provides string mappings for the token fetch status with strings that are compatible with the common dart layer. This
+ * uses the Android style.
+ *
+ * @param approovTokenFetchStatus the fetch status from the iOS Approov SDK
+ * @return string representation of the status
+ */
+- (nonnull NSString *)stringFromApproovTokenFetchStatus:(ApproovTokenFetchStatus)approovTokenFetchStatus;
+
+/**
+ * Posts the result from the Approov SDK for an asynchronous fetch operation.
+ *
+ * @param tokenFetchResult is the result of the asynchronous fetch
+ */
+- (void)postWithTokenFetchResult:(ApproovTokenFetchResult *_Nonnull)tokenFetchResult;
+
+/**
+ * Get the result from fetch operation, waiting if the result is not yet available.
+ *
+ * @return result map provided from the result
+ */
+- (NSDictionary *)getResult;
+
+// NSString of the transaction ID for the fetch
+@property NSString *transactionID;
+
+// FlutterMethodChannel to use for any callback to Flutter or nil if no callback is needed
 @property FlutterMethodChannel *channel;
 
-// Provides any prior initial configuration supplied, to allow a reinitialization caused by
-// a hot restart if the configuration is the same
-@property NSString *initializedConfig;
+// configuration epoch that the fetch was made within
+@property int configEpoch;
+
+// Dispatch group to indicate when the fetch is complete
+@property dispatch_group_t group;
+
+// The results from the fetch operation
+@property NSMutableDictionary *results;
 
 @end
 
-// ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
-// MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
-// presented on any particular URL to implement the pinning.
-@implementation ApproovHttpClientPlugin
+// Implementation for a utility class for providing a callback handler for receiving an Approov fetch
+// result on an internal asynchronous request.
+@implementation InternalCallBackHandler
 
-+ (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
-    FlutterMethodChannel *channel = [[FlutterMethodChannel alloc]
-                 initWithName: @"approov_service_flutter_httpclient"
-              binaryMessenger: [registrar messenger]
-                        codec: [FlutterStandardMethodCodec sharedInstance]];
-    ApproovHttpClientPlugin* instance = [[ApproovHttpClientPlugin alloc] init];
-    instance.channel = channel;
-    [registrar addMethodCallDelegate:instance channel:channel];
+// see interface for documentation
+- (nullable instancetype)initWithTransactionID:(NSString *)transactionID channel:(FlutterMethodChannel *)channel configEpoch:(int)configEpoch
+{
+    self = [super init];
+    if (self) {
+        _transactionID = transactionID;
+        _channel = channel;
+        _configEpoch = configEpoch;
+        _group = dispatch_group_create();
+        _results = [NSMutableDictionary dictionary];
+        dispatch_group_enter(_group);
+    }
+    return self;
 }
 
-// Provides string mappings for the token fetch status with strings that are compatible with the common dart layer. This
-// uses the Android style.
-//
-// @param approovTokenFetchStatus the fetch status from the iOS Approov SDK
-// @return string representation of the status
-+ (nonnull NSString *)stringFromApproovTokenFetchStatus:(ApproovTokenFetchStatus)approovTokenFetchStatus
+// see interface for documentation
+- (nonnull NSString *)stringFromApproovTokenFetchStatus:(ApproovTokenFetchStatus)approovTokenFetchStatus
 {
     switch (approovTokenFetchStatus) {
         case ApproovTokenFetchStatusSuccess:
@@ -246,33 +315,152 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     }
 }
 
+// see interface for documentation
+- (void)postWithTokenFetchResult:(ApproovTokenFetchResult *_Nonnull)tokenFetchResult
+{
+    // collect the results from the fetch
+    _results[@"TransactionID"] = _transactionID;
+    _results[@"TokenFetchStatus"] = [self stringFromApproovTokenFetchStatus:tokenFetchResult.status];
+    if (tokenFetchResult.token != nil)
+        _results[@"Token"] = tokenFetchResult.token;
+    if (tokenFetchResult.secureString != nil)
+        _results[@"SecureString"] = tokenFetchResult.secureString;
+    if ( tokenFetchResult.ARC != nil)
+        _results[@"ARC"] = tokenFetchResult.ARC;
+    if (tokenFetchResult.rejectionReasons != nil)
+        _results[@"RejectionReasons"] = tokenFetchResult.rejectionReasons;
+    _results[@"IsConfigChanged"] = [NSNumber numberWithBool:tokenFetchResult.isConfigChanged];
+    _results[@"IsForceApplyPins"] = [NSNumber numberWithBool:tokenFetchResult.isForceApplyPins];
+    if (tokenFetchResult.measurementConfig != nil)
+        _results[@"MeasurementConfig"] = tokenFetchResult.measurementConfig;
+    if (tokenFetchResult.loggableToken != nil)
+        _results[@"LoggableToken"] = tokenFetchResult.loggableToken;
+    _results[@"ConfigEpoch"] = [NSNumber numberWithInt:_configEpoch];
+
+    // leave the dispatch group to indicate that the results are available
+    dispatch_group_leave(_group);
+
+    // send the results back to the Flutter layer if required, but we can only do this on the main thread
+    if (_channel != nil) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self->_channel invokeMethod:@"response" arguments:self->_results];
+        });
+    }
+}
+
+// see interface for documentation
+- (NSDictionary *)getResult {
+    dispatch_group_wait(_group, DISPATCH_TIME_FOREVER);
+    return _results;
+}
+
+@end
+
+@interface ApproovHttpClientPlugin()
+
+// The method channel to use for the foreground communication with Flutter. This is used for all operations
+// from the Dart root isolate including any callbacks to the Dart layer.
+@property FlutterMethodChannel *fgChannel;
+
+// The method channel to use for the background communication with Flutter. This is for operations that may block
+// for some period called from background isolates and thus it uses a background task queue.
+@property FlutterMethodChannel *bgChannel;
+
+// Provides any prior initial configuration supplied, to allow a reinitialization caused by
+// a hot restart if the configuration is the same or nil if not initialized.
+@property NSString *initializedConfig;
+
+// Provides any prior initial comment supplied, or empty string if none was provided
+@property NSString *initializedComment;
+
+// Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
+// track of dynamic configuration changes and the state is held in the platform layer as we want this to work
+// across multiple different isolates which have independent Dart level state.
+@property int configEpoch;
+
+// Active set of callback handlers to the Approov SDK - accessess to this must be protected as it could be
+// accessed from multiple threads
+@property NSMutableDictionary<NSString*, InternalCallBackHandler*> *activeCallBackHandlers;
+
+// Active set of certificate fetches - accessess to this must be protected as it could be
+// accessed from multiple threads
+@property NSMutableDictionary<NSString*, CertificatesFetcher*> *activeCertFetches;  
+
+@end
+
+// ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
+// MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
+// presented on any particular URL to implement the pinning.
+@implementation ApproovHttpClientPlugin
+
++ (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
+    FlutterMethodChannel *fgChannel = [[FlutterMethodChannel alloc]
+                 initWithName: @"approov_service_flutter_httpclient_fg"
+              binaryMessenger: [registrar messenger]
+                        codec: [FlutterStandardMethodCodec sharedInstance]];
+    NSObject<FlutterTaskQueue>* taskQueue = [[registrar messenger] makeBackgroundTaskQueue];
+    FlutterMethodChannel *bgChannel = [[FlutterMethodChannel alloc]
+                 initWithName: @"approov_service_flutter_httpclient_bg"
+              binaryMessenger: [registrar messenger]
+                        codec: [FlutterStandardMethodCodec sharedInstance]
+                    taskQueue: taskQueue];
+    ApproovHttpClientPlugin* instance = [[ApproovHttpClientPlugin alloc] init];
+    instance.fgChannel = fgChannel;
+    [registrar addMethodCallDelegate:instance channel:fgChannel];
+    instance.bgChannel = bgChannel;
+    [registrar addMethodCallDelegate:instance channel:bgChannel];
+    instance.configEpoch = 0;
+    instance.activeCallBackHandlers = [NSMutableDictionary dictionary];
+    instance.activeCertFetches = [NSMutableDictionary dictionary];
+}
+
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
     if ([@"initialize" isEqualToString:call.method]) {
+        // get the initialization arguments
         NSError* error = nil;
         NSString *initialConfig = call.arguments[@"initialConfig"];
-        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || (call.arguments[@"comment"] != [NSNull null])) {
-            // only actually initialize if we haven't before, if there is a change in the
-            // configuration provided or thi is a new renitialization
+        NSString *commentString = nil;
+        if (call.arguments[@"comment"] != [NSNull null])
+            commentString = call.arguments[@"comment"];
+        else
+            commentString = @"";
+
+        // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
+        // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
+        // that the SDK is already initialized whereas this native layer holds its state
+        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || ![_initializedComment isEqualToString:commentString]) {
+            // this is a new config or a reinitialization
             NSString *updateConfig = nil;
             if (call.arguments[@"updateConfig"] != [NSNull null])
                 updateConfig = call.arguments[@"updateConfig"];
-            NSString *comment = nil;
-            if (call.arguments[@"comment"] != [NSNull null])
-                comment = call.arguments[@"comment"];
-            [Approov initialize:initialConfig updateConfig:updateConfig comment:comment error:&error];
-            if (error == nil) {
-                _initializedConfig = initialConfig;
-                result(nil);
-            } else {
-                result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
-                    message:error.domain details:error.localizedDescription]);
+            [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
+            if (error != nil) {
+                // check if the error message contains "Approov SDK already initialized"
+                if ([error.localizedDescription rangeOfString:@"Approov SDK already initialized" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                    // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
+                    // different isolates and the initialization was made by a different quickstart (note we don't currently check
+                    // for the compatibility of the SDK parameters but a future version of the SDK will do this to avoid needing to
+                    // catch this at all)
+                    NSLog(@"ApproovService: Ignoring initialization error in Approov SDK: %@", error.localizedDescription);
+                } else {
+                    result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
+                                            message:error.domain
+                                            details:error.localizedDescription]);
+                    return;
+                }
             }
+            _initializedConfig = initialConfig;
+            _initializedComment = commentString;
+            result(nil);
         } else {
             // the previous initialization is compatible
             result(nil);
         }
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
+        _configEpoch++;
         result([Approov fetchConfig]);
+    } else if ([@"getConfigEpoch" isEqualToString:call.method]) {
+        result([NSNumber numberWithInt:_configEpoch]);
     } else if ([@"getDeviceID" isEqualToString:call.method]) {
         result([Approov getDeviceID]);
     } else if ([@"getPins" isEqualToString:call.method]) {
@@ -299,76 +487,95 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         } else {
             // start the certificate fetch process asynchronously
             NSString *transactionID = call.arguments[@"transactionID"];
-            HostCertificatesFetcher *certFetcher = [[HostCertificatesFetcher alloc] initWithTransactionID:transactionID channel:_channel];
+            BOOL performCallBack = [call.arguments[@"performCallBack"] isEqualToString:@"YES"];
+            CertificatesFetcher *certFetcher = [[CertificatesFetcher alloc]
+                initWithTransactionID:transactionID channel:(performCallBack ? _fgChannel : nil)];
             [certFetcher fetchWithURL:url];
+            if (!performCallBack) {
+                @synchronized(_activeCertFetches) {
+                    [_activeCertFetches setObject:certFetcher forKey:transactionID];
+                }
+            }
             result(nil);
+        }
+     } else if ([@"waitForHostCertificates" isEqualToString:call.method]) {
+        NSString *transactionID = call.arguments[@"transactionID"];
+        CertificatesFetcher *certFetcher = nil;
+        @synchronized(_activeCertFetches) {
+            certFetcher = [_activeCertFetches objectForKey:transactionID];
+        }
+        if (certFetcher == nil) {
+            result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
+                message:@"ApproovService has no active certificate fetch"
+                details:@"No active certificate fetch for transaction ID"]);
+        } else {
+            @synchronized(_activeCertFetches) {
+               [_activeCertFetches removeObjectForKey:transactionID];
+            }
+            NSDictionary *certResults = [certFetcher getResult];
+            result(certResults);
         }
     } else if ([@"fetchApproovToken" isEqualToString:call.method]) {
         NSString *transactionID = call.arguments[@"transactionID"];
+        BOOL performCallBack = [call.arguments[@"performCallBack"] isEqualToString:@"YES"];
+        InternalCallBackHandler *callBackHandler = [[InternalCallBackHandler alloc] initWithTransactionID:transactionID
+            channel:(performCallBack ? _fgChannel : nil) configEpoch:_configEpoch];
         [Approov fetchApproovToken:^(ApproovTokenFetchResult *tokenFetchResult) {
-            // collect the results from the token fetch
-            NSMutableDictionary *results = [NSMutableDictionary dictionary];
-            results[@"TransactionID"] = transactionID;
-            results[@"TokenFetchStatus"] = [ApproovHttpClientPlugin stringFromApproovTokenFetchStatus:tokenFetchResult.status];
-            results[@"Token"] = tokenFetchResult.token;
-            results[@"ARC"] = tokenFetchResult.ARC;
-            results[@"RejectionReasons"] = tokenFetchResult.rejectionReasons;
-            results[@"IsConfigChanged"] = [NSNumber numberWithBool:tokenFetchResult.isConfigChanged];
-            results[@"IsForceApplyPins"] = [NSNumber numberWithBool:tokenFetchResult.isForceApplyPins];
-            results[@"MeasurementConfig"] = tokenFetchResult.measurementConfig;
-            results[@"LoggableToken"] = tokenFetchResult.loggableToken;
-
-            // send the results back to the Flutter layer but we can only do this on the main thread
-            dispatch_async(dispatch_get_main_queue(), ^{
-               [_channel invokeMethod:@"response" arguments:results];
-            });
+            [callBackHandler postWithTokenFetchResult:tokenFetchResult];
         } :call.arguments[@"url"]];
+        if (!performCallBack) {
+            @synchronized(_activeCallBackHandlers) {
+                [_activeCallBackHandlers setObject:callBackHandler forKey:transactionID];
+            }
+        }
         result(nil);
     } else if ([@"fetchSecureString" isEqualToString:call.method]) {
         NSString *transactionID = call.arguments[@"transactionID"];
         NSString *newDef = nil;
         if (call.arguments[@"newDef"] != [NSNull null])
             newDef = call.arguments[@"newDef"];
+        BOOL performCallBack = [call.arguments[@"performCallBack"] isEqualToString:@"YES"];
+        InternalCallBackHandler *callBackHandler = [[InternalCallBackHandler alloc] initWithTransactionID:transactionID
+            channel:(performCallBack ? _fgChannel : nil) configEpoch:_configEpoch];
         [Approov fetchSecureString:^(ApproovTokenFetchResult *tokenFetchResult) {
-            // collect the results from the secure string fetch
-            NSMutableDictionary *results = [NSMutableDictionary dictionary];
-            results[@"TransactionID"] = transactionID;
-            results[@"TokenFetchStatus"] = [ApproovHttpClientPlugin  stringFromApproovTokenFetchStatus:tokenFetchResult.status];
-            results[@"Token"] = tokenFetchResult.token;
-            if (tokenFetchResult.secureString != nil)
-               results[@"SecureString"] = tokenFetchResult.secureString;
-            results[@"ARC"] = tokenFetchResult.ARC;
-            results[@"RejectionReasons"] = tokenFetchResult.rejectionReasons;
-            results[@"IsConfigChanged"] = [NSNumber numberWithBool:tokenFetchResult.isConfigChanged];
-            results[@"IsForceApplyPins"] = [NSNumber numberWithBool:tokenFetchResult.isForceApplyPins];
-            results[@"LoggableToken"] = tokenFetchResult.loggableToken;
-
-            // send the results back to the Flutter layer but we can only do this on the main thread
-            dispatch_async(dispatch_get_main_queue(), ^{
-               [_channel invokeMethod:@"response" arguments:results];
-            });
+            [callBackHandler postWithTokenFetchResult:tokenFetchResult];
         } :call.arguments[@"key"] :newDef];
+        if (!performCallBack) {
+            @synchronized(_activeCallBackHandlers) {
+                [_activeCallBackHandlers setObject:callBackHandler forKey:transactionID];
+            }
+        }
         result(nil);
     } else if ([@"fetchCustomJWT" isEqualToString:call.method]) {
         NSString *transactionID = call.arguments[@"transactionID"];
+        BOOL performCallBack = [call.arguments[@"performCallBack"] isEqualToString:@"YES"];
+        InternalCallBackHandler *callBackHandler = [[InternalCallBackHandler alloc] initWithTransactionID:transactionID
+            channel:(performCallBack ? _fgChannel : nil) configEpoch:_configEpoch];
         [Approov fetchCustomJWT:^(ApproovTokenFetchResult *tokenFetchResult) {
-            // collect the results from the custom JWT fetch
-            NSMutableDictionary *results = [NSMutableDictionary dictionary];
-            results[@"TransactionID"] = transactionID;
-            results[@"TokenFetchStatus"] = [ApproovHttpClientPlugin stringFromApproovTokenFetchStatus:tokenFetchResult.status];
-            results[@"Token"] = tokenFetchResult.token;
-            results[@"ARC"] = tokenFetchResult.ARC;
-            results[@"RejectionReasons"] = tokenFetchResult.rejectionReasons;
-            results[@"IsConfigChanged"] = [NSNumber numberWithBool:tokenFetchResult.isConfigChanged];
-            results[@"IsForceApplyPins"] = [NSNumber numberWithBool:tokenFetchResult.isForceApplyPins];
-            results[@"LoggableToken"] = tokenFetchResult.loggableToken;
-
-            // send the results back to the Flutter layer but we can only do this on the main thread
-            dispatch_async(dispatch_get_main_queue(), ^{
-               [_channel invokeMethod:@"response" arguments:results];
-            });
+            [callBackHandler postWithTokenFetchResult:tokenFetchResult];
         } :call.arguments[@"payload"]];
+        if (!performCallBack) {
+            @synchronized(_activeCallBackHandlers) {
+                [_activeCallBackHandlers setObject:callBackHandler forKey:transactionID];
+            }
+        }
         result(nil);
+     } else if ([@"waitForFetchValue" isEqualToString:call.method]) {
+        NSString *transactionID = call.arguments[@"transactionID"];
+        InternalCallBackHandler *callBackHandler = nil;
+        @synchronized(_activeCallBackHandlers) {
+            callBackHandler = [_activeCallBackHandlers objectForKey:transactionID];
+        }
+        if (callBackHandler == nil) {
+           result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
+                message:@"ApproovService has no active fetch"
+                details:@"No active fetch for transaction ID"]);
+        } else {
+            @synchronized(_activeCallBackHandlers) {
+               [_activeCallBackHandlers removeObjectForKey:transactionID];
+            }
+            result([callBackHandler getResult]);
+        }
     } else {
         result(FlutterMethodNotImplemented);
     }
