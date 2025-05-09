@@ -5,7 +5,7 @@ repository: https://github.com/approov/approov_service_flutter_httpclient
 homepage: https://pub.dev/publishers/approov.io/packages
 
 environment:
-  sdk: ">=3.0.0"
+  sdk: ">=3.0.0 <4.0.0"
   flutter: ">=3.7.0"
 
 dependencies:
