@@ -1736,14 +1736,14 @@ class ApproovHttpClient implements HttpClient {
       for (final pin in pins) {
         approovPins.add(pin);
       }
-      SecurityContext securityContext = await ApproovService._pinnedSecurityContext(url.host, approovPins, hostCerts!);
+      SecurityContext securityContext = await ApproovService._pinnedSecurityContext(url.host, approovPins, hostCerts);
       newHttpClient = HttpClient(context: securityContext);
       final pinningFinishTime = stopWatch.elapsedMilliseconds - tokenFinishTime - tokenStartTime - certStartTime;
       Log.d("$TAG: $isolate client ready for ${url.host}, pinningFinish ${pinningFinishTime}ms");
     }
 
     // copy state to the new delegate HttpClient
-    newHttpClient.idleTimeout = _idleTimeout!;
+    newHttpClient.idleTimeout = _idleTimeout;
     newHttpClient.connectionTimeout = _connectionTimeout;
     if (_maxConnectionsPerHost != null) {
       newHttpClient.maxConnectionsPerHost = _maxConnectionsPerHost;
