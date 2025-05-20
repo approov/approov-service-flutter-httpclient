@@ -1,3 +1,7 @@
+## [3.4.2] - (2025-May-20)
+- Async service initialize function now returns a future to enable awaits
+- Fix pub.dev listing to link to the correct github repo
+
 ## [3.4.1] - (2025-May-09)
 - Support calling Approov from main isolate and any background isolate
 - Performance improvements
