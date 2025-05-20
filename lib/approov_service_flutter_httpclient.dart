@@ -260,7 +260,7 @@ class ApproovService {
   ///
   /// @param config is the configuration string
   /// @param comment is an optional comment used during initialization or null if not required
-  static void initialize(String config, [String? comment]) async {
+  static Future<void> initialize(String config, [String? comment]) async {
     if (_futureInitialization != null) {
       // ensure we wait in case initialize has been called previously
       await _futureInitialization;
