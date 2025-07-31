@@ -1,3 +1,6 @@
+## [3.5.0] - (31-July-2025)
+- Update platform SDK to version 3.5.0
+
 ## [3.4.2] - (2025-May-20)
 - Async service initialize function now returns a future to enable awaits
 - Fix pub.dev listing to link to the correct github repo
