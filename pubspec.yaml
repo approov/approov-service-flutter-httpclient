@@ -1,6 +1,6 @@
 name: approov_service_flutter_httpclient
 description: Approov enabled HttpClient
-version: 3.4.2
+version: 3.5.0
 repository: https://github.com/approov/approov-service-flutter-httpclient
 homepage: https://pub.dev/publishers/approov.io/packages
 
