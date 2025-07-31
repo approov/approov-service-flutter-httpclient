@@ -14,7 +14,7 @@ Pod::Spec.new do |s|
     s.public_header_files = 'Classes/**/*.h'
     s.dependency 'Flutter'
     s.dependency 'approov-ios-sdk', '~> 3.5.0'
-    s.platform = :ios, '12.0'
+    s.platform = :ios, '11.0'
     # Flutter.framework does not contain an i386 slice.
     s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
     #s.pod_target_xcconfig = { 'VALID_ARCHS' => 'arm64 x86_64' }
