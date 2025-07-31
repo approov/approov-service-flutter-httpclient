@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
     s.name             = 'approov_service_flutter_httpclient'
-    s.version          = '3.4.0'
+    s.version          = '3.5.0'
     s.summary          = 'Flutter plugin for accessing Approov SDK attestation services.'
     s.description      = <<-DESC
   A Flutter plugin using mobile API protection provided by the Approov SDK. If the provided Approov SDK is configured to protect an API, then the plugin will automatically set up pinning and add relevant headers for any request to the API.
