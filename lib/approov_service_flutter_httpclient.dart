@@ -21,6 +21,7 @@ import 'dart:convert';
 import 'dart:core';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:asn1lib/asn1lib.dart';
 import 'package:crypto/crypto.dart';
@@ -33,6 +34,16 @@ import 'package:http/io_client.dart' as httpio;
 import 'package:logger/logger.dart';
 import 'package:pem/pem.dart';
 import 'package:mutex/mutex.dart';
+import 'src/message_signing.dart';
+export 'src/message_signing.dart'
+    show
+        ApproovMessageSigning,
+        ApproovSigningContext,
+        SignatureAlgorithm,
+        SignatureBaseBuilder,
+        SignatureDigest,
+        SignatureParameters,
+        SignatureParametersFactory;
 
 // Logger
 final Logger Log = Logger();
@@ -227,6 +238,10 @@ class ApproovService {
   // map of URL regexs that should be excluded from any Approov protection, mapped to the regular expressions
   static Map<String, RegExp> _exclusionURLRegexs = {};
 
+  // configuration for automatically signing outbound requests using Approov
+  static ApproovMessageSigning? _messageSigning;
+  static bool _installMessageSigningAvailable = true;
+
   // cached host certificates obtaining from probing the relevant host domains
   static Map<String, List<Uint8List>?> _hostCertificates = Map<String, List<Uint8List>?>();
 
@@ -252,6 +267,14 @@ class ApproovService {
       transaction.complete(arguments);
       _platformTransactions.remove(transactionID);
     }
+  }
+
+  static Map<String, List<String>> _snapshotHeaders(HttpHeaders headers) {
+    final snapshot = <String, List<String>>{};
+    headers.forEach((name, values) {
+      snapshot[name] = List<String>.from(values);
+    });
+    return snapshot;
   }
 
   /// Initialize the Approov SDK. This must be called prior to any other methods on the ApproovService. This does not
@@ -384,6 +407,30 @@ class ApproovService {
     Log.d("$TAG: setApproovHeader $header $prefix");
     _approovTokenHeader = header;
     _approovTokenPrefix = prefix;
+  }
+
+  /// Enables automatic message signing for outgoing requests. The Approov SDK provides the signing key after a
+  /// successful attestation and the resulting signature is attached to each protected request via the standard
+  /// `Signature` and `Signature-Input` headers as defined by the HTTP Message Signatures specification. Provide
+  /// a [defaultFactory] to control which components are included in the canonical representation, or optionally
+  /// override the configuration for specific hosts via [hostFactories].
+  static void enableMessageSigning({
+    SignatureParametersFactory? defaultFactory,
+    Map<String, SignatureParametersFactory>? hostFactories,
+  }) {
+    final messageSigning = ApproovMessageSigning();
+    messageSigning.setDefaultFactory(defaultFactory ?? SignatureParametersFactory.generateDefaultFactory());
+    if (hostFactories != null) {
+      hostFactories.forEach((host, factory) => messageSigning.putHostFactory(host, factory));
+    }
+    _messageSigning = messageSigning;
+    Log.d("$TAG: enableMessageSigning configured");
+  }
+
+  /// Disables automatic Approov message signing for subsequent requests.
+  static void disableMessageSigning() {
+    if (_messageSigning != null) Log.d("$TAG: disableMessageSigning");
+    _messageSigning = null;
   }
 
   /// Sets a binding header that must be present on all requests using the Approov service. A
@@ -1004,8 +1051,9 @@ class ApproovService {
   /// information about the reason for the rejection.
   ///
   /// @param request is the HttpClientRequest to which Approov is being added
+  /// @param pendingBodyBytes holds any buffered body bytes available before the request is sent, or null for streaming
   /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
-  static Future<void> _updateRequest(HttpClientRequest request) async {
+  static Future<void> _updateRequest(HttpClientRequest request, Uint8List? pendingBodyBytes) async {
     // check if the URL matches one of the exclusion regexs and just return if so
     await _requireInitialized();
     String url = request.uri.toString();
@@ -1136,6 +1184,100 @@ class ApproovService {
           // we are unable to get the secure string due to a more permanent error
           throw new ApproovException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
       }
+    }
+
+    if (_messageSigning != null && fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+      try {
+        await _applyMessageSigning(request, pendingBodyBytes);
+      } on ApproovException {
+        rethrow;
+      } catch (err) {
+        throw ApproovException("Message signing failed: $err");
+      }
+    }
+  }
+
+  static Future<void> _applyMessageSigning(HttpClientRequest request, Uint8List? pendingBodyBytes) async {
+    final messageSigning = _messageSigning;
+    if (messageSigning == null) return;
+
+    final context = ApproovSigningContext(
+      requestMethod: request.method,
+      uri: request.uri,
+      headers: _snapshotHeaders(request.headers),
+      bodyBytes: pendingBodyBytes,
+      tokenHeaderName: _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
+      onSetHeader: (name, value) => request.headers.set(name, value, preserveHeaderCase: true),
+      onAddHeader: (name, value) => request.headers.add(name, value, preserveHeaderCase: true),
+    );
+
+    final params = messageSigning.buildParametersFor(request.uri, context);
+    if (params == null) {
+      Log.d("$TAG: no message signing parameters for ${request.uri}");
+      return;
+    }
+
+    final signatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
+    String signature;
+    try {
+      signature = await _signCanonicalMessage(signatureBase, params.algorithm);
+    } on StateError {
+      if (params.algorithm == SignatureAlgorithm.ecdsaP256Sha256) {
+        Log.w("$TAG: install message signing unavailable, falling back to account signing");
+        params.algorithm = SignatureAlgorithm.hmacSha256;
+        params.setAlg('hmac-sha256');
+        signature = await _signCanonicalMessage(signatureBase, params.algorithm);
+      } else {
+        rethrow;
+      }
+    }
+    if (signature.isEmpty) {
+      Log.d("$TAG: message signing returned empty signature for ${request.uri}");
+      return;
+    }
+
+    final signatureLabel = params.signatureLabel();
+    final signatureHeader = '$signatureLabel=:${signature}:';
+    context.setHeader('Signature', signatureHeader);
+
+    final signatureInput = '$signatureLabel=${params.serializeComponentValue()}';
+    context.setHeader('Signature-Input', signatureInput);
+
+    if (params.debugMode) {
+      final digest = sha256.convert(utf8.encode(signatureBase)).bytes;
+      final baseDigestHeader = 'sha-256=:${base64Encode(digest)}:';
+      context.setHeader('Signature-Base-Digest', baseDigestHeader);
+    }
+  }
+
+  static Future<String> _signCanonicalMessage(String message, SignatureAlgorithm algorithm) async {
+    switch (algorithm) {
+      case SignatureAlgorithm.ecdsaP256Sha256:
+        return await _getInstallMessageSignature(message);
+      case SignatureAlgorithm.hmacSha256:
+      default:
+        return await getMessageSignature(message);
+    }
+  }
+
+  static Future<String> _getInstallMessageSignature(String message) async {
+    if (!_installMessageSigningAvailable) {
+      throw StateError('install message signing not supported');
+    }
+    try {
+      final result = await _fgChannel.invokeMethod<String>('getInstallMessageSignature', <String, dynamic>{
+        "message": message,
+      });
+      if (result != null && result.isNotEmpty) return result;
+      throw StateError('install message signature empty');
+    } on MissingPluginException {
+      _installMessageSigningAvailable = false;
+      Log.w("$TAG: getInstallMessageSignature not available on this platform");
+      throw StateError('install message signing not supported');
+    } catch (err) {
+      _installMessageSigningAvailable = false;
+      Log.w("$TAG: getInstallMessageSignature error: $err");
+      throw StateError('install message signing not supported');
     }
   }
 
@@ -1398,6 +1540,9 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   // true if the request has been updated with Approov related headers
   bool _requestUpdated = false;
 
+  // true if the body will be provided through a stream, meaning we cannot cache the payload bytes
+  bool _hasStreamBody = false;
+
   // Construct a new _ApproovHttpClientRequest that delegates to the given request. This adds Approov as late as possible while
   // the headers are still mutable.
   //
@@ -1411,8 +1556,9 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   // Thus pending write operations are held and issue after the header updates.
   Future _updateRequestIfRequired() async {
     if (!_requestUpdated) {
+      final Uint8List? pendingBodyBytes = _snapshotPendingBodyBytes();
       // update the request while the headers can still be mutated
-      await ApproovService._updateRequest(_delegateRequest);
+      await ApproovService._updateRequest(_delegateRequest, pendingBodyBytes);
       _requestUpdated = true;
 
       // now perform any pending write operations
@@ -1421,6 +1567,53 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
       }
       _pendingWriteOps = <_PendingWriteOp>[];
     }
+  }
+
+  Uint8List? _snapshotPendingBodyBytes() {
+    if (_hasStreamBody) {
+      return null;
+    }
+    if (_pendingWriteOps.isEmpty) {
+      return Uint8List(0);
+    }
+    final encoding = _delegateRequest.encoding ?? utf8;
+    final builder = BytesBuilder(copy: false);
+    for (final pending in _pendingWriteOps) {
+      switch (pending.type) {
+        case _WriteOpType.add:
+          if (pending.data != null) builder.add(pending.data!);
+          break;
+        case _WriteOpType.write:
+          final str = pending.object?.toString() ?? "";
+          builder.add(encoding.encode(str));
+          break;
+        case _WriteOpType.writeAll:
+          if (pending.objects != null) {
+            final sep = pending.separator ?? "";
+            var isFirst = true;
+            for (final element in pending.objects!) {
+              if (!isFirst && sep.isNotEmpty) {
+                builder.add(encoding.encode(sep));
+              }
+              final str = element?.toString() ?? "";
+              builder.add(encoding.encode(str));
+              isFirst = false;
+            }
+          }
+          break;
+        case _WriteOpType.writeCharCode:
+          builder.add(encoding.encode(String.fromCharCode(pending.charCode)));
+          break;
+        case _WriteOpType.writeln:
+          final str = pending.object?.toString() ?? "";
+          builder.add(encoding.encode(str));
+          builder.add(encoding.encode("\n"));
+          break;
+        default:
+          break;
+      }
+    }
+    return builder.toBytes();
   }
 
   @override
@@ -1500,6 +1693,7 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
 
   @override
   Future addStream(Stream<List<int>> stream) async {
+    _hasStreamBody = true;
     await _updateRequestIfRequired();
     return _delegateRequest.addStream(stream);
   }
