@@ -3,3 +3,7 @@
 .gradle
 .dart_tool
 pubspec.lock
+.idea
+android/local.properties
+android/build/reports/problems/problems-report.html
+AGENTS.md
