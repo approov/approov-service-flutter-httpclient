@@ -33,7 +33,9 @@ class SfStringItem {
 
 /// Holds configuration for message signature parameters, mirroring the Swift implementation.
 class SignatureParameters {
-  SignatureParameters();
+  SignatureParameters()
+      : _componentIdentifiers = <SfStringItem>[],
+        _parameters = LinkedHashMap<String, dynamic>();
 
   SignatureParameters.copy(SignatureParameters other)
       : _componentIdentifiers = List<SfStringItem>.from(other._componentIdentifiers),
@@ -41,8 +43,8 @@ class SignatureParameters {
         debugMode = other.debugMode,
         algorithm = other.algorithm;
 
-  final List<SfStringItem> _componentIdentifiers = <SfStringItem>[];
-  final LinkedHashMap<String, dynamic> _parameters = LinkedHashMap<String, dynamic>();
+  final List<SfStringItem> _componentIdentifiers;
+  final LinkedHashMap<String, dynamic> _parameters;
 
   bool debugMode = false;
   SignatureAlgorithm algorithm = SignatureAlgorithm.hmacSha256;
