@@ -241,6 +241,7 @@ class ApproovService {
   // configuration for automatically signing outbound requests using Approov
   static ApproovMessageSigning? _messageSigning;
   static bool _installMessageSigningAvailable = true;
+  static bool _messageSigningDebugLogging = false;
 
   // cached host certificates obtaining from probing the relevant host domains
   static Map<String, List<Uint8List>?> _hostCertificates = Map<String, List<Uint8List>?>();
@@ -433,6 +434,13 @@ class ApproovService {
     _messageSigning = null;
   }
 
+  /// Enables verbose diagnostic logging for the message signing flow. This will log canonical signature bases,
+  /// signature headers, and request header snapshots. Do not enable this in production as it may expose sensitive
+  /// material such as Approov tokens or API keys in logs.
+  static void setMessageSigningDebugLogging(bool enabled) {
+    _messageSigningDebugLogging = enabled;
+    Log.d("$TAG: message signing debug logging ${enabled ? "enabled" : "disabled"}");
+  }
   /// Sets a binding header that must be present on all requests using the Approov service. A
   /// header should be chosen whose value is unchanging for most requests (such as an
   /// Authorization header). A hash of the header value is included in the issued Approov tokens
@@ -1164,10 +1172,14 @@ class ApproovService {
         }
 
         // process the returned Approov status
-        if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS)
+        if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
           // substitute the header value
-          request.headers.set(header, prefix + fetchResult.secureString!, preserveHeaderCase: true);
-        else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
+          final substitutedValue = prefix + fetchResult.secureString!;
+          request.headers.set(header, substitutedValue, preserveHeaderCase: true);
+          if (_messageSigningDebugLogging) {
+            Log.d("$TAG: substituted header $header with value $substitutedValue on ${request.uri}");
+          }
+        } else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
           // if the request is rejected then we provide a special exception with additional information
           throw new ApproovRejectionException(
               "Header substitution for $header: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
@@ -1218,6 +1230,17 @@ class ApproovService {
     }
 
     final signatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
+    if (_messageSigningDebugLogging) {
+      Log.d(
+          "$TAG: message signing request ${request.method} ${request.uri}\nHeaders before signing: ${context.snapshotHeaders()}");
+      Log.d("$TAG: message signing canonical base:\n$signatureBase");
+      if (pendingBodyBytes != null) {
+        Log.d(
+            "$TAG: message signing body bytes length=${pendingBodyBytes.length} base64=${base64Encode(pendingBodyBytes)}");
+      } else {
+        Log.d("$TAG: message signing body bytes unavailable (streaming)");
+      }
+    }
     String signature;
     try {
       signature = await _signCanonicalMessage(signatureBase, params.algorithm);
@@ -1248,6 +1271,11 @@ class ApproovService {
       final baseDigestHeader = 'sha-256=:${base64Encode(digest)}:';
       context.setHeader('Signature-Base-Digest', baseDigestHeader);
     }
+    if (_messageSigningDebugLogging) {
+      Log.d("$TAG: message signing headers applied Signature=$signatureHeader");
+      Log.d("$TAG: message signing headers applied Signature-Input=$signatureInput");
+      Log.d("$TAG: message signing resulting headers: ${context.snapshotHeaders()}");
+    }
   }
 
   static Future<String> _signCanonicalMessage(String message, SignatureAlgorithm algorithm) async {
@@ -1268,8 +1296,12 @@ class ApproovService {
       final result = await _fgChannel.invokeMethod<String>('getInstallMessageSignature', <String, dynamic>{
         "message": message,
       });
-      if (result != null && result.isNotEmpty) return result;
-      throw StateError('install message signature empty');
+      if (result == null || result.isEmpty) {
+        throw StateError('install message signature empty');
+      }
+      final derSignature = base64Decode(result);
+      final rawSignature = _decodeDerEcdsaSignature(derSignature);
+      return base64Encode(rawSignature);
     } on MissingPluginException {
       _installMessageSigningAvailable = false;
       Log.w("$TAG: getInstallMessageSignature not available on this platform");
@@ -1279,6 +1311,79 @@ class ApproovService {
       Log.w("$TAG: getInstallMessageSignature error: $err");
       throw StateError('install message signing not supported');
     }
+  }
+
+  static Uint8List _decodeDerEcdsaSignature(Uint8List der) {
+    int offset = 0;
+    if (der.isEmpty || der[offset] != 0x30) {
+      throw StateError('Invalid DER signature: missing sequence');
+    }
+    offset++;
+
+    int sequenceLength = _readDerLength(der, offset);
+    offset += _encodedLengthByteCount(der, offset);
+    if (sequenceLength != der.length - offset) {
+      throw StateError('Invalid DER signature: incorrect sequence length');
+    }
+
+    if (der[offset] != 0x02) {
+      throw StateError('Invalid DER signature: expected integer for r');
+    }
+    offset++;
+    int rLength = _readDerLength(der, offset);
+    offset += _encodedLengthByteCount(der, offset);
+    final rBytes = Uint8List.sublistView(der, offset, offset + rLength);
+    offset += rLength;
+
+    if (der[offset] != 0x02) {
+      throw StateError('Invalid DER signature: expected integer for s');
+    }
+    offset++;
+    int sLength = _readDerLength(der, offset);
+    offset += _encodedLengthByteCount(der, offset);
+    final sBytes = Uint8List.sublistView(der, offset, offset + sLength);
+
+    final rFixed = _toFixedLength(rBytes);
+    final sFixed = _toFixedLength(sBytes);
+    return Uint8List.fromList([...rFixed, ...sFixed]);
+  }
+
+  static int _readDerLength(Uint8List data, int offset) {
+    int lengthByte = data[offset];
+    if (lengthByte < 0x80) {
+      return lengthByte;
+    }
+    final numBytes = lengthByte & 0x7F;
+    if (numBytes == 0 || numBytes > 2) {
+      throw StateError('Unsupported DER length encoding');
+    }
+    int value = 0;
+    for (int i = 0; i < numBytes; i++) {
+      value = (value << 8) | data[offset + 1 + i];
+    }
+    return value;
+  }
+
+  static int _encodedLengthByteCount(Uint8List data, int offset) {
+    final lengthByte = data[offset];
+    if (lengthByte < 0x80) return 1;
+    return 1 + (lengthByte & 0x7F);
+  }
+
+  static Uint8List _toFixedLength(Uint8List value) {
+    const targetLength = 32;
+    int offset = 0;
+    while (offset < value.length && value[offset] == 0x00) {
+      offset++;
+    }
+    final stripped = Uint8List.sublistView(value, offset);
+    if (stripped.length > targetLength) {
+      throw StateError('DER integer longer than $targetLength bytes');
+    }
+    if (stripped.length == targetLength) return stripped;
+    final result = Uint8List(targetLength);
+    result.setRange(targetLength - stripped.length, targetLength, stripped);
+    return result;
   }
 
   /// Retrieves the certificates in the chain for the specified URL. These may be cached based on the host
