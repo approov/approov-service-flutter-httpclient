@@ -209,9 +209,20 @@ class SignatureParametersFactory {
     }
 
     for (final header in _optionalHeaders) {
-      if (context.hasField(header)) {
-        params.addComponentIdentifier(header);
+      if (!context.hasField(header)) continue;
+      if (header == 'content-length') {
+        final hasBodyBytes = context.bodyBytes != null && context.bodyBytes!.isNotEmpty;
+        final contentLengthValue = context.getComponentValue(SfStringItem('content-length'));
+        final shouldIncludeContentLength =
+            hasBodyBytes || (contentLengthValue != null && contentLengthValue.trim() != '0');
+        if (!shouldIncludeContentLength) {
+          // Dart's HttpClient drops an automatic "Content-Length: 0" header for GETs,
+          // so skip signing it to keep the canonical representation aligned with the
+          // transmitted request.
+          continue;
+        }
       }
+      params.addComponentIdentifier(header);
     }
 
     if (_bodyDigestAlgorithm != null) {

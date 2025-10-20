@@ -65,4 +65,27 @@ void main() {
 
     expect(signatureBase, expectedString);
   });
+
+  test('content-length header with zero body is not signed', () {
+    final headers = <String, List<String>>{
+      'content-length': ['0'],
+      'approov-token': ['Bearer token'],
+    };
+    final context = ApproovSigningContext(
+      requestMethod: 'get',
+      uri: Uri.parse('https://api.example.com/v1/resource'),
+      headers: headers,
+      bodyBytes: Uint8List(0),
+      tokenHeaderName: 'Approov-Token',
+      onSetHeader: (name, value) => headers[name.toLowerCase()] = [value],
+      onAddHeader: (name, value) => headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
+    );
+
+    final factory = SignatureParametersFactory.generateDefaultFactory();
+    final params = factory.build(context);
+
+    final componentNames = params.componentIdentifiers.map((item) => item.value).toList();
+    expect(componentNames.contains('content-length'), isFalse);
+    expect(params.serializeComponentValue().contains('"content-length"'), isFalse);
+  });
 }
