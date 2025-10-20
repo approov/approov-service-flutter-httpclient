@@ -1,3 +1,6 @@
+## [3.5.1] - (31-July-2025)
+- Update platform SDK to version 3.5.1
+
 ## [3.5.0] - (31-July-2025)
 - Update platform SDK to version 3.5.0
 
