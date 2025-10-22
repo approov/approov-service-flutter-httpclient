@@ -361,7 +361,10 @@ class ApproovSigningContext {
 
   String? ensureContentDigest(SignatureDigest digest, {required bool required}) {
     if (bodyBytes == null) {
-      return required ? throw StateError('Body digest required but body is not available') : null;
+      if (required) {
+        throw StateError('Body digest required but body is not available');
+      }
+      return null;
     }
     final bytes = switch (digest) {
       SignatureDigest.sha256 => sha256.convert(bodyBytes!).bytes,

@@ -241,8 +241,7 @@ class ApproovService {
   // configuration for automatically signing outbound requests using Approov
   static ApproovMessageSigning? _messageSigning;
   static bool _installMessageSigningAvailable = true;
-  static bool _messageSigningDebugLogging = false;
-
+  
   // cached host certificates obtaining from probing the relevant host domains
   static Map<String, List<Uint8List>?> _hostCertificates = Map<String, List<Uint8List>?>();
 
@@ -434,13 +433,6 @@ class ApproovService {
     _messageSigning = null;
   }
 
-  /// Enables verbose diagnostic logging for the message signing flow. This will log canonical signature bases,
-  /// signature headers, and request header snapshots. Do not enable this in production as it may expose sensitive
-  /// material such as Approov tokens or API keys in logs.
-  static void setMessageSigningDebugLogging(bool enabled) {
-    _messageSigningDebugLogging = enabled;
-    Log.d("$TAG: message signing debug logging ${enabled ? "enabled" : "disabled"}");
-  }
   /// Sets a binding header that must be present on all requests using the Approov service. A
   /// header should be chosen whose value is unchanging for most requests (such as an
   /// Authorization header). A hash of the header value is included in the issued Approov tokens
@@ -1176,9 +1168,6 @@ class ApproovService {
           // substitute the header value
           final substitutedValue = prefix + fetchResult.secureString!;
           request.headers.set(header, substitutedValue, preserveHeaderCase: true);
-          if (_messageSigningDebugLogging) {
-            Log.d("$TAG: substituted header $header with value $substitutedValue on ${request.uri}");
-          }
         } else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
           // if the request is rejected then we provide a special exception with additional information
           throw new ApproovRejectionException(
@@ -1230,26 +1219,17 @@ class ApproovService {
     }
 
     final signatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
-    if (_messageSigningDebugLogging) {
-      Log.d(
-          "$TAG: message signing request ${request.method} ${request.uri}\nHeaders before signing: ${context.snapshotHeaders()}");
-      Log.d("$TAG: message signing canonical base:\n$signatureBase");
-      if (pendingBodyBytes != null) {
-        Log.d(
-            "$TAG: message signing body bytes length=${pendingBodyBytes.length} base64=${base64Encode(pendingBodyBytes)}");
-      } else {
-        Log.d("$TAG: message signing body bytes unavailable (streaming)");
-      }
-    }
     String signature;
-    try {
+    try { // If we fail to sign with install signing, we fall back to account signing (install signing is safer but not always available)
       signature = await _signCanonicalMessage(signatureBase, params.algorithm);
     } on StateError {
       if (params.algorithm == SignatureAlgorithm.ecdsaP256Sha256) {
         Log.w("$TAG: install message signing unavailable, falling back to account signing");
         params.algorithm = SignatureAlgorithm.hmacSha256;
         params.setAlg('hmac-sha256');
-        signature = await _signCanonicalMessage(signatureBase, params.algorithm);
+        // Regenerate the signature base with the updated algorithm
+        final updatedSignatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
+        signature = await _signCanonicalMessage(updatedSignatureBase, params.algorithm);
       } else {
         rethrow;
       }
@@ -1271,11 +1251,7 @@ class ApproovService {
       final baseDigestHeader = 'sha-256=:${base64Encode(digest)}:';
       context.setHeader('Signature-Base-Digest', baseDigestHeader);
     }
-    if (_messageSigningDebugLogging) {
-      Log.d("$TAG: message signing headers applied Signature=$signatureHeader");
-      Log.d("$TAG: message signing headers applied Signature-Input=$signatureInput");
-      Log.d("$TAG: message signing resulting headers: ${context.snapshotHeaders()}");
-    }
+
   }
 
   static Future<String> _signCanonicalMessage(String message, SignatureAlgorithm algorithm) async {
@@ -1315,32 +1291,73 @@ class ApproovService {
 
   static Uint8List _decodeDerEcdsaSignature(Uint8List der) {
     int offset = 0;
-    if (der.isEmpty || der[offset] != 0x30) {
+    if (der.isEmpty) {
+      throw StateError('Invalid DER signature: buffer is empty');
+    }
+    if (offset >= der.length) {
+      throw StateError('Invalid DER signature: unexpected end of DER buffer at sequence');
+    }
+    if (der[offset] != 0x30) {
       throw StateError('Invalid DER signature: missing sequence');
     }
     offset++;
 
+    if (offset >= der.length) {
+      throw StateError('Invalid DER signature: unexpected end of DER buffer after sequence tag');
+    }
     int sequenceLength = _readDerLength(der, offset);
-    offset += _encodedLengthByteCount(der, offset);
+    int seqLenBytes = _encodedLengthByteCount(der, offset);
+    if (offset + seqLenBytes > der.length) {
+      throw StateError('Invalid DER signature: sequence length encoding exceeds buffer');
+    }
+    offset += seqLenBytes;
     if (sequenceLength != der.length - offset) {
       throw StateError('Invalid DER signature: incorrect sequence length');
     }
 
+    if (offset >= der.length) {
+      throw StateError('Invalid DER signature: unexpected end of DER buffer at r integer tag');
+    }
     if (der[offset] != 0x02) {
       throw StateError('Invalid DER signature: expected integer for r');
     }
     offset++;
+
+    if (offset >= der.length) {
+      throw StateError('Invalid DER signature: unexpected end of DER buffer at r length');
+    }
     int rLength = _readDerLength(der, offset);
-    offset += _encodedLengthByteCount(der, offset);
+    int rLenBytes = _encodedLengthByteCount(der, offset);
+    if (offset + rLenBytes > der.length) {
+      throw StateError('Invalid DER signature: r length encoding exceeds buffer');
+    }
+    offset += rLenBytes;
+    if (offset + rLength > der.length) {
+      throw StateError('r length exceeds buffer');
+    }
     final rBytes = Uint8List.sublistView(der, offset, offset + rLength);
     offset += rLength;
 
+    if (offset >= der.length) {
+      throw StateError('Invalid DER signature: unexpected end of DER buffer at s integer tag');
+    }
     if (der[offset] != 0x02) {
       throw StateError('Invalid DER signature: expected integer for s');
     }
     offset++;
+
+    if (offset >= der.length) {
+      throw StateError('Invalid DER signature: unexpected end of DER buffer at s length');
+    }
     int sLength = _readDerLength(der, offset);
-    offset += _encodedLengthByteCount(der, offset);
+    int sLenBytes = _encodedLengthByteCount(der, offset);
+    if (offset + sLenBytes > der.length) {
+      throw StateError('Invalid DER signature: s length encoding exceeds buffer');
+    }
+    offset += sLenBytes;
+    if (offset + sLength > der.length) {
+      throw StateError('s length exceeds buffer');
+    }
     final sBytes = Uint8List.sublistView(der, offset, offset + sLength);
 
     final rFixed = _toFixedLength(rBytes);
@@ -1349,6 +1366,9 @@ class ApproovService {
   }
 
   static int _readDerLength(Uint8List data, int offset) {
+    if (offset >= data.length) {
+      throw StateError('Truncated DER length: offset exceeds buffer');
+    }
     int lengthByte = data[offset];
     if (lengthByte < 0x80) {
       return lengthByte;
@@ -1356,6 +1376,9 @@ class ApproovService {
     final numBytes = lengthByte & 0x7F;
     if (numBytes == 0 || numBytes > 2) {
       throw StateError('Unsupported DER length encoding');
+    }
+    if (offset + 1 + numBytes > data.length) {
+      throw StateError('Truncated DER length: not enough bytes for length');
     }
     int value = 0;
     for (int i = 0; i < numBytes; i++) {
