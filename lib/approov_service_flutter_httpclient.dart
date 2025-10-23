@@ -100,6 +100,9 @@ class _TokenFetchResult {
   // Loggable Approov token string.
   String loggableToken = "";
 
+  // Trace identifier associated with the last Approov token fetch, if provided by the SDK.
+  String traceID = "";
+
   /// Convenience constructor to generate the results from a results map from the underlying platform call.
   ///
   /// @param tokenFetchResultMap holds the results of the fetch
@@ -117,6 +120,8 @@ class _TokenFetchResult {
     Uint8List? newMeasurementConfig = tokenFetchResultMap["MeasurementConfig"];
     if (newMeasurementConfig != null) measurementConfig = newMeasurementConfig;
     loggableToken = tokenFetchResultMap["LoggableToken"];
+    String? newTraceID = tokenFetchResultMap["TraceID"];
+    if (newTraceID != null) traceID = newTraceID;
   }
 }
 
@@ -195,6 +200,9 @@ class ApproovService {
   // header that will be added to Approov enabled requests
   static const String APPROOV_HEADER = "Approov-Token";
 
+  // header that will carry the Approov TraceID associated with a token fetch
+  static const String APPROOV_TRACE_ID_HEADER = "Approov-TraceID";
+
   // any prefix to be added before the Approov token, such as "Bearer "
   static const String APPROOV_TOKEN_PREFIX = "";
 
@@ -206,6 +214,9 @@ class ApproovService {
 
   // header used when adding the Approov Token to network requests
   static String _approovTokenHeader = APPROOV_HEADER;
+
+  // header used when adding the Approov TraceID to network requests, null disables the header
+  static String? _approovTraceIDHeader = APPROOV_TRACE_ID_HEADER;
 
   // prefix for the above header (like Bearer)
   static String _approovTokenPrefix = APPROOV_TOKEN_PREFIX;
@@ -409,6 +420,19 @@ class ApproovService {
     _approovTokenPrefix = prefix;
   }
 
+  /// Sets the header that receives any Approov TraceID value provided by the SDK. Passing null disables adding the header.
+  ///
+  /// @param header is the header to carry the Approov TraceID, or null to disable
+  static void setApproovTraceIDHeader(String? header) {
+    Log.d("$TAG: setApproovTraceIDHeader $header");
+    _approovTraceIDHeader = header;
+  }
+
+  /// Gets the header used to carry the Approov TraceID, or null if disabled.
+  static String? getApproovTraceIDHeader() {
+    return _approovTraceIDHeader;
+  }
+
   /// Enables automatic message signing for outgoing requests. The Approov SDK provides the signing key after a
   /// successful attestation and the resulting signature is attached to each protected request via the standard
   /// `Signature` and `Signature-Input` headers as defined by the HTTP Message Signatures specification. Provide
@@ -505,7 +529,7 @@ class ApproovService {
   /// starting the operation earlier so the subsequent fetch should be able to use cached data.
   static void prefetch() async {
     try {
-      ApproovService._fetchApproovToken("approov.io");
+      ApproovService._fetchApproovToken("https://approov.io/");
       Log.d("$TAG: prefetch started");
     } on ApproovException catch (e) {
       Log.e("$TAG: prefetch: exception ${e.cause}");
@@ -636,14 +660,14 @@ class ApproovService {
   /// attestation is rejected by the Approov cloud service then a token is still returned, it just won't be signed
   /// with the correct signature so the failure is detected when any API, to which the token is presented, verifies it.
   ///
-  /// All calls must provide a URL which provides the high level domain of the API to which the Approov token is going
+  /// All calls must provide the full request URL (including path) of the API to which the Approov token is going
   /// to be sent. Different API domains will have different Approov tokens associated with them so it is important that
-  /// the Approov token is only sent to requests for that domain. If the domain has not been configured using the Approov
+  /// the Approov token is only sent to requests for that URL. If the domain has not been configured using the Approov
   /// CLI then an ApproovException is thrown. Note that there are various other reasons that an ApproovException might also
   /// be thrown. If the fetch fails due to a networking issue, and should be retried at some later point, then an
   /// ApproovNetworkException is thrown.
   ///
-  /// @param url provides the top level domain URL for which a token is being fetched
+  /// @param url provides the full request URL (including path) for which a token is being fetched
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
@@ -902,7 +926,7 @@ class ApproovService {
 
   /// Internal method for fetching an Approov token from the SDK.
   ///
-  /// @param url provides the top level domain URL for which a token is being fetched
+  /// @param url provides the full request URL (including path) for which a token is being fetched
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
@@ -1068,11 +1092,13 @@ class ApproovService {
       if (headerValue != null) setDataHashInToken(headerValue);
     }
 
-    // request an Approov token for the host domain
+    // request an Approov token for the full request URL
     final stopWatch = Stopwatch();
     stopWatch.start();
-    String host = request.uri.host;
-    _TokenFetchResult fetchResult = await _fetchApproovToken(host);
+    final Uri requestUri = request.uri;
+    final String host = requestUri.host;
+    final String requestUrl = requestUri.toString();
+    _TokenFetchResult fetchResult = await _fetchApproovToken(requestUrl);
 
     // provide information about the obtained token or error (note "approov token -check" can
     // be used to check the validity of the token and if you use token annotations they
@@ -1092,6 +1118,11 @@ class ApproovService {
     if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
       // we successfully obtained a token so add it to the header for the request
       request.headers.set(_approovTokenHeader, _approovTokenPrefix + fetchResult.token, preserveHeaderCase: true);
+      final String? traceIDHeader = _approovTraceIDHeader;
+      final String traceID = fetchResult.traceID;
+      if ((traceIDHeader != null) && traceID.isNotEmpty) {
+        request.headers.set(traceIDHeader, traceID, preserveHeaderCase: true);
+      }
     } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
@@ -1988,7 +2019,7 @@ class ApproovHttpClient implements HttpClient {
       allPins = await ApproovService._getPins("public-key-sha256");
     } else {
       // start the process of fetching an Approov token to get the latest configuration
-      final futureApproovToken = ApproovService._fetchApproovToken(url.host);
+      final futureApproovToken = ApproovService._fetchApproovToken(urlString);
       tokenStartTime = stopWatch.elapsedMilliseconds - certStartTime;
 
       // wait on the Approov token fetching to complete - but note we do not fail if a token fetch was not possible
@@ -2013,7 +2044,7 @@ class ApproovHttpClient implements HttpClient {
       if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
           (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
         // perform another attempted token fetch
-        fetchResult = await ApproovService._fetchApproovToken(url.host);
+        fetchResult = await ApproovService._fetchApproovToken(urlString);
         Log.d("$TAG: $isolate pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
         // if we are forced to update pins then this likely means that no pins were ever fetched and in this
