@@ -34,6 +34,7 @@ import 'package:http/io_client.dart' as httpio;
 import 'package:logger/logger.dart';
 import 'package:pem/pem.dart';
 import 'package:mutex/mutex.dart';
+import 'package:meta/meta.dart';
 import 'src/message_signing.dart';
 export 'src/message_signing.dart'
     show
@@ -417,24 +418,18 @@ class ApproovService {
   static void enableMessageSigning({
     SignatureParametersFactory? defaultFactory,
     Map<String, SignatureParametersFactory>? hostFactories,
-  }) async {
-    await _initMutex.protect(() async {
-      final effectiveDefaultFactory = defaultFactory ?? SignatureParametersFactory.generateDefaultFactory();
-      if (hostFactories != null) {
-        for (final entry in hostFactories.entries) {
-          final host = entry.key;
-          if (host.isEmpty) {
-            throw ArgumentError('Each host key must be a non-empty string');
-          }
+  }) {
+    final effectiveDefaultFactory = defaultFactory ?? SignatureParametersFactory.generateDefaultFactory();
+    if (hostFactories != null) {
+      for (final entry in hostFactories.entries) {
+        if (entry.key.isEmpty) {
+          throw ArgumentError('Each host key must be a non-empty string');
         }
       }
-      final messageSigning = ApproovMessageSigning();
-      messageSigning.setDefaultFactory(effectiveDefaultFactory);
-      if (hostFactories != null) {
-        hostFactories.forEach((host, factory) => messageSigning.putHostFactory(host, factory));
-      }
-      _messageSigning = messageSigning;
-    });
+    }
+    final messageSigning = ApproovMessageSigning()..setDefaultFactory(effectiveDefaultFactory);
+    hostFactories?.forEach(messageSigning.putHostFactory);
+    _messageSigning = messageSigning;
     Log.d("$TAG: enableMessageSigning configured");
   }
 
@@ -443,6 +438,9 @@ class ApproovService {
     if (_messageSigning != null) Log.d("$TAG: disableMessageSigning");
     _messageSigning = null;
   }
+
+  @visibleForTesting
+  static ApproovMessageSigning? messageSigningForTesting() => _messageSigning;
 
   /// Sets a binding header that must be present on all requests using the Approov service. A
   /// header should be chosen whose value is unchanging for most requests (such as an

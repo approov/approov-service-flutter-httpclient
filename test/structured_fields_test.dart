@@ -10,9 +10,28 @@ void main() {
       expect(SfBareItem.integer(-7).serialize(), '-7');
     });
 
+    test('integer boundary values are accepted', () {
+      const max = 999999999999999;
+      const min = -999999999999999;
+      expect(SfBareItem.integer(max).serialize(), '$max');
+      expect(SfBareItem.integer(min).serialize(), '$min');
+    });
+
+    test('integer beyond boundary throws', () {
+      const tooLarge = 1000000000000000;
+      const tooSmall = -1000000000000000;
+      expect(() => SfBareItem.integer(tooLarge), throwsA(isA<SfFormatException>()));
+      expect(() => SfBareItem.integer(tooSmall), throwsA(isA<SfFormatException>()));
+    });
+
     test('decimal encodes canonical representation', () {
       expect(SfBareItem.decimal(1.25).serialize(), '1.25');
       expect(SfBareItem.decimal(SfDecimal.parse('-12.340')).serialize(), '-12.34');
+    });
+
+    test('decimal enforces precision limits', () {
+      expect(SfBareItem.decimal(123456789012.123).serialize(), '123456789012.123');
+      expect(() => SfBareItem.decimal(1.2345), throwsA(isA<SfFormatException>()));
     });
 
     test('string escapes quotes and backslashes', () {
@@ -41,6 +60,24 @@ void main() {
     test('display string percent encodes non-ascii', () {
       final display = SfBareItem.displayString(SfDisplayString('über % test'));
       expect(display.serialize(), '%"%c3%bcber %25 test"');
+    });
+
+    test('empty string and byte sequence serialize correctly', () {
+      expect(SfBareItem.string('').serialize(), '""');
+      expect(SfBareItem.byteSequence(Uint8List(0)).serialize(), '::');
+    });
+
+    test('long string and token serialize without truncation', () {
+      final longString = 'x' * 2048;
+      final longToken = 'a' * 1024;
+      expect(SfBareItem.string(longString).serialize().length, longString.length + 2);
+      expect(SfBareItem.token(SfToken(longToken)).serialize(), longToken);
+    });
+
+    test('decimal parse round-trips to canonical string', () {
+      final decimal = SfDecimal.parse('42.500');
+      expect(decimal.toString(), '42.5');
+      expect(SfBareItem.decimal(decimal).serialize(), '42.5');
     });
   });
 
@@ -83,6 +120,12 @@ void main() {
         'list': SfDictionaryMember.innerList(SfInnerList([SfItem.string('x')])),
       });
       expect(dictionary.serialize(), 'flag;v=1, count=4, list=("x")');
+    });
+
+    test('empty collections serialize to empty string', () {
+      expect(SfInnerList([]).serialize(), '()');
+      expect(SfList([]).serialize(), '');
+      expect(SfDictionary({}).serialize(), '');
     });
   });
 

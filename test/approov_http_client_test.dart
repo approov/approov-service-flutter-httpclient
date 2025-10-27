@@ -19,6 +19,7 @@ void main() {
 
   tearDown(() {
     channel.setMockMethodCallHandler(null);
+    ApproovService.disableMessageSigning();
   });
 
 
@@ -134,4 +135,54 @@ void main() {
 
     expect(base, expected);
   });
+
+  test('enableMessageSigning configures default and host factories', () {
+    final defaultFactory = SignatureParametersFactory()
+        .setBaseParameters(SignatureParameters()..addComponentIdentifier('@method'))
+        .setUseAccountMessageSigning();
+    final hostFactory = SignatureParametersFactory()
+        .setBaseParameters(SignatureParameters()..addComponentIdentifier('@path'))
+        .setUseInstallMessageSigning();
+
+    ApproovService.enableMessageSigning(
+      defaultFactory: defaultFactory,
+      hostFactories: {'api.example.com': hostFactory},
+    );
+
+    final messageSigning = ApproovService.messageSigningForTesting();
+    expect(messageSigning, isNotNull);
+
+    final defaultContext = _buildSigningContext(Uri.parse('https://example.org/resource'));
+    final defaultParams = messageSigning!.buildParametersFor(defaultContext.uri, defaultContext);
+    expect(defaultParams, isNotNull);
+    final defaultComponents = defaultParams!.componentIdentifiers
+        .map((item) => item.bareItem.value as String)
+        .toList();
+    expect(defaultComponents, contains('@method'));
+    expect(defaultParams.algorithm, SignatureAlgorithm.hmacSha256);
+
+    final hostContext = _buildSigningContext(Uri.parse('https://api.example.com/resource'));
+    final hostParams = messageSigning.buildParametersFor(hostContext.uri, hostContext);
+    expect(hostParams, isNotNull);
+    final hostComponents = hostParams!.componentIdentifiers
+        .map((item) => item.bareItem.value as String)
+        .toList();
+    expect(hostComponents, contains('@path'));
+    expect(hostParams.algorithm, SignatureAlgorithm.ecdsaP256Sha256);
+  });
+}
+
+ApproovSigningContext _buildSigningContext(Uri uri) {
+  final headers = <String, List<String>>{
+    'host': [uri.host],
+  };
+  return ApproovSigningContext(
+    requestMethod: 'get',
+    uri: uri,
+    headers: headers,
+    bodyBytes: null,
+    tokenHeaderName: null,
+    onSetHeader: (name, value) => headers[name.toLowerCase()] = [value],
+    onAddHeader: (name, value) => headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
+  );
 }
