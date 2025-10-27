@@ -4,92 +4,97 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import 'structured_fields.dart';
+
 /// Signature algorithms supported by the Approov message signing flow.
 enum SignatureAlgorithm {
   hmacSha256,
   ecdsaP256Sha256,
 }
 
-/// Represents a HTTP Structured Field string item with optional parameters.
-class SfStringItem {
-  SfStringItem(this.value, [Map<String, String>? parameters])
-      : parameters = LinkedHashMap.of(parameters ?? const {});
+SfItem _buildComponentIdentifier(String value, Map<String, dynamic>? parameters) {
+  return SfItem.string(value, parameters);
+}
 
-  final String value;
-  final LinkedHashMap<String, String> parameters;
-
-  String serialize() {
-    final buffer = StringBuffer();
-    buffer.write(_serializeSfString(value));
-    parameters.forEach((key, v) {
-      buffer.write(';');
-      buffer.write(key);
-      buffer.write('=');
-      buffer.write(_serializeSfString(v));
-    });
-    return buffer.toString();
+String _componentIdentifierValue(SfItem item) {
+  final bareItem = item.bareItem;
+  if (bareItem.type != SfBareItemType.string) {
+    throw StateError('Component identifiers must be sf-string values');
   }
+  return bareItem.value as String;
 }
 
 /// Holds configuration for message signature parameters, mirroring the Swift implementation.
 class SignatureParameters {
   SignatureParameters()
-      : _componentIdentifiers = <SfStringItem>[],
-        _parameters = LinkedHashMap<String, dynamic>();
+      : _componentIdentifiers = <SfItem>[],
+        _parameters = LinkedHashMap<String, SfBareItem>();
 
   SignatureParameters.copy(SignatureParameters other)
-      : _componentIdentifiers = List<SfStringItem>.from(other._componentIdentifiers),
-        _parameters = LinkedHashMap<String, dynamic>.of(other._parameters),
+      : _componentIdentifiers = List<SfItem>.from(other._componentIdentifiers),
+        _parameters = LinkedHashMap<String, SfBareItem>.from(other._parameters),
         debugMode = other.debugMode,
         algorithm = other.algorithm;
 
-  final List<SfStringItem> _componentIdentifiers;
-  final LinkedHashMap<String, dynamic> _parameters;
+  final List<SfItem> _componentIdentifiers;
+  final LinkedHashMap<String, SfBareItem> _parameters;
 
   bool debugMode = false;
   SignatureAlgorithm algorithm = SignatureAlgorithm.hmacSha256;
 
-  List<SfStringItem> get componentIdentifiers => List.unmodifiable(_componentIdentifiers);
+  List<SfItem> get componentIdentifiers => List.unmodifiable(_componentIdentifiers);
 
-  void addComponentIdentifier(String identifier, {Map<String, String>? parameters}) {
+  void addComponentIdentifier(String identifier, {Map<String, dynamic>? parameters}) {
     final normalized = identifier.startsWith('@') ? identifier : identifier.toLowerCase();
-    if (_componentIdentifiers.any((item) => item.value == normalized && _parametersMatch(item.parameters, parameters))) {
+    final candidateParameters = SfParameters(parameters);
+    if (_componentIdentifiers.any(
+      (item) =>
+          _componentIdentifierMatches(item, normalized, candidateParameters),
+    )) {
       return;
     }
-    _componentIdentifiers.add(SfStringItem(normalized, parameters));
+    _componentIdentifiers.add(_buildComponentIdentifier(normalized, parameters));
   }
 
-  bool _parametersMatch(Map<String, String> existing, Map<String, String>? candidate) {
-    if (candidate == null || candidate.isEmpty) return existing.isEmpty;
-    if (existing.length != candidate.length) return false;
-    for (final entry in candidate.entries) {
-      if (existing[entry.key] != entry.value) return false;
+  bool _componentIdentifierMatches(SfItem item, String value, SfParameters candidate) {
+    if (_componentIdentifierValue(item) != value) return false;
+    return _parametersMatch(item.parameters, candidate);
+  }
+
+  bool _parametersMatch(SfParameters existing, SfParameters candidate) {
+    final existingMap = existing.asMap();
+    final candidateMap = candidate.asMap();
+    if (existingMap.length != candidateMap.length) return false;
+    for (final entry in candidateMap.entries) {
+      final existingValue = existingMap[entry.key];
+      if (existingValue == null) return false;
+      if (existingValue.serialize() != entry.value.serialize()) return false;
     }
     return true;
   }
 
   void setAlg(String value) {
-    _parameters['alg'] = value;
+    _parameters['alg'] = SfBareItem.string(value);
   }
 
   void setCreated(int timestampSeconds) {
-    _parameters['created'] = timestampSeconds;
+    _parameters['created'] = SfBareItem.integer(timestampSeconds);
   }
 
   void setExpires(int timestampSeconds) {
-    _parameters['expires'] = timestampSeconds;
+    _parameters['expires'] = SfBareItem.integer(timestampSeconds);
   }
 
   void setKeyId(String keyId) {
-    _parameters['keyid'] = keyId;
+    _parameters['keyid'] = SfBareItem.string(keyId);
   }
 
   void setNonce(String nonce) {
-    _parameters['nonce'] = nonce;
+    _parameters['nonce'] = SfBareItem.string(nonce);
   }
 
   void setTag(String tag) {
-    _parameters['tag'] = tag;
+    _parameters['tag'] = SfBareItem.string(tag);
   }
 
   String signatureLabel() {
@@ -102,23 +107,11 @@ class SignatureParameters {
     }
   }
 
-  SfStringItem signatureParamsIdentifier() => SfStringItem('@signature-params');
+  SfItem signatureParamsIdentifier() => _buildComponentIdentifier('@signature-params', null);
 
   String serializeComponentValue() {
-    final buffer = StringBuffer();
-    buffer.write('(');
-    for (var i = 0; i < _componentIdentifiers.length; i++) {
-      if (i > 0) buffer.write(' ');
-      buffer.write(_componentIdentifiers[i].serialize());
-    }
-    buffer.write(')');
-    _parameters.forEach((key, value) {
-      buffer.write(';');
-      buffer.write(key);
-      buffer.write('=');
-      buffer.write(_serializeParameter(value));
-    });
-    return buffer.toString();
+    final parameters = _parameters.isEmpty ? null : _parameters;
+    return SfInnerList(_componentIdentifiers, parameters).serialize();
   }
 }
 
@@ -212,7 +205,7 @@ class SignatureParametersFactory {
       if (!context.hasField(header)) continue;
       if (header == 'content-length') {
         final hasBodyBytes = context.bodyBytes != null && context.bodyBytes!.isNotEmpty;
-        final contentLengthValue = context.getComponentValue(SfStringItem('content-length'));
+        final contentLengthValue = context.getComponentValue(SfItem.string('content-length'));
         final shouldIncludeContentLength =
             hasBodyBytes || (contentLengthValue != null && contentLengthValue.trim() != '0');
         if (!shouldIncludeContentLength) {
@@ -263,7 +256,7 @@ class SignatureBaseBuilder {
     for (final component in params.componentIdentifiers) {
       final value = context.getComponentValue(component);
       if (value == null) {
-        throw StateError('Missing component value for ${component.value}');
+        throw StateError('Missing component value for ${_componentIdentifierValue(component)}');
       }
       buffer.write(component.serialize());
       buffer.write(': ');
@@ -325,8 +318,8 @@ class ApproovSigningContext {
     onAddHeader?.call(name, value);
   }
 
-  String? getComponentValue(SfStringItem component) {
-    final identifier = component.value;
+  String? getComponentValue(SfItem component) {
+    final identifier = _componentIdentifierValue(component);
     if (identifier.startsWith('@')) {
       switch (identifier) {
         case '@method':
@@ -344,11 +337,14 @@ class ApproovSigningContext {
         case '@query':
           return uri.hasQuery ? uri.query : '';
         case '@query-param':
-          final name = component.parameters['name'];
-          if (name == null) {
+          final paramValue = component.parameters.asMap()['name'];
+          if (paramValue == null) {
             throw StateError('Missing name parameter for @query-param');
           }
-          return _queryParameterValue(name);
+          if (paramValue.type != SfBareItemType.string) {
+            throw StateError('name parameter for @query-param must be an sf-string');
+          }
+          return _queryParameterValue(paramValue.value as String);
         default:
           throw StateError('Unknown derived component: $identifier');
       }
@@ -429,23 +425,4 @@ class ApproovMessageSigning {
     if (factory == null) return null;
     return factory.build(context);
   }
-}
-
-String _serializeParameter(dynamic value) {
-  if (value is String) {
-    return _serializeSfString(value);
-  } else if (value is int) {
-    return value.toString();
-  } else if (value is bool) {
-    return value ? '?1' : '?0';
-  } else if (value is Uint8List) {
-    return ':${base64Encode(value)}:';
-  } else {
-    throw ArgumentError('Unsupported parameter type: ${value.runtimeType}');
-  }
-}
-
-String _serializeSfString(String value) {
-  final escaped = value.replaceAll('\\', r'\\').replaceAll('"', r'\"');
-  return '"$escaped"';
 }

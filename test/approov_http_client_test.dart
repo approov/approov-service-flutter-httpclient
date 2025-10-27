@@ -84,7 +84,9 @@ void main() {
     final factory = SignatureParametersFactory.generateDefaultFactory();
     final params = factory.build(context);
 
-    final componentNames = params.componentIdentifiers.map((item) => item.value).toList();
+    final componentNames = params.componentIdentifiers
+        .map((item) => item.bareItem.value as String)
+        .toList();
     expect(componentNames.contains('content-length'), isFalse);
     expect(params.serializeComponentValue().contains('"content-length"'), isFalse);
   });
