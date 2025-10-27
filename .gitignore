@@ -5,6 +5,6 @@
 pubspec.lock
 .idea
 android/local.properties
-android/build/reports/problems/problems-report.html
+android/build/
 AGENTS.md
 build/

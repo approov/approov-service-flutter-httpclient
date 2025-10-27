@@ -21,7 +21,6 @@ void main() {
     channel.setMockMethodCallHandler(null);
   });
 
-  test('getPlatformVersion', () async {});
 
   test('signature base matches HTTP message signatures format', () {
     final bodyBytes = Uint8List.fromList(utf8.encode('{"hello":"world"}'));

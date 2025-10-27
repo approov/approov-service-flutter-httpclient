@@ -275,7 +275,7 @@ class SfBareItem {
     if (value is SfDisplayString) return SfBareItem.displayString(value);
     if (value is Uint8List) return SfBareItem.byteSequence(value);
     if (value is List<int>) return SfBareItem.byteSequence(Uint8List.fromList(value));
-    if (value is DateTime || value is SfDate || value is int) {
+    if (value is DateTime || value is SfDate) {
       return SfBareItem.date(value);
     }
     if (value is String) return SfBareItem.string(value);
