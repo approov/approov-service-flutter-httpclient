@@ -472,7 +472,23 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         [Approov setDevKey:call.arguments[@"devKey"]];
         result(nil);
     } else if ([@"getMessageSignature" isEqualToString:call.method]) {
-        result([Approov getMessageSignature:call.arguments[@"message"]]);
+        @try {
+            result([Approov getMessageSignature:call.arguments[@"message"]]);
+        }
+        @catch (NSException *exception) {
+            result([FlutterError errorWithCode:@"Approov.getMessageSignature"
+                                       message:exception.reason
+                                       details:nil]);
+        }
+    } else if ([@"getInstallMessageSignature" isEqualToString:call.method]) {
+        @try {
+            result([Approov getInstallMessageSignature:call.arguments[@"message"]]);
+        }
+        @catch (NSException *exception) {
+            result([FlutterError errorWithCode:@"Approov.getInstallMessageSignature"
+                                       message:exception.reason
+                                       details:nil]);
+        }
     } else if ([@"setUserProperty" isEqualToString:call.method]) {
         [Approov setUserProperty:call.arguments[@"property"]];
         result(nil);

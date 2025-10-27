@@ -3,3 +3,8 @@
 .gradle
 .dart_tool
 pubspec.lock
+.idea
+android/local.properties
+android/build/
+AGENTS.md
+build/
