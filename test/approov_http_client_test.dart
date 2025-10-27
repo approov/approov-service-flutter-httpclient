@@ -90,4 +90,49 @@ void main() {
     expect(componentNames.contains('content-length'), isFalse);
     expect(params.serializeComponentValue().contains('"content-length"'), isFalse);
   });
+
+  test('signature parameters serialize using structured fields', () {
+    final params = SignatureParameters()
+      ..addComponentIdentifier('@method')
+      ..addComponentIdentifier('content-type', parameters: {'charset': 'utf-8'})
+      ..setAlg('hmac-sha256')
+      ..setNonce('nonce123')
+      ..setTag('tagged');
+
+    // Duplicate component with identical parameters should be ignored.
+    params.addComponentIdentifier('content-type', parameters: {'charset': 'utf-8'});
+    expect(params.componentIdentifiers.length, 2);
+
+    final serialized = params.serializeComponentValue();
+    expect(
+      serialized,
+      '("@method" "content-type";charset="utf-8");alg="hmac-sha256";nonce="nonce123";tag="tagged"',
+    );
+  });
+
+  test('signature base builder includes derived query-param component', () {
+    final params = SignatureParameters()
+      ..addComponentIdentifier('@method')
+      ..addComponentIdentifier('@query-param', parameters: {'name': 'foo'})
+      ..setAlg('ecdsa-p256-sha256');
+
+    final context = ApproovSigningContext(
+      requestMethod: 'get',
+      uri: Uri.parse('https://api.example.com/search?foo=bar&baz=1'),
+      headers: <String, List<String>>{},
+      bodyBytes: null,
+      tokenHeaderName: null,
+      onSetHeader: (_, __) {},
+      onAddHeader: (_, __) {},
+    );
+
+    final base = SignatureBaseBuilder(params, context).createSignatureBase();
+    final expected = [
+      '"@method": GET',
+      '"@query-param";name="foo": bar',
+      '"@signature-params": ("@method" "@query-param";name="foo");alg="ecdsa-p256-sha256"',
+    ].join('\n');
+
+    expect(base, expected);
+  });
 }
