@@ -1228,21 +1228,8 @@ class ApproovService {
     }
 
     final signatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
-    String signature;
-    try { // If we fail to sign with install signing, we fall back to account signing (install signing is safer but not always available)
-      signature = await _signCanonicalMessage(signatureBase, params.algorithm);
-    } on StateError {
-      if (params.algorithm == SignatureAlgorithm.ecdsaP256Sha256) {
-        Log.w("$TAG: install message signing unavailable, falling back to account signing");
-        params.algorithm = SignatureAlgorithm.hmacSha256;
-        params.setAlg('hmac-sha256');
-        // Regenerate the signature base with the updated algorithm
-        final updatedSignatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
-        signature = await _signCanonicalMessage(updatedSignatureBase, params.algorithm);
-      } else {
-        rethrow;
-      }
-    }
+    // Allow the configured algorithm to fail fast so callers can decide how to handle it.
+    final signature = await _signCanonicalMessage(signatureBase, params.algorithm);
     if (signature.isEmpty) {
       Log.d("$TAG: message signing returned empty signature for ${request.uri}");
       return;
