@@ -47,6 +47,7 @@ void _validateKey(String key) {
     throw SfFormatException('Structured Field parameter and dictionary keys must not be empty');
   }
   final codeUnits = key.codeUnits;
+  // RFC 9651 restricts the first character and allows a limited token charset for the rest.
   for (var index = 0; index < codeUnits.length; index++) {
     final unit = codeUnits[index];
     final isValid = index == 0
@@ -62,6 +63,7 @@ void _validateString(String value) {
   for (var index = 0; index < value.length; index++) {
     final unit = value.codeUnitAt(index);
     if (unit < 0x20 || unit == 0x7f || unit > 0x7f) {
+      // Printable ASCII only; Structured Fields treat anything else as invalid input.
       throw SfFormatException(
         'Invalid character 0x${unit.toRadixString(16).padLeft(2, '0')} in sf-string at position $index',
       );
@@ -74,6 +76,7 @@ void _validateToken(String value) {
     throw SfFormatException('sf-token must not be empty');
   }
   final codeUnits = value.codeUnits;
+  // Tokens use the HTTP tchar set and allow ":" and "/" past the first position.
   for (var index = 0; index < codeUnits.length; index++) {
     final unit = codeUnits[index];
     final isValid = index == 0
@@ -92,6 +95,7 @@ void _validateDisplayString(String value) {
     if (rune >= 0xd800 && rune <= 0xdfff) {
       throw SfFormatException('Display strings must not contain surrogate code points');
     }
+    // Reject values outside the valid Unicode scalar range.
     if (rune < 0x0 || rune > 0x10ffff) {
       throw SfFormatException('Invalid Unicode scalar value 0x${rune.toRadixString(16)} in display string');
     }
@@ -124,6 +128,7 @@ class SfDecimal {
     final scaled = value * 1000;
     final rounded = scaled.round();
     if ((scaled - rounded).abs() > 1e-9) {
+      // Enforce the three-decimal fixed scale defined by Structured Fields decimals.
       throw SfFormatException('Decimals must have at most three fractional digits: $value');
     }
     return SfDecimal._checked(rounded);
@@ -262,6 +267,7 @@ class SfBareItem {
     if (value is bool) return SfBareItem.boolean(value);
     if (value is int) return SfBareItem.integer(value);
     if (value is SfDecimal || value is num || value is String && value.contains('.')) {
+      // Interpret numeric-looking inputs as decimals first, falling back to strings when invalid.
       try {
         return SfBareItem.decimal(value);
       } on SfFormatException {
@@ -290,6 +296,7 @@ class SfBareItem {
   void serializeTo(StringBuffer buffer) {
     switch (type) {
       case SfBareItemType.integer:
+        // Integers serialize as plain decimal digits.
         buffer.write(value as int);
       case SfBareItemType.decimal:
         buffer.write((value as SfDecimal).toString());
@@ -333,6 +340,7 @@ class SfBareItem {
     final bytes = utf8.encode(display.value);
     for (final byte in bytes) {
       if (byte == 0x25 || byte == 0x22 || byte < 0x20 || byte > 0x7e) {
+        // Percent-encode reserved characters and non-printable bytes per RFC guidance.
         buffer
           ..write('%')
           ..write(byte.toRadixString(16).padLeft(2, '0'));
@@ -373,6 +381,7 @@ class SfParameters {
         ..write(';')
         ..write(key);
       if (!value.isBooleanTrue) {
+        // Boolean true omits "=value"; all other entries include the serialized bare item.
         buffer.write('=');
         value.serializeTo(buffer);
       }
@@ -518,6 +527,7 @@ class SfDictionaryMember {
       buffer.write('=');
       innerList!.serializeTo(buffer);
     } else if (parameters != null && !parameters!.isEmpty) {
+      // Bare dictionary boolean members serialize only their attached parameters.
       parameters!.serializeTo(buffer);
     }
   }
@@ -540,6 +550,7 @@ class SfDictionary {
     final buffer = StringBuffer();
     var index = 0;
     _entries.forEach((key, member) {
+      // Preserve insertion order so signature bases remain stable.
       if (index > 0) buffer.write(', ');
       buffer.write(key);
       member.serializeTo(buffer);

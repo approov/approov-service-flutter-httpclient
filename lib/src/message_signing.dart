@@ -47,6 +47,7 @@ class SignatureParameters {
   void addComponentIdentifier(String identifier, {Map<String, dynamic>? parameters}) {
     final normalized = identifier.startsWith('@') ? identifier : identifier.toLowerCase();
     final candidateParameters = SfParameters(parameters);
+    // Skip adding duplicate component identifiers that only differ in letter case or parameter identity.
     if (_componentIdentifiers.any(
       (item) =>
           _componentIdentifierMatches(item, normalized, candidateParameters),
@@ -64,6 +65,7 @@ class SignatureParameters {
   bool _parametersMatch(SfParameters existing, SfParameters candidate) {
     final existingMap = existing.asMap();
     final candidateMap = candidate.asMap();
+    // Structured Field parameters are only equal when both name and serialized value match.
     if (existingMap.length != candidateMap.length) return false;
     for (final entry in candidateMap.entries) {
       final existingValue = existingMap[entry.key];
@@ -187,6 +189,7 @@ class SignatureParametersFactory {
   SignatureParameters build(ApproovSigningContext context) {
     final params = _baseParameters != null ? SignatureParameters.copy(_baseParameters!) : SignatureParameters();
     params.debugMode = _debugMode;
+    // Message signing algorithm is selected by swapping between account (HMAC) and install (ECDSA) modes.
     params.algorithm = _useAccountMessageSigning ? SignatureAlgorithm.hmacSha256 : SignatureAlgorithm.ecdsaP256Sha256;
     params.setAlg(_useAccountMessageSigning ? 'hmac-sha256' : 'ecdsa-p256-sha256');
 
@@ -206,6 +209,7 @@ class SignatureParametersFactory {
       if (header == 'content-length') {
         final hasBodyBytes = context.bodyBytes != null && context.bodyBytes!.isNotEmpty;
         final contentLengthValue = context.getComponentValue(SfItem.string('content-length'));
+        // Avoid signing Content-Length: 0 to mirror how Dart's HttpClient elides that header on the wire.
         final shouldIncludeContentLength =
             hasBodyBytes || (contentLengthValue != null && contentLengthValue.trim() != '0');
         if (!shouldIncludeContentLength) {
@@ -252,6 +256,7 @@ class SignatureBaseBuilder {
   final ApproovSigningContext context;
 
   String createSignatureBase() {
+    // Serialize each signed component and the signature parameters into the canonical signature base string.
     final buffer = StringBuffer();
     for (final component in params.componentIdentifiers) {
       final value = context.getComponentValue(component);
@@ -362,6 +367,7 @@ class ApproovSigningContext {
       }
       return null;
     }
+    // RFC-compliant digest header uses base64-encoded hash surrounded by colons, e.g. sha-256=:...:
     final bytes = switch (digest) {
       SignatureDigest.sha256 => sha256.convert(bodyBytes!).bytes,
       SignatureDigest.sha512 => sha512.convert(bodyBytes!).bytes,
@@ -394,6 +400,7 @@ class ApproovSigningContext {
   String _combineFieldValues(List<String> values) {
     final cleaned = values.map((value) {
       final trimmed = value.trim();
+      // Collapse line folding and excess whitespace to keep a stable canonical field value.
       return trimmed.replaceAll(RegExp(r'\s*\r\n\s*'), ' ');
     }).toList();
     return cleaned.join(', ');
