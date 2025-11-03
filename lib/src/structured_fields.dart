@@ -4,22 +4,28 @@ import 'dart:typed_data';
 
 /// Exception thrown when Structured Field values fail validation.
 class SfFormatException extends FormatException {
+  /// Creates a format exception referencing the offending source.
   SfFormatException(String message, [dynamic source])
       : super(message, source);
 }
 
 enum _CharType { alphaLower, alphaUpper, digit }
 
+/// Returns true when the code unit represents a lowercase ASCII letter.
 bool _isLowerAlpha(int codeUnit) =>
     codeUnit >= 0x61 && codeUnit <= 0x7a; // a-z
 
+/// Returns true when the code unit represents an uppercase ASCII letter.
 bool _isUpperAlpha(int codeUnit) =>
     codeUnit >= 0x41 && codeUnit <= 0x5a; // A-Z
 
+/// Returns true when the code unit represents any ASCII letter.
 bool _isAlpha(int codeUnit) => _isLowerAlpha(codeUnit) || _isUpperAlpha(codeUnit);
 
+/// Returns true when the code unit is an ASCII digit.
 bool _isDigit(int codeUnit) => codeUnit >= 0x30 && codeUnit <= 0x39;
 
+/// Returns true when the code unit falls within the HTTP `tchar` token range.
 bool _isTchar(int codeUnit) {
   if (_isAlpha(codeUnit) || _isDigit(codeUnit)) return true;
   const allowed = {
@@ -42,6 +48,7 @@ bool _isTchar(int codeUnit) {
   return allowed.contains(codeUnit);
 }
 
+/// Validates that a Structured Field key adheres to RFC token rules.
 void _validateKey(String key) {
   if (key.isEmpty) {
     throw SfFormatException('Structured Field parameter and dictionary keys must not be empty');
@@ -59,6 +66,7 @@ void _validateKey(String key) {
   }
 }
 
+/// Validates that an sf-string contains only printable ASCII characters.
 void _validateString(String value) {
   for (var index = 0; index < value.length; index++) {
     final unit = value.codeUnitAt(index);
@@ -71,6 +79,7 @@ void _validateString(String value) {
   }
 }
 
+/// Validates the character set of an sf-token.
 void _validateToken(String value) {
   if (value.isEmpty) {
     throw SfFormatException('sf-token must not be empty');
@@ -90,6 +99,7 @@ void _validateToken(String value) {
   }
 }
 
+/// Validates that a display string uses legal Unicode scalar values.
 void _validateDisplayString(String value) {
   for (final rune in value.runes) {
     if (rune >= 0xd800 && rune <= 0xdfff) {
@@ -104,6 +114,7 @@ void _validateDisplayString(String value) {
 
 /// Represents an sf-token value.
 class SfToken {
+  /// Validates and stores the Structured Field token value.
   SfToken(String value) : value = value {
     _validateToken(value);
   }
@@ -113,6 +124,7 @@ class SfToken {
 
 /// Represents a display string bare item.
 class SfDisplayString {
+  /// Validates and stores the Structured Field display string.
   SfDisplayString(String value) : value = value {
     _validateDisplayString(value);
   }
@@ -122,8 +134,10 @@ class SfDisplayString {
 
 /// Represents a decimal bare item using a fixed three-digit scale.
 class SfDecimal {
+  /// Stores the decimal using its scaled integer representation.
   SfDecimal._(this._scaledValue);
 
+  /// Creates a Structured Field decimal from a numeric value.
   factory SfDecimal.fromNum(num value) {
     final scaled = value * 1000;
     final rounded = scaled.round();
@@ -134,6 +148,7 @@ class SfDecimal {
     return SfDecimal._checked(rounded);
   }
 
+  /// Parses a Structured Field decimal from its textual form.
   factory SfDecimal.parse(String value) {
     if (!RegExp(r'^-?[0-9]{1,12}\.[0-9]{1,3}$').hasMatch(value)) {
       throw SfFormatException('Invalid decimal format: $value');
@@ -146,6 +161,7 @@ class SfDecimal {
     return SfDecimal._checked(scaled);
   }
 
+  /// Ensures the scaled value falls within the allowed magnitude.
   static SfDecimal _checked(int scaled) {
     const max = 999999999999999;
     if (scaled.abs() > max) {
@@ -156,11 +172,14 @@ class SfDecimal {
 
   final int _scaledValue;
 
+  /// Returns the scaled integer representation (value * 1000).
   int get scaledValue => _scaledValue;
 
+  /// Converts the decimal into a floating point number.
   double toDouble() => _scaledValue / 1000.0;
 
   @override
+  /// Serializes the decimal back into its canonical textual representation.
   String toString() {
     final sign = _scaledValue < 0 ? '-' : '';
     final absValue = _scaledValue.abs();
@@ -175,10 +194,12 @@ class SfDecimal {
 
 /// Represents a Date bare item storing seconds since Unix epoch.
 class SfDate {
+  /// Creates a date from seconds since the Unix epoch.
   SfDate.fromSeconds(int seconds) : seconds = seconds {
     _validateRange(seconds);
   }
 
+  /// Creates an `SfDate` from a `DateTime`, normalizing to UTC seconds.
   factory SfDate.fromDateTime(DateTime dateTime) {
     final utc = dateTime.toUtc();
     final seconds = utc.millisecondsSinceEpoch ~/ 1000;
@@ -187,8 +208,10 @@ class SfDate {
 
   final int seconds;
 
+  /// Converts the stored seconds back into a UTC `DateTime`.
   DateTime toUtcDateTime() => DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
 
+  /// Validates that the seconds value lies within the allowed range.
   static void _validateRange(int seconds) {
     const min = -62135596800; // year 0001
     const max = 253402214400; // year 9999
@@ -212,8 +235,10 @@ enum SfBareItemType {
 
 /// Represents a bare item per RFC 9651.
 class SfBareItem {
+  /// Internal constructor storing both the type and underlying value.
   const SfBareItem._(this.type, this.value);
 
+  /// Creates an integer bare item after validating its range.
   factory SfBareItem.integer(int value) {
     const min = -999999999999999;
     const max = 999999999999999;
@@ -223,6 +248,7 @@ class SfBareItem {
     return SfBareItem._(SfBareItemType.integer, value);
   }
 
+  /// Creates a decimal bare item from supported numeric inputs.
   factory SfBareItem.decimal(dynamic value) {
     if (value is SfDecimal) {
       return SfBareItem._(SfBareItemType.decimal, value);
@@ -234,20 +260,25 @@ class SfBareItem {
     throw SfFormatException('Unsupported value for decimal bare item: ${value.runtimeType}');
   }
 
+  /// Creates a string bare item, validating the character set.
   factory SfBareItem.string(String value) {
     _validateString(value);
     return SfBareItem._(SfBareItemType.string, value);
   }
 
+  /// Creates a token bare item.
   factory SfBareItem.token(SfToken token) =>
       SfBareItem._(SfBareItemType.token, token.value);
 
+  /// Creates a byte sequence bare item with a defensive copy.
   factory SfBareItem.byteSequence(Uint8List value) =>
       SfBareItem._(SfBareItemType.byteSequence, Uint8List.fromList(value));
 
+  /// Creates a boolean bare item.
   factory SfBareItem.boolean(bool value) =>
       SfBareItem._(SfBareItemType.boolean, value);
 
+  /// Creates a date bare item from several supported temporal types.
   factory SfBareItem.date(dynamic value) {
     if (value is SfDate) {
       return SfBareItem._(SfBareItemType.date, value);
@@ -259,9 +290,11 @@ class SfBareItem {
     throw SfFormatException('Unsupported value for date bare item: ${value.runtimeType}');
   }
 
+  /// Creates a display string bare item.
   factory SfBareItem.displayString(SfDisplayString value) =>
       SfBareItem._(SfBareItemType.displayString, value);
 
+  /// Coerces dynamic input into the appropriate bare item type.
   factory SfBareItem.fromDynamic(dynamic value) {
     if (value is SfBareItem) return value;
     if (value is bool) return SfBareItem.boolean(value);
@@ -291,8 +324,10 @@ class SfBareItem {
   final SfBareItemType type;
   final Object value;
 
+  /// Returns `true` when the bare item represents boolean true.
   bool get isBooleanTrue => type == SfBareItemType.boolean && value == true;
 
+  /// Writes the bare item serialization into the provided buffer.
   void serializeTo(StringBuffer buffer) {
     switch (type) {
       case SfBareItemType.integer:
@@ -329,12 +364,14 @@ class SfBareItem {
     }
   }
 
+  /// Serializes the bare item into a string.
   String serialize() {
     final buffer = StringBuffer();
     serializeTo(buffer);
     return buffer.toString();
   }
 
+  /// Percent-encodes a display string according to Structured Fields rules.
   static String _encodeDisplayString(SfDisplayString display) {
     final buffer = StringBuffer()..write('%"');
     final bytes = utf8.encode(display.value);
@@ -355,8 +392,10 @@ class SfBareItem {
 
 /// Represents the parameters attached to an Item or Inner List.
 class SfParameters {
+  /// Stores the parameters as an unmodifiable map view.
   SfParameters._(this._entries);
 
+  /// Builds an `SfParameters` instance from a map of raw values.
   factory SfParameters([Map<String, dynamic>? entries]) {
     if (entries == null || entries.isEmpty) {
       return SfParameters._(UnmodifiableMapView<String, SfBareItem>(LinkedHashMap()));
@@ -371,10 +410,13 @@ class SfParameters {
 
   final Map<String, SfBareItem> _entries;
 
+  /// Returns true when no parameters are present.
   bool get isEmpty => _entries.isEmpty;
 
+  /// Exposes the underlying parameter map.
   Map<String, SfBareItem> asMap() => _entries;
 
+  /// Serializes parameters into the Structured Fields `;key=value` form.
   void serializeTo(StringBuffer buffer) {
     _entries.forEach((key, value) {
       buffer
@@ -391,41 +433,52 @@ class SfParameters {
 
 /// Represents an sf-item.
 class SfItem {
+  /// Creates an item from a bare value and optional parameters.
   SfItem(this.bareItem, [Map<String, dynamic>? parameters])
       : parameters = SfParameters(parameters);
 
+  /// Creates a string item.
   factory SfItem.string(String value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.string(value), parameters);
 
+  /// Creates a token item.
   factory SfItem.token(String value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.token(SfToken(value)), parameters);
 
+  /// Creates a boolean item.
   factory SfItem.boolean(bool value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.boolean(value), parameters);
 
+  /// Creates an integer item.
   factory SfItem.integer(int value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.integer(value), parameters);
 
+  /// Creates a decimal item.
   factory SfItem.decimal(dynamic value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.decimal(value), parameters);
 
+  /// Creates a byte sequence item.
   factory SfItem.byteSequence(Uint8List value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.byteSequence(value), parameters);
 
+  /// Creates a date item.
   factory SfItem.date(dynamic value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.date(value), parameters);
 
+  /// Creates a display string item.
   factory SfItem.displayString(String value, [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.displayString(SfDisplayString(value)), parameters);
 
   final SfBareItem bareItem;
   final SfParameters parameters;
 
+  /// Serializes the item and its parameters into the provided buffer.
   void serializeTo(StringBuffer buffer) {
     bareItem.serializeTo(buffer);
     parameters.serializeTo(buffer);
   }
 
+  /// Serializes the item into a string.
   String serialize() {
     final buffer = StringBuffer();
     serializeTo(buffer);
@@ -435,6 +488,7 @@ class SfItem {
 
 /// Represents an inner list per RFC 9651.
 class SfInnerList {
+  /// Creates an inner list with optional parameters.
   SfInnerList(List<SfItem> items, [Map<String, dynamic>? parameters])
       : items = List<SfItem>.unmodifiable(items),
         parameters = SfParameters(parameters);
@@ -442,6 +496,7 @@ class SfInnerList {
   final List<SfItem> items;
   final SfParameters parameters;
 
+  /// Serializes the inner list into the provided buffer.
   void serializeTo(StringBuffer buffer) {
     buffer.write('(');
     for (var index = 0; index < items.length; index++) {
@@ -452,6 +507,7 @@ class SfInnerList {
     parameters.serializeTo(buffer);
   }
 
+  /// Serializes the inner list into a string.
   String serialize() {
     final buffer = StringBuffer();
     serializeTo(buffer);
@@ -461,10 +517,12 @@ class SfInnerList {
 
 /// Represents a list member (either an Item or inner list).
 class SfListMember {
+  /// Creates a list member wrapping an item.
   SfListMember.item(SfItem item)
       : item = item,
         innerList = null;
 
+  /// Creates a list member wrapping an inner list.
   SfListMember.innerList(SfInnerList innerList)
       : item = null,
         innerList = innerList;
@@ -472,6 +530,7 @@ class SfListMember {
   final SfItem? item;
   final SfInnerList? innerList;
 
+  /// Serializes either the item or inner list into the buffer.
   void serializeTo(StringBuffer buffer) {
     if (item != null) {
       item!.serializeTo(buffer);
@@ -483,11 +542,13 @@ class SfListMember {
 
 /// Represents an sf-list.
 class SfList {
+  /// Creates a list from ordered members.
   SfList(List<SfListMember> members)
       : members = List<SfListMember>.unmodifiable(members);
 
   final List<SfListMember> members;
 
+  /// Serializes the list into a comma-separated string.
   String serialize() {
     final buffer = StringBuffer();
     for (var index = 0; index < members.length; index++) {
@@ -500,16 +561,19 @@ class SfList {
 
 /// Represents a dictionary member that can be either a value or boolean true with parameters.
 class SfDictionaryMember {
+  /// Creates a boolean-true dictionary member with optional parameters.
   SfDictionaryMember.booleanTrue([Map<String, dynamic>? parameters])
       : item = null,
         innerList = null,
         parameters = SfParameters(parameters);
 
+  /// Creates a dictionary member that stores a single item.
   SfDictionaryMember.item(SfItem item)
       : item = item,
         innerList = null,
         parameters = null;
 
+  /// Creates a dictionary member that stores an inner list.
   SfDictionaryMember.innerList(SfInnerList innerList)
       : item = null,
         innerList = innerList,
@@ -519,6 +583,7 @@ class SfDictionaryMember {
   final SfInnerList? innerList;
   final SfParameters? parameters;
 
+  /// Serializes the dictionary member according to its stored variant.
   void serializeTo(StringBuffer buffer) {
     if (item != null) {
       buffer.write('=');
@@ -535,6 +600,7 @@ class SfDictionaryMember {
 
 /// Represents an sf-dictionary.
 class SfDictionary {
+  /// Creates a dictionary while validating the member keys.
   SfDictionary(Map<String, SfDictionaryMember> entries)
       : _entries = UnmodifiableMapView<String, SfDictionaryMember>(
             LinkedHashMap.fromEntries(entries.entries.map((entry) {
@@ -544,8 +610,10 @@ class SfDictionary {
 
   final Map<String, SfDictionaryMember> _entries;
 
+  /// Provides access to the underlying entries.
   Map<String, SfDictionaryMember> asMap() => _entries;
 
+  /// Serializes the dictionary into a comma-separated string.
   String serialize() {
     final buffer = StringBuffer();
     var index = 0;

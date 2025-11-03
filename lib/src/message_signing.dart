@@ -12,10 +12,12 @@ enum SignatureAlgorithm {
   ecdsaP256Sha256,
 }
 
+/// Builds a component identifier item with optional Structured Fields parameters.
 SfItem _buildComponentIdentifier(String value, Map<String, dynamic>? parameters) {
   return SfItem.string(value, parameters);
 }
 
+/// Extracts the string value from a Structured Field component identifier.
 String _componentIdentifierValue(SfItem item) {
   final bareItem = item.bareItem;
   if (bareItem.type != SfBareItemType.string) {
@@ -26,10 +28,12 @@ String _componentIdentifierValue(SfItem item) {
 
 /// Holds configuration for message signature parameters, mirroring the Swift implementation.
 class SignatureParameters {
+  /// Creates an empty set of signature parameters.
   SignatureParameters()
       : _componentIdentifiers = <SfItem>[],
         _parameters = LinkedHashMap<String, SfBareItem>();
 
+  /// Creates a deep copy of another `SignatureParameters` instance.
   SignatureParameters.copy(SignatureParameters other)
       : _componentIdentifiers = List<SfItem>.from(other._componentIdentifiers),
         _parameters = LinkedHashMap<String, SfBareItem>.from(other._parameters),
@@ -42,8 +46,10 @@ class SignatureParameters {
   bool debugMode = false;
   SignatureAlgorithm algorithm = SignatureAlgorithm.hmacSha256;
 
+  /// The ordered list of Structured Field components that will be signed.
   List<SfItem> get componentIdentifiers => List.unmodifiable(_componentIdentifiers);
 
+  /// Adds a component identifier to the signature, avoiding duplicates.
   void addComponentIdentifier(String identifier, {Map<String, dynamic>? parameters}) {
     final normalized = identifier.startsWith('@') ? identifier : identifier.toLowerCase();
     final candidateParameters = SfParameters(parameters);
@@ -57,11 +63,13 @@ class SignatureParameters {
     _componentIdentifiers.add(_buildComponentIdentifier(normalized, parameters));
   }
 
+  /// Returns whether the candidate `SfItem` matches an existing component.
   bool _componentIdentifierMatches(SfItem item, String value, SfParameters candidate) {
     if (_componentIdentifierValue(item) != value) return false;
     return _parametersMatch(item.parameters, candidate);
   }
 
+  /// Compares two Structured Field parameter sets for equality.
   bool _parametersMatch(SfParameters existing, SfParameters candidate) {
     final existingMap = existing.asMap();
     final candidateMap = candidate.asMap();
@@ -75,30 +83,37 @@ class SignatureParameters {
     return true;
   }
 
+  /// Sets the `alg` parameter that advertises the signing algorithm.
   void setAlg(String value) {
     _parameters['alg'] = SfBareItem.string(value);
   }
 
+  /// Records the `created` timestamp parameter in seconds.
   void setCreated(int timestampSeconds) {
     _parameters['created'] = SfBareItem.integer(timestampSeconds);
   }
 
+  /// Records the `expires` timestamp parameter in seconds.
   void setExpires(int timestampSeconds) {
     _parameters['expires'] = SfBareItem.integer(timestampSeconds);
   }
 
+  /// Sets the `keyid` parameter to identify the signing key.
   void setKeyId(String keyId) {
     _parameters['keyid'] = SfBareItem.string(keyId);
   }
 
+  /// Sets the `nonce` parameter used for replay protection.
   void setNonce(String nonce) {
     _parameters['nonce'] = SfBareItem.string(nonce);
   }
 
+  /// Sets the optional `tag` parameter carried with the signature.
   void setTag(String tag) {
     _parameters['tag'] = SfBareItem.string(tag);
   }
 
+  /// Derives the Approov signature label for the configured algorithm.
   String signatureLabel() {
     switch (algorithm) {
       case SignatureAlgorithm.ecdsaP256Sha256:
@@ -109,15 +124,19 @@ class SignatureParameters {
     }
   }
 
+  /// Returns the Structured Field identifier used for the `Signature-Params` entry.
   SfItem signatureParamsIdentifier() => _buildComponentIdentifier('@signature-params', null);
 
+  /// Serializes the signature parameters into the canonical inner list representation.
   String serializeComponentValue() {
     final parameters = _parameters.isEmpty ? null : _parameters;
     return SfInnerList(_componentIdentifiers, parameters).serialize();
   }
 }
 
+/// Configures how signature parameters are generated for requests.
 class SignatureParametersFactory {
+  /// Creates a factory for building `SignatureParameters` instances.
   SignatureParametersFactory();
 
   SignatureParameters? _baseParameters;
@@ -130,11 +149,13 @@ class SignatureParametersFactory {
   final List<String> _optionalHeaders = <String>[];
   bool _debugMode = false;
 
+  /// Seeds the factory with base parameters that are cloned per build.
   SignatureParametersFactory setBaseParameters(SignatureParameters base) {
     _baseParameters = SignatureParameters.copy(base);
     return this;
   }
 
+  /// Configures body digest requirements and the hashing algorithm.
   SignatureParametersFactory setBodyDigestConfig(String? algorithm, {required bool required}) {
     if (algorithm != null &&
         algorithm != SignatureDigest.sha256.identifier &&
@@ -146,31 +167,37 @@ class SignatureParametersFactory {
     return this;
   }
 
+  /// Switches signing to the install (ECDSA) key path.
   SignatureParametersFactory setUseInstallMessageSigning() {
     _useAccountMessageSigning = false;
     return this;
   }
 
+  /// Switches signing to the account (HMAC) key path.
   SignatureParametersFactory setUseAccountMessageSigning() {
     _useAccountMessageSigning = true;
     return this;
   }
 
+  /// Enables or disables emitting the `created` parameter.
   SignatureParametersFactory setAddCreated(bool addCreated) {
     _addCreated = addCreated;
     return this;
   }
 
+  /// Sets the validity window for the `expires` parameter.
   SignatureParametersFactory setExpiresLifetime(int seconds) {
     _expiresLifetimeSeconds = seconds;
     return this;
   }
 
+  /// Controls whether the Approov token header is added to the component list.
   SignatureParametersFactory setAddApproovTokenHeader(bool add) {
     _addApproovTokenHeader = add;
     return this;
   }
 
+  /// Adds additional headers to sign when present on the request.
   SignatureParametersFactory addOptionalHeaders(List<String> headers) {
     for (final header in headers) {
       final normalized = header.toLowerCase();
@@ -181,11 +208,13 @@ class SignatureParametersFactory {
     return this;
   }
 
+  /// Enables or disables debug mode on the produced parameters.
   SignatureParametersFactory setDebugMode(bool debugMode) {
     _debugMode = debugMode;
     return this;
   }
 
+  /// Builds a concrete parameter set for the supplied signing context.
   SignatureParameters build(ApproovSigningContext context) {
     final params = _baseParameters != null ? SignatureParameters.copy(_baseParameters!) : SignatureParameters();
     params.debugMode = _debugMode;
@@ -233,6 +262,7 @@ class SignatureParametersFactory {
     return params;
   }
 
+  /// Generates the default Approov configuration, optionally layering on an override base.
   static SignatureParametersFactory generateDefaultFactory({SignatureParameters? overrideBase}) {
     final base = overrideBase ??
         (SignatureParameters()
@@ -249,12 +279,15 @@ class SignatureParametersFactory {
   }
 }
 
+/// Builds canonical signature base strings from parameters and request context.
 class SignatureBaseBuilder {
+  /// Creates a builder that canonicalizes the parameters for signing.
   SignatureBaseBuilder(this.params, this.context);
 
   final SignatureParameters params;
   final ApproovSigningContext context;
 
+  /// Produces the canonical signature base string for the configured context.
   String createSignatureBase() {
     // Serialize each signed component and the signature parameters into the canonical signature base string.
     final buffer = StringBuffer();
@@ -282,6 +315,7 @@ enum SignatureDigest {
   const SignatureDigest(this.identifier);
   final String identifier;
 
+  /// Looks up a digest configuration by its HTTP identifier.
   static SignatureDigest fromIdentifier(String id) {
     return SignatureDigest.values.firstWhere(
       (value) => value.identifier == id,
@@ -290,7 +324,9 @@ enum SignatureDigest {
   }
 }
 
+/// Holds the HTTP request data required for canonical signing.
 class ApproovSigningContext {
+  /// Captures the request metadata and header snapshot for signing.
   ApproovSigningContext({
     required this.requestMethod,
     required this.uri,
@@ -311,18 +347,22 @@ class ApproovSigningContext {
   final void Function(String name, String value)? onSetHeader;
   final void Function(String name, String value)? onAddHeader;
 
+  /// Returns true when a header with the provided name is present.
   bool hasField(String name) => _headers.containsKey(name.toLowerCase());
 
+  /// Sets a header to a single canonical value, replacing any previous entry.
   void setHeader(String name, String value) {
     _headers[name.toLowerCase()] = <String>[value];
     onSetHeader?.call(name, value);
   }
 
+  /// Adds an additional header value while keeping existing ones intact.
   void addHeader(String name, String value) {
     _headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value);
     onAddHeader?.call(name, value);
   }
 
+  /// Resolves the canonical value for a Structured Field component.
   String? getComponentValue(SfItem component) {
     final identifier = _componentIdentifierValue(component);
     if (identifier.startsWith('@')) {
@@ -360,6 +400,7 @@ class ApproovSigningContext {
     }
   }
 
+  /// Ensures the `Content-Digest` header exists by hashing the request body.
   String? ensureContentDigest(SignatureDigest digest, {required bool required}) {
     if (bodyBytes == null) {
       if (required) {
@@ -377,6 +418,7 @@ class ApproovSigningContext {
     return headerValue;
   }
 
+  /// Returns the authority component normalized per HTTP request rules.
   String _authority() {
     if ((uri.scheme == 'http' && uri.port == 80) || (uri.scheme == 'https' && uri.port == 443) || (uri.port == 0)) {
       return uri.host;
@@ -384,12 +426,14 @@ class ApproovSigningContext {
     return '${uri.host}:${uri.port}';
   }
 
+  /// Builds the request-target pseudo-component used by HTTP signatures.
   String _requestTarget() {
     final path = uri.path.isEmpty ? '/' : uri.path;
     if (!uri.hasQuery) return path;
     return '$path?${uri.query}';
   }
 
+  /// Extracts a single query parameter value, returning null when ambiguous.
   String? _queryParameterValue(String name) {
     final values = uri.queryParametersAll[name];
     if (values == null) return null;
@@ -397,6 +441,7 @@ class ApproovSigningContext {
     return values.isEmpty ? '' : values.first;
   }
 
+  /// Collapses folded header lines into a single comma-separated value.
   String _combineFieldValues(List<String> values) {
     final cleaned = values.map((value) {
       final trimmed = value.trim();
@@ -406,27 +451,33 @@ class ApproovSigningContext {
     return cleaned.join(', ');
   }
 
+  /// Returns a copy of the tracked headers map for inspection or replay.
   Map<String, List<String>> snapshotHeaders() => LinkedHashMap.of(_headers);
 }
 
+/// Coordinates signature parameter factories across different hosts.
 class ApproovMessageSigning {
   SignatureParametersFactory? _defaultFactory;
   final Map<String, SignatureParametersFactory> _hostFactories = {};
 
+  /// Sets the fallback factory used when a host-specific one is absent.
   ApproovMessageSigning setDefaultFactory(SignatureParametersFactory factory) {
     _defaultFactory = factory;
     return this;
   }
 
+  /// Registers a signature parameters factory for a specific host.
   ApproovMessageSigning putHostFactory(String host, SignatureParametersFactory factory) {
     _hostFactories[host] = factory;
     return this;
   }
 
+  /// Looks up the factory to use for the provided host.
   SignatureParametersFactory? _factoryForHost(String host) {
     return _hostFactories[host] ?? _defaultFactory;
   }
 
+  /// Builds signature parameters for the supplied URI if a factory is configured.
   SignatureParameters? buildParametersFor(Uri uri, ApproovSigningContext context) {
     final factory = _factoryForHost(uri.host);
     if (factory == null) return null;
