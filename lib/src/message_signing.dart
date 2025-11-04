@@ -91,7 +91,7 @@ class SignatureParameters {
     return true;
   }
 
-  /// Sets the `alg` parameter that advertises the signing algorithm.
+  /// Sets the `alg` parameter that advertises the signing algorithm. hmac-sha256 / ecdsa-p256-sha256
   void setAlg(String value) {
     _parameters['alg'] = SfBareItem.string(value);
   }
