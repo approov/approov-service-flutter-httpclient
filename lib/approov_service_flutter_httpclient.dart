@@ -719,6 +719,25 @@ class ApproovService {
     }
   }
 
+  /// Gets the signature for the given message using the account message signing key. This is a
+  /// convenience alias for [getMessageSignature] that mirrors the native SDK naming and may provide
+  /// clearer intent when working alongside install message signing.
+  static Future<String> getAccountMessageSignature(String message) async {
+    Log.d("$TAG: getAccountMessageSignature");
+    await _requireInitialized();
+    final Map<String, dynamic> arguments = <String, dynamic>{
+      "message": message,
+    };
+    try {
+      return await _fgChannel.invokeMethod(
+          'getAccountMessageSignature', arguments);
+    } on MissingPluginException {
+      return await getMessageSignature(message);
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
   /// Fetches a secure string with the given key. If newDef is not null then a
   /// secure string for the particular app instance may be defined. In this case the
   /// new value is returned as the secure string. Use of an empty string for newDef removes
@@ -1314,7 +1333,7 @@ class ApproovService {
       case 'ecdsa-p256-sha256':
         return await _getInstallMessageSignature(message);
       case 'hmac-sha256':
-        return await getMessageSignature(message);
+        return await getAccountMessageSignature(message);
       default:
         throw StateError('Unsupported signature alg: $algorithmIdentifier');
     }

@@ -471,20 +471,33 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     } else if ([@"setDevKey" isEqualToString:call.method]) {
         [Approov setDevKey:call.arguments[@"devKey"]];
         result(nil);
-    } else if ([@"getMessageSignature" isEqualToString:call.method]) {
-        @try {
-            result([Approov getMessageSignature:call.arguments[@"message"]]);
-        }
-        @catch (NSException *exception) {
-            result([FlutterError errorWithCode:@"Approov.getMessageSignature"
-                                       message:exception.reason
-                                       details:nil]);
-        }
-    } else if ([@"getInstallMessageSignature" isEqualToString:call.method]) {
-        @try {
-            result([Approov getInstallMessageSignature:call.arguments[@"message"]]);
-        }
-        @catch (NSException *exception) {
+  } else if ([@"getMessageSignature" isEqualToString:call.method]) {
+    @try {
+      result([Approov getMessageSignature:call.arguments[@"message"]]);
+    }
+    @catch (NSException *exception) {
+      result([FlutterError errorWithCode:@"Approov.getMessageSignature"
+                                 message:exception.reason
+                                 details:nil]);
+    }
+  } else if ([@"getAccountMessageSignature" isEqualToString:call.method]) {
+    @try {
+      if ([Approov respondsToSelector:@selector(getAccountMessageSignature:)]) {
+        result([Approov getAccountMessageSignature:call.arguments[@"message"]]);
+      } else {
+        result([Approov getMessageSignature:call.arguments[@"message"]]);
+      }
+    }
+    @catch (NSException *exception) {
+      result([FlutterError errorWithCode:@"Approov.getAccountMessageSignature"
+                                 message:exception.reason
+                                 details:nil]);
+    }
+  } else if ([@"getInstallMessageSignature" isEqualToString:call.method]) {
+    @try {
+      result([Approov getInstallMessageSignature:call.arguments[@"message"]]);
+    }
+    @catch (NSException *exception) {
             result([FlutterError errorWithCode:@"Approov.getInstallMessageSignature"
                                        message:exception.reason
                                        details:nil]);
