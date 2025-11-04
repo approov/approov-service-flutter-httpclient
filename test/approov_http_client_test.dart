@@ -7,18 +7,21 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  const MethodChannel channel = MethodChannel('approov_http_client');
-
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  const MethodChannel fgChannel =
+      MethodChannel('approov_service_flutter_httpclient_fg');
+  late Future<dynamic> Function(MethodCall call) channelHandler;
+
   setUp(() {
-    channel.setMockMethodCallHandler((MethodCall methodCall) async {
-      return '42';
-    });
+    channelHandler = (MethodCall methodCall) async => '42';
+    fgChannel.setMockMethodCallHandler(
+      (MethodCall call) => channelHandler(call),
+    );
   });
 
   tearDown(() {
-    channel.setMockMethodCallHandler(null);
+    fgChannel.setMockMethodCallHandler(null);
     ApproovService.disableMessageSigning();
   });
 
@@ -181,6 +184,67 @@ void main() {
         .toList();
     expect(hostComponents, contains('@path'));
     expect(hostParams.algorithmIdentifier, 'ecdsa-p256-sha256');
+  });
+
+  test('getAccountMessageSignature invokes account-specific channel', () async {
+    final calls = <MethodCall>[];
+    const message = 'payload';
+    channelHandler = (MethodCall call) async {
+      calls.add(call);
+      switch (call.method) {
+        case 'initialize':
+        case 'setUserProperty':
+          return null;
+        case 'getAccountMessageSignature':
+          expect(call.arguments, {'message': message});
+          return 'account-signature';
+        default:
+          fail('Unexpected method ${call.method}');
+      }
+    };
+
+    await ApproovService.initialize('test-config', 'reinit-account');
+    final signature = await ApproovService.getAccountMessageSignature(message);
+
+    expect(signature, 'account-signature');
+    expect(
+      calls.map((call) => call.method),
+      ['initialize', 'setUserProperty', 'getAccountMessageSignature'],
+    );
+  });
+
+  test('getAccountMessageSignature falls back when channel missing', () async {
+    final calls = <MethodCall>[];
+    const message = 'payload';
+    channelHandler = (MethodCall call) async {
+      calls.add(call);
+      switch (call.method) {
+        case 'initialize':
+        case 'setUserProperty':
+          return null;
+        case 'getAccountMessageSignature':
+          throw MissingPluginException('getAccountMessageSignature');
+        case 'getMessageSignature':
+          expect(call.arguments, {'message': message});
+          return 'legacy-signature';
+        default:
+          fail('Unexpected method ${call.method}');
+      }
+    };
+
+    await ApproovService.initialize('test-config', 'reinit-fallback');
+    final signature = await ApproovService.getAccountMessageSignature(message);
+
+    expect(signature, 'legacy-signature');
+    expect(
+      calls.map((call) => call.method),
+      [
+        'initialize',
+        'setUserProperty',
+        'getAccountMessageSignature',
+        'getMessageSignature'
+      ],
+    );
   });
 }
 
