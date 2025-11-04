@@ -40,7 +40,6 @@ export 'src/message_signing.dart'
     show
         ApproovMessageSigning,
         ApproovSigningContext,
-        SignatureAlgorithm,
         SignatureBaseBuilder,
         SignatureDigest,
         SignatureParameters,
@@ -105,8 +104,8 @@ class _TokenFetchResult {
   ///
   /// @param tokenFetchResultMap holds the results of the fetch
   _TokenFetchResult.fromTokenFetchResultMap(Map tokenFetchResultMap) {
-    _TokenFetchStatus? newTokenFetchStatus =
-        EnumToString.fromString(_TokenFetchStatus.values, tokenFetchResultMap["TokenFetchStatus"]);
+    _TokenFetchStatus? newTokenFetchStatus = EnumToString.fromString(
+        _TokenFetchStatus.values, tokenFetchResultMap["TokenFetchStatus"]);
     if (newTokenFetchStatus != null) tokenFetchStatus = newTokenFetchStatus;
     token = tokenFetchResultMap["Token"];
     String? newSecureString = tokenFetchResultMap["SecureString"];
@@ -166,7 +165,8 @@ class ApproovRejectionException extends ApproovException {
   /// @param cause is a message giving the cause of the exception
   /// @param arc is the code that can be used for support purposes
   /// @param rejectionReasons may provide a comma separated list of rejection reasons
-  ApproovRejectionException(String cause, String arc, String rejectionReasons) : super(cause) {
+  ApproovRejectionException(String cause, String arc, String rejectionReasons)
+      : super(cause) {
     this.arc = arc;
     this.rejectionReasons = rejectionReasons;
   }
@@ -186,12 +186,14 @@ class ApproovService {
   // foreground channel for communicating with the platform specific layers (used by the root isolate) - this is
   // used in all cases where the operation is not expected to block for an extended period and also from the root
   // isolate where a callback may be received
-  static const MethodChannel _fgChannel = const MethodChannel('approov_service_flutter_httpclient_fg');
+  static const MethodChannel _fgChannel =
+      const MethodChannel('approov_service_flutter_httpclient_fg');
 
   // background channel for communicating with the platform specific layers (used by background isolates) - this is
   // used in cases where the operation may block for an extended period and it is necessary to use this in that
   // case to avoid the main isolate thread being blocked by the operation
-  static const MethodChannel _bgChannel = const MethodChannel('approov_service_flutter_httpclient_bg');
+  static const MethodChannel _bgChannel =
+      const MethodChannel('approov_service_flutter_httpclient_bg');
 
   // header that will be added to Approov enabled requests
   static const String APPROOV_HEADER = "Approov-Token";
@@ -242,16 +244,18 @@ class ApproovService {
   // configuration for automatically signing outbound requests using Approov
   static ApproovMessageSigning? _messageSigning;
   static bool _installMessageSigningAvailable = true;
-  
+
   // cached host certificates obtaining from probing the relevant host domains
-  static Map<String, List<Uint8List>?> _hostCertificates = Map<String, List<Uint8List>?>();
+  static Map<String, List<Uint8List>?> _hostCertificates =
+      Map<String, List<Uint8List>?>();
 
   // next transaction ID to be used for the next asynchronous transaction - we choose this randomly for
   // each isolate to avoid collisions between transactions in isolates since they share a common native plugin
   static int transactionID = Random().nextInt(1000000);
 
   // map of transactions that are being performed asynchronously in the platform layer
-  static Map<String, Completer<dynamic>> _platformTransactions = Map<String, Completer<dynamic>>();
+  static Map<String, Completer<dynamic>> _platformTransactions =
+      Map<String, Completer<dynamic>>();
 
   /**
    * Handles a response from the platform layer for an asynchronous transaction. This
@@ -263,7 +267,8 @@ class ApproovService {
    */
   static void _handleResponse(dynamic arguments) {
     final String transactionID = arguments["TransactionID"] as String;
-    final Completer<dynamic>? transaction = _platformTransactions[transactionID];
+    final Completer<dynamic>? transaction =
+        _platformTransactions[transactionID];
     if (transaction != null) {
       transaction.complete(arguments);
       _platformTransactions.remove(transactionID);
@@ -314,12 +319,15 @@ class ApproovService {
     await _initMutex.protect(() async {
       bool isRootIsolate = (RootIsolateToken.instance != null);
       String isolate = isRootIsolate ? "root" : "background";
-      if (_isInitialized && ((comment == null) || !comment.startsWith("reinit"))) {
+      if (_isInitialized &&
+          ((comment == null) || !comment.startsWith("reinit"))) {
         // this is a reinitialization attempt and we need to check if the config is the same
         if (_initialConfig != config) {
-          throw ApproovException("Attempt to reinitialize the Approov SDK with a different configuration $config");
+          throw ApproovException(
+              "Attempt to reinitialize the Approov SDK with a different configuration $config");
         }
-        Log.d("$TAG: $isolate initialization ignoring attempt with the same config");
+        Log.d(
+            "$TAG: $isolate initialization ignoring attempt with the same config");
       } else {
         // perform the actual initialization
         try {
@@ -419,7 +427,8 @@ class ApproovService {
     SignatureParametersFactory? defaultFactory,
     Map<String, SignatureParametersFactory>? hostFactories,
   }) {
-    final effectiveDefaultFactory = defaultFactory ?? SignatureParametersFactory.generateDefaultFactory();
+    final effectiveDefaultFactory =
+        defaultFactory ?? SignatureParametersFactory.generateDefaultFactory();
     if (hostFactories != null) {
       for (final entry in hostFactories.entries) {
         if (entry.key.isEmpty) {
@@ -427,7 +436,8 @@ class ApproovService {
         }
       }
     }
-    final messageSigning = ApproovMessageSigning()..setDefaultFactory(effectiveDefaultFactory);
+    final messageSigning = ApproovMessageSigning()
+      ..setDefaultFactory(effectiveDefaultFactory);
     hostFactories?.forEach(messageSigning.putHostFactory);
     _messageSigning = messageSigning;
     Log.d("$TAG: enableMessageSigning configured");
@@ -562,7 +572,8 @@ class ApproovService {
       final Map<String, dynamic> waitArgs = <String, dynamic>{
         "transactionID": transactionID,
       };
-      final results = await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      final results =
+          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
       completer.complete(results);
       _platformTransactions.remove(transactionID);
     }
@@ -590,11 +601,13 @@ class ApproovService {
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED))
       // we are unable to get the secure string due to network conditions so the request can
       // be retried by the user later
-      throw new ApproovNetworkException("precheck: ${fetchResult.tokenFetchStatus.name}");
+      throw new ApproovNetworkException(
+          "precheck: ${fetchResult.tokenFetchStatus.name}");
     else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
         (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY))
       // we are unable to get the secure string due to a more permanent error
-      throw new ApproovException("precheck: ${fetchResult.tokenFetchStatus.name}");
+      throw new ApproovException(
+          "precheck: ${fetchResult.tokenFetchStatus.name}");
   }
 
   /// Gets the device ID used by Approov to identify the particular device that the SDK is running on. Note that
@@ -663,7 +676,8 @@ class ApproovService {
 
     // check the status of Approov token fetch
     if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_APPROOV_SERVICE)) {
+        (fetchResult.tokenFetchStatus ==
+            _TokenFetchStatus.NO_APPROOV_SERVICE)) {
       // we successfully obtained a token so provide it, or provide an empty one on complete Approov service failure
       return fetchResult.token;
     } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
@@ -671,10 +685,12 @@ class ApproovService {
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
       // we are unable to get an Approov token due to network conditions so the request can
       // be retried by the user later
-      throw new ApproovNetworkException("fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
+      throw new ApproovNetworkException(
+          "fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
     } else {
       // we have failed to get an Approov token with a more serious permanent error
-      throw ApproovException("fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
+      throw ApproovException(
+          "fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
     }
   }
 
@@ -695,7 +711,8 @@ class ApproovService {
       "message": message,
     };
     try {
-      String messageSignature = await _fgChannel.invokeMethod('getMessageSignature', arguments);
+      String messageSignature =
+          await _fgChannel.invokeMethod('getMessageSignature', arguments);
       return messageSignature;
     } catch (err) {
       throw ApproovException('$err');
@@ -752,7 +769,8 @@ class ApproovService {
       final Map<String, dynamic> waitArgs = <String, dynamic>{
         "transactionID": transactionID,
       };
-      final results = await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      final results =
+          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
       completer.complete(results);
       _platformTransactions.remove(transactionID);
     }
@@ -763,7 +781,8 @@ class ApproovService {
       Map fetchResultMap = await completer.future;
       fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
       String isolate = _isRootIsolate ? "root" : "background";
-      Log.d("$TAG: $isolate fetchSecureString $type: $key, ${fetchResult.tokenFetchStatus.name}");
+      Log.d(
+          "$TAG: $isolate fetchSecureString $type: $key, ${fetchResult.tokenFetchStatus.name}");
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -780,11 +799,13 @@ class ApproovService {
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED))
       // we are unable to get the secure string due to network conditions so the request can
       // be retried by the user later
-      throw new ApproovNetworkException("fetchSecureString $type for $key: ${fetchResult.tokenFetchStatus.name}");
+      throw new ApproovNetworkException(
+          "fetchSecureString $type for $key: ${fetchResult.tokenFetchStatus.name}");
     else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
         (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY))
       // we are unable to get the secure string due to a more permanent error
-      throw new ApproovException("fetchSecureString $type for $key: ${fetchResult.tokenFetchStatus.name}");
+      throw new ApproovException(
+          "fetchSecureString $type for $key: ${fetchResult.tokenFetchStatus.name}");
     return fetchResult.secureString;
   }
 
@@ -829,7 +850,8 @@ class ApproovService {
       final Map<String, dynamic> waitArgs = <String, dynamic>{
         "transactionID": transactionID,
       };
-      final results = await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      final results =
+          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
       completer.complete(results);
       _platformTransactions.remove(transactionID);
     }
@@ -840,7 +862,8 @@ class ApproovService {
       Map fetchResultMap = await completer.future;
       fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
       String isolate = _isRootIsolate ? "root" : "background";
-      Log.d("$TAG: $isolate fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
+      Log.d(
+          "$TAG: $isolate fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -857,10 +880,12 @@ class ApproovService {
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED))
       // we are unable to get the custom JWT due to network conditions so the request can
       // be retried by the user later
-      throw new ApproovNetworkException("fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
+      throw new ApproovNetworkException(
+          "fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
     else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS)
       // we are unable to get the custom JWT due to a more permanent error
-      throw new ApproovException("fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
+      throw new ApproovException(
+          "fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
 
     // provide the custom JWT
     return fetchResult.token;
@@ -940,7 +965,8 @@ class ApproovService {
         final Map<String, dynamic> waitArgs = <String, dynamic>{
           "transactionID": transactionID,
         };
-        final results = await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+        final results =
+            await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
         completer.complete(results);
         _platformTransactions.remove(transactionID);
       }
@@ -948,7 +974,8 @@ class ApproovService {
       // wait for the transaction to complete
       final results = await completer.future;
       _configEpoch = results['ConfigEpoch'];
-      _TokenFetchResult tokenFetchResult = _TokenFetchResult.fromTokenFetchResultMap(results);
+      _TokenFetchResult tokenFetchResult =
+          _TokenFetchResult.fromTokenFetchResultMap(results);
       return tokenFetchResult;
     } catch (err) {
       throw ApproovException('$err');
@@ -968,7 +995,8 @@ class ApproovService {
   /// @param queryParameter is the parameter to be potentially substituted
   /// @return Uri passed in, or modified with a new Uri if required
   /// @throws ApproovException if it is not possible to obtain secure strings for substitution
-  static Future<Uri> substituteQueryParam(Uri uri, String queryParameter) async {
+  static Future<Uri> substituteQueryParam(
+      Uri uri, String queryParameter) async {
     await _requireInitialized();
     String? queryValue = uri.queryParameters[queryParameter];
     if (queryValue != null) {
@@ -1007,7 +1035,8 @@ class ApproovService {
         final Map<String, dynamic> waitArgs = <String, dynamic>{
           "transactionID": transactionID,
         };
-        final results = await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+        final results =
+            await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
         completer.complete(results);
         _platformTransactions.remove(transactionID);
       }
@@ -1018,7 +1047,8 @@ class ApproovService {
         Map fetchResultMap = await completer.future;
         fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
         String isolate = _isRootIsolate ? "root" : "background";
-        Log.d("$TAG: $isolate substituting query parameter $queryParameter: ${fetchResult.tokenFetchStatus.name}");
+        Log.d(
+            "$TAG: $isolate substituting query parameter $queryParameter: ${fetchResult.tokenFetchStatus.name}");
       } catch (err) {
         throw ApproovException('$err');
       }
@@ -1026,7 +1056,8 @@ class ApproovService {
       // process the returned Approov status
       if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
         // perform a query substitution
-        Map<String, String> updatedParams = Map<String, String>.from(uri.queryParameters);
+        Map<String, String> updatedParams =
+            Map<String, String>.from(uri.queryParameters);
         updatedParams[queryParameter] = fetchResult.secureString!;
         return uri.replace(queryParameters: updatedParams);
       } else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
@@ -1062,7 +1093,8 @@ class ApproovService {
   /// @param request is the HttpClientRequest to which Approov is being added
   /// @param pendingBodyBytes holds any buffered body bytes available before the request is sent, or null for streaming
   /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
-  static Future<void> _updateRequest(HttpClientRequest request, Uint8List? pendingBodyBytes) async {
+  static Future<void> _updateRequest(
+      HttpClientRequest request, Uint8List? pendingBodyBytes) async {
     // check if the URL matches one of the exclusion regexs and just return if so
     await _requireInitialized();
     String url = request.uri.toString();
@@ -1087,7 +1119,8 @@ class ApproovService {
     // be used to check the validity of the token and if you use token annotations they
     // will appear here to determine why a request is being rejected)
     String isolate = _isRootIsolate ? "root" : "background";
-    Log.d("$TAG: $isolate updateRequest for $host: ${fetchResult.loggableToken}, ${stopWatch.elapsedMilliseconds}ms");
+    Log.d(
+        "$TAG: $isolate updateRequest for $host: ${fetchResult.loggableToken}, ${stopWatch.elapsedMilliseconds}ms");
 
     // if there was a configuration change we fetch a new configuration, which will update
     // the configuration epoch across all isolates and cause all delegate HttpClient caches to be
@@ -1100,26 +1133,32 @@ class ApproovService {
     // check the status of Approov token fetch
     if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
       // we successfully obtained a token so add it to the header for the request
-      request.headers.set(_approovTokenHeader, _approovTokenPrefix + fetchResult.token, preserveHeaderCase: true);
+      request.headers.set(
+          _approovTokenHeader, _approovTokenPrefix + fetchResult.token,
+          preserveHeaderCase: true);
     } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
         (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
       // we are unable to get an Approov token due to network conditions so the request can
       // be retried by the user later - unless overridden
       if (!_proceedOnNetworkFail)
-        throw new ApproovNetworkException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
-    } else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.NO_APPROOV_SERVICE) &&
+        throw new ApproovNetworkException(
+            "Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
+    } else if ((fetchResult.tokenFetchStatus !=
+            _TokenFetchStatus.NO_APPROOV_SERVICE) &&
         (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL) &&
         (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL)) {
       // we have failed to get an Approov token with a more serious permanent error
-      throw ApproovException("Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
+      throw ApproovException(
+          "Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
     }
 
     // we only continue additional processing if we had a valid status from Approov, to prevent additional delays
     // by trying to fetch from Approov again and this also protects against header substiutions in domains not
     // protected by Approov and therefore potentially subject to a MitM
     if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
-        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL)) return;
+        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL))
+      return;
 
     // we now deal with any header substitutions, which may require further fetches but these
     // should be using cached results
@@ -1127,7 +1166,9 @@ class ApproovService {
       String header = entry.key;
       String prefix = entry.value;
       String? value = request.headers.value(header);
-      if ((value != null) && value.startsWith(prefix) && (value.length > prefix.length)) {
+      if ((value != null) &&
+          value.startsWith(prefix) &&
+          (value.length > prefix.length)) {
         // setup a Completer for the transaction ID we are going to use
         Completer<dynamic> completer = new Completer<dynamic>();
         String transactionID = ApproovService.transactionID.toString();
@@ -1156,7 +1197,8 @@ class ApproovService {
           final Map<String, dynamic> waitArgs = <String, dynamic>{
             "transactionID": transactionID,
           };
-          final results = await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+          final results =
+              await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
           completer.complete(results);
           _platformTransactions.remove(transactionID);
         }
@@ -1165,9 +1207,11 @@ class ApproovService {
         _TokenFetchResult fetchResult;
         try {
           Map fetchResultMap = await completer.future;
-          fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+          fetchResult =
+              _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
           String isolate = _isRootIsolate ? "root" : "background";
-          Log.d("$TAG: $isolate updateRequest substituting header $header: ${fetchResult.tokenFetchStatus.name}");
+          Log.d(
+              "$TAG: $isolate updateRequest substituting header $header: ${fetchResult.tokenFetchStatus.name}");
         } catch (err) {
           throw ApproovException('$err');
         }
@@ -1176,27 +1220,33 @@ class ApproovService {
         if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
           // substitute the header value
           final substitutedValue = prefix + fetchResult.secureString!;
-          request.headers.set(header, substitutedValue, preserveHeaderCase: true);
+          request.headers
+              .set(header, substitutedValue, preserveHeaderCase: true);
         } else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
           // if the request is rejected then we provide a special exception with additional information
           throw new ApproovRejectionException(
               "Header substitution for $header: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
               fetchResult.ARC,
               fetchResult.rejectionReasons);
-        else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
+        else if ((fetchResult.tokenFetchStatus ==
+                _TokenFetchStatus.NO_NETWORK) ||
             (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
             (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
           // we are unable to get the secure string due to network conditions so the request can
           // be retried by the user later - unless overridden
           if (!_proceedOnNetworkFail)
-            throw new ApproovNetworkException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
-        } else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY)
+            throw new ApproovNetworkException(
+                "Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
+        } else if (fetchResult.tokenFetchStatus !=
+            _TokenFetchStatus.UNKNOWN_KEY)
           // we are unable to get the secure string due to a more permanent error
-          throw new ApproovException("Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
+          throw new ApproovException(
+              "Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
       }
     }
 
-    if (_messageSigning != null && fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+    if (_messageSigning != null &&
+        fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
       try {
         await _applyMessageSigning(request, pendingBodyBytes);
       } on ApproovException {
@@ -1207,7 +1257,8 @@ class ApproovService {
     }
   }
 
-  static Future<void> _applyMessageSigning(HttpClientRequest request, Uint8List? pendingBodyBytes) async {
+  static Future<void> _applyMessageSigning(
+      HttpClientRequest request, Uint8List? pendingBodyBytes) async {
     final messageSigning = _messageSigning;
     if (messageSigning == null) return;
 
@@ -1217,8 +1268,10 @@ class ApproovService {
       headers: _snapshotHeaders(request.headers),
       bodyBytes: pendingBodyBytes,
       tokenHeaderName: _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
-      onSetHeader: (name, value) => request.headers.set(name, value, preserveHeaderCase: true),
-      onAddHeader: (name, value) => request.headers.add(name, value, preserveHeaderCase: true),
+      onSetHeader: (name, value) =>
+          request.headers.set(name, value, preserveHeaderCase: true),
+      onAddHeader: (name, value) =>
+          request.headers.add(name, value, preserveHeaderCase: true),
     );
 
     final params = messageSigning.buildParametersFor(request.uri, context);
@@ -1227,19 +1280,25 @@ class ApproovService {
       return;
     }
 
-    final signatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
-    // Allow the configured algorithm to fail fast so callers can decide how to handle it.
-    final signature = await _signCanonicalMessage(signatureBase, params.algorithm);
+    final signatureBase =
+        SignatureBaseBuilder(params, context).createSignatureBase();
+    final alg = params.algorithmIdentifier;
+    if (alg == null) {
+      throw StateError('Signature parameters missing alg identifier');
+    }
+    final signature = await _signCanonicalMessage(signatureBase, alg);
     if (signature.isEmpty) {
-      Log.d("$TAG: message signing returned empty signature for ${request.uri}");
+      Log.d(
+          "$TAG: message signing returned empty signature for ${request.uri}");
       return;
     }
 
-    final signatureLabel = params.signatureLabel();
+    final signatureLabel = _signatureLabelForAlg(alg);
     final signatureHeader = '$signatureLabel=:${signature}:';
     context.setHeader('Signature', signatureHeader);
 
-    final signatureInput = '$signatureLabel=${params.serializeComponentValue()}';
+    final signatureInput =
+        '$signatureLabel=${params.serializeComponentValue()}';
     context.setHeader('Signature-Input', signatureInput);
 
     if (params.debugMode) {
@@ -1247,16 +1306,28 @@ class ApproovService {
       final baseDigestHeader = 'sha-256=:${base64Encode(digest)}:';
       context.setHeader('Signature-Base-Digest', baseDigestHeader);
     }
-
   }
 
-  static Future<String> _signCanonicalMessage(String message, SignatureAlgorithm algorithm) async {
-    switch (algorithm) {
-      case SignatureAlgorithm.ecdsaP256Sha256:
+  static Future<String> _signCanonicalMessage(
+      String message, String algorithmIdentifier) async {
+    switch (algorithmIdentifier) {
+      case 'ecdsa-p256-sha256':
         return await _getInstallMessageSignature(message);
-      case SignatureAlgorithm.hmacSha256:
-      default:
+      case 'hmac-sha256':
         return await getMessageSignature(message);
+      default:
+        throw StateError('Unsupported signature alg: $algorithmIdentifier');
+    }
+  }
+
+  static String _signatureLabelForAlg(String algorithmIdentifier) {
+    switch (algorithmIdentifier) {
+      case 'ecdsa-p256-sha256':
+        return 'install';
+      case 'hmac-sha256':
+        return 'account';
+      default:
+        throw StateError('Unsupported signature alg: $algorithmIdentifier');
     }
   }
 
@@ -1265,7 +1336,8 @@ class ApproovService {
       throw StateError('install message signing not supported');
     }
     try {
-      final result = await _fgChannel.invokeMethod<String>('getInstallMessageSignature', <String, dynamic>{
+      final result = await _fgChannel
+          .invokeMethod<String>('getInstallMessageSignature', <String, dynamic>{
         "message": message,
       });
       if (result == null || result.isEmpty) {
@@ -1291,7 +1363,8 @@ class ApproovService {
       throw StateError('Invalid DER signature: buffer is empty');
     }
     if (offset >= der.length) {
-      throw StateError('Invalid DER signature: unexpected end of DER buffer at sequence');
+      throw StateError(
+          'Invalid DER signature: unexpected end of DER buffer at sequence');
     }
     if (der[offset] != 0x30) {
       throw StateError('Invalid DER signature: missing sequence');
@@ -1299,12 +1372,14 @@ class ApproovService {
     offset++;
 
     if (offset >= der.length) {
-      throw StateError('Invalid DER signature: unexpected end of DER buffer after sequence tag');
+      throw StateError(
+          'Invalid DER signature: unexpected end of DER buffer after sequence tag');
     }
     int sequenceLength = _readDerLength(der, offset);
     int seqLenBytes = _encodedLengthByteCount(der, offset);
     if (offset + seqLenBytes > der.length) {
-      throw StateError('Invalid DER signature: sequence length encoding exceeds buffer');
+      throw StateError(
+          'Invalid DER signature: sequence length encoding exceeds buffer');
     }
     offset += seqLenBytes;
     if (sequenceLength != der.length - offset) {
@@ -1312,7 +1387,8 @@ class ApproovService {
     }
 
     if (offset >= der.length) {
-      throw StateError('Invalid DER signature: unexpected end of DER buffer at r integer tag');
+      throw StateError(
+          'Invalid DER signature: unexpected end of DER buffer at r integer tag');
     }
     if (der[offset] != 0x02) {
       throw StateError('Invalid DER signature: expected integer for r');
@@ -1320,12 +1396,14 @@ class ApproovService {
     offset++;
 
     if (offset >= der.length) {
-      throw StateError('Invalid DER signature: unexpected end of DER buffer at r length');
+      throw StateError(
+          'Invalid DER signature: unexpected end of DER buffer at r length');
     }
     int rLength = _readDerLength(der, offset);
     int rLenBytes = _encodedLengthByteCount(der, offset);
     if (offset + rLenBytes > der.length) {
-      throw StateError('Invalid DER signature: r length encoding exceeds buffer');
+      throw StateError(
+          'Invalid DER signature: r length encoding exceeds buffer');
     }
     offset += rLenBytes;
     if (offset + rLength > der.length) {
@@ -1335,7 +1413,8 @@ class ApproovService {
     offset += rLength;
 
     if (offset >= der.length) {
-      throw StateError('Invalid DER signature: unexpected end of DER buffer at s integer tag');
+      throw StateError(
+          'Invalid DER signature: unexpected end of DER buffer at s integer tag');
     }
     if (der[offset] != 0x02) {
       throw StateError('Invalid DER signature: expected integer for s');
@@ -1343,12 +1422,14 @@ class ApproovService {
     offset++;
 
     if (offset >= der.length) {
-      throw StateError('Invalid DER signature: unexpected end of DER buffer at s length');
+      throw StateError(
+          'Invalid DER signature: unexpected end of DER buffer at s length');
     }
     int sLength = _readDerLength(der, offset);
     int sLenBytes = _encodedLengthByteCount(der, offset);
     if (offset + sLenBytes > der.length) {
-      throw StateError('Invalid DER signature: s length encoding exceeds buffer');
+      throw StateError(
+          'Invalid DER signature: s length encoding exceeds buffer');
     }
     offset += sLenBytes;
     if (offset + sLength > der.length) {
@@ -1447,7 +1528,8 @@ class ApproovService {
           final Map<String, dynamic> waitArgs = <String, dynamic>{
             "transactionID": transactionID,
           };
-          final results = await channel.invokeMethod('waitForHostCertificates', waitArgs);
+          final results =
+              await channel.invokeMethod('waitForHostCertificates', waitArgs);
           completer.complete(results);
           _platformTransactions.remove(transactionID);
         }
@@ -1457,13 +1539,15 @@ class ApproovService {
         if (results is Map<Object?, Object?>) {
           if (results.containsKey("Certificates")) {
             // certificate were fetched so we cache them
-            List fetchedHostCertificates = results["Certificates"] as List<dynamic>;
+            List fetchedHostCertificates =
+                results["Certificates"] as List<dynamic>;
             hostCertificates = [];
             for (final cert in fetchedHostCertificates) {
               hostCertificates.add(cert as Uint8List);
             }
             _hostCertificates[url.host] = hostCertificates;
-            Log.d("$TAG: $isolate fetchHostCertificates ${url.host} obtained ${hostCertificates.length} certificates");
+            Log.d(
+                "$TAG: $isolate fetchHostCertificates ${url.host} obtained ${hostCertificates.length} certificates");
           } else if (results.containsKey("Error")) {
             // there was a specific error fetching the certificates
             String error = results["Error"] as String;
@@ -1476,7 +1560,8 @@ class ApproovService {
           }
         } else {
           // there was an unknown return format fetching the certificates
-          Log.d("$TAG: $isolate fetchHostCertificates ${url.host} bad response");
+          Log.d(
+              "$TAG: $isolate fetchHostCertificates ${url.host} bad response");
           return null;
         }
       } catch (err) {
@@ -1522,7 +1607,8 @@ class ApproovService {
     bool isFirst = true;
     List<Uint8List> hostPinCerts = [];
     for (final cert in hostCerts) {
-      Uint8List serverSpkiSha256Digest = Uint8List.fromList(_spkiSha256Digest(cert).bytes);
+      Uint8List serverSpkiSha256Digest =
+          Uint8List.fromList(_spkiSha256Digest(cert).bytes);
       if (!isFirst) info += ", ";
       isFirst = false;
       info += base64.encode(serverSpkiSha256Digest);
@@ -1553,7 +1639,8 @@ class ApproovService {
   ) async {
     // determine the list of X.509 ASN.1 DER host certificates that match any Approov pins for the host - if this
     // returns an empty list then nothing will be trusted
-    List<Uint8List> pinCerts = await ApproovService._hostPinCertificates(host, approovPins, hostCerts);
+    List<Uint8List> pinCerts =
+        await ApproovService._hostPinCertificates(host, approovPins, hostCerts);
 
     // add the certificates to create the security context of trusted certs
     SecurityContext securityContext = SecurityContext(withTrustedRoots: false);
@@ -1570,7 +1657,15 @@ class ApproovService {
 }
 
 /// Possible write operations that may need to be placed in the pending list
-enum _WriteOpType { unknown, add, addError, write, writeAll, writeCharCode, writeln }
+enum _WriteOpType {
+  unknown,
+  add,
+  addError,
+  write,
+  writeAll,
+  writeCharCode,
+  writeln
+}
 
 /// Holds a pending write operation that must be delayed because issuing it immediately
 /// would cause the headers to become immutable, but it is not possible to update the headers
@@ -1741,7 +1836,8 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   }
 
   @override
-  set bufferOutput(bool _bufferOutput) => _delegateRequest.bufferOutput = _bufferOutput;
+  set bufferOutput(bool _bufferOutput) =>
+      _delegateRequest.bufferOutput = _bufferOutput;
   @override
   bool get bufferOutput => _delegateRequest.bufferOutput;
 
@@ -1749,7 +1845,8 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   HttpConnectionInfo? get connectionInfo => _delegateRequest.connectionInfo;
 
   @override
-  set contentLength(int _contentLength) => _delegateRequest.contentLength = _contentLength;
+  set contentLength(int _contentLength) =>
+      _delegateRequest.contentLength = _contentLength;
   @override
   int get contentLength => _delegateRequest.contentLength;
 
@@ -1765,7 +1862,8 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   Encoding get encoding => _delegateRequest.encoding;
 
   @override
-  set followRedirects(bool _followRedirects) => _delegateRequest.followRedirects = _followRedirects;
+  set followRedirects(bool _followRedirects) =>
+      _delegateRequest.followRedirects = _followRedirects;
   @override
   bool get followRedirects => _delegateRequest.followRedirects;
 
@@ -1773,7 +1871,8 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   HttpHeaders get headers => _delegateRequest.headers;
 
   @override
-  set maxRedirects(int _maxRedirects) => _delegateRequest.maxRedirects = _maxRedirects;
+  set maxRedirects(int _maxRedirects) =>
+      _delegateRequest.maxRedirects = _maxRedirects;
   @override
   int get maxRedirects => _delegateRequest.maxRedirects;
 
@@ -1781,7 +1880,8 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   String get method => _delegateRequest.method;
 
   @override
-  set persistentConnection(bool _persistentConnection) => _delegateRequest.persistentConnection = _persistentConnection;
+  set persistentConnection(bool _persistentConnection) =>
+      _delegateRequest.persistentConnection = _persistentConnection;
   @override
   bool get persistentConnection => _delegateRequest.persistentConnection;
 
@@ -1905,20 +2005,24 @@ class ApproovHttpClient implements HttpClient {
   // a special client that is used when we want to force a no connection, such as when there is a forced pin
   // update required or if we have failed to fetch the certificates for a host. Note we don't update its
   // attribute state since it is not relevant given it will never actually connect.
-  HttpClient _noConnectionClient = HttpClient(context: SecurityContext(withTrustedRoots: false));
+  HttpClient _noConnectionClient =
+      HttpClient(context: SecurityContext(withTrustedRoots: false));
 
   // indicates whether the ApproovHttpClient has been closed by calling close()
   bool _isClosed = false;
 
   // state required to implement getters and setters required by the HttpClient interface
   Future<bool> Function(Uri url, String scheme, String? realm)? _authenticate;
-  Future<ConnectionTask<Socket>> Function(Uri url, String? proxyHost, int? proxyPort)? _connectionFactory;
+  Future<ConnectionTask<Socket>> Function(
+      Uri url, String? proxyHost, int? proxyPort)? _connectionFactory;
   void Function(String line)? _keyLog;
   final List _credentials = [];
   String Function(Uri url)? _findProxy;
-  Future<bool> Function(String host, int port, String scheme, String? realm)? _authenticateProxy;
+  Future<bool> Function(String host, int port, String scheme, String? realm)?
+      _authenticateProxy;
   final List _proxyCredentials = [];
-  bool Function(X509Certificate cert, String host, int port)? _badCertificateCallback;
+  bool Function(X509Certificate cert, String host, int port)?
+      _badCertificateCallback;
   Duration _idleTimeout = const Duration(seconds: 15);
   Duration? _connectionTimeout;
   int? _maxConnectionsPerHost;
@@ -1943,7 +2047,8 @@ class ApproovHttpClient implements HttpClient {
     _delegatePinnedHttpClients.remove(host);
 
     // call any user defined function for its side effects only (as we are going to reject anyway)
-    Function(X509Certificate cert, String host, int port)? badCertificateCallback = _badCertificateCallback;
+    Function(X509Certificate cert, String host, int port)?
+        badCertificateCallback = _badCertificateCallback;
     if (badCertificateCallback != null) {
       badCertificateCallback(cert, host, port);
     }
@@ -1989,7 +2094,8 @@ class ApproovHttpClient implements HttpClient {
 
       // wait on the Approov token fetching to complete - but note we do not fail if a token fetch was not possible
       _TokenFetchResult fetchResult = await futureApproovToken;
-      tokenFinishTime = stopWatch.elapsedMilliseconds - tokenStartTime - certStartTime;
+      tokenFinishTime =
+          stopWatch.elapsedMilliseconds - tokenStartTime - certStartTime;
       Log.d(
           "$TAG: $isolate pinning setup fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}, certStart ${certStartTime}ms, tokenStart ${tokenStartTime}ms, tokenFinish ${tokenFinishTime}ms");
 
@@ -1997,7 +2103,8 @@ class ApproovHttpClient implements HttpClient {
       // across all isolates, which will cause pinned delegate clients to be cleared since the pins may have changed
       if (fetchResult.isConfigChanged) {
         await ApproovService._fetchConfig();
-        Log.d("$TAG: $isolate creating pinning delegate client, dynamic configuration update");
+        Log.d(
+            "$TAG: $isolate creating pinning delegate client, dynamic configuration update");
       }
 
       // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
@@ -2010,7 +2117,8 @@ class ApproovHttpClient implements HttpClient {
           (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
         // perform another attempted token fetch
         fetchResult = await ApproovService._fetchApproovToken(url.host);
-        Log.d("$TAG: $isolate pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+        Log.d(
+            "$TAG: $isolate pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
         // if we are forced to update pins then this likely means that no pins were ever fetched and in this
         // case we must force a no connection so that another fetch can be tried again. This is because
@@ -2018,7 +2126,8 @@ class ApproovHttpClient implements HttpClient {
         // to retry and get the pins without restarting the app. We just return the no connection client
         // in this case.
         if (fetchResult.isForceApplyPins) {
-          Log.d("$TAG: $isolate force apply pins asserted so forcing no connection");
+          Log.d(
+              "$TAG: $isolate force apply pins asserted so forcing no connection");
           return null;
         }
       }
@@ -2047,17 +2156,24 @@ class ApproovHttpClient implements HttpClient {
     if (pins.isEmpty) {
       // if there are no pins then we can just use a standard http client
       newHttpClient = HttpClient();
-      Log.d("$TAG: $isolate client ready for ${url.host}, without pinning restriction");
+      Log.d(
+          "$TAG: $isolate client ready for ${url.host}, without pinning restriction");
     } else {
       // create HttpClient with pinning enabled by determining the particular certificates we should trust
       Set<String> approovPins = HashSet();
       for (final pin in pins) {
         approovPins.add(pin);
       }
-      SecurityContext securityContext = await ApproovService._pinnedSecurityContext(url.host, approovPins, hostCerts);
+      SecurityContext securityContext =
+          await ApproovService._pinnedSecurityContext(
+              url.host, approovPins, hostCerts);
       newHttpClient = HttpClient(context: securityContext);
-      final pinningFinishTime = stopWatch.elapsedMilliseconds - tokenFinishTime - tokenStartTime - certStartTime;
-      Log.d("$TAG: $isolate client ready for ${url.host}, pinningFinish ${pinningFinishTime}ms");
+      final pinningFinishTime = stopWatch.elapsedMilliseconds -
+          tokenFinishTime -
+          tokenStartTime -
+          certStartTime;
+      Log.d(
+          "$TAG: $isolate client ready for ${url.host}, pinningFinish ${pinningFinishTime}ms");
     }
 
     // copy state to the new delegate HttpClient
@@ -2079,7 +2195,8 @@ class ApproovHttpClient implements HttpClient {
     newHttpClient.findProxy = _findProxy;
     newHttpClient.authenticateProxy = _authenticateProxy;
     for (var proxyCredential in _proxyCredentials) {
-      newHttpClient.addProxyCredentials(proxyCredential[0], proxyCredential[1], proxyCredential[2], proxyCredential[3]);
+      newHttpClient.addProxyCredentials(proxyCredential[0], proxyCredential[1],
+          proxyCredential[2], proxyCredential[3]);
     }
     newHttpClient.badCertificateCallback = _pinningFailureCallback;
 
@@ -2123,7 +2240,8 @@ class ApproovHttpClient implements HttpClient {
       _delegatePinnedHttpClients.clear();
       _cachedConfigEpoch = ApproovService._configEpoch;
       String isolate = ApproovService._isRootIsolate ? "root" : "background";
-      Log.d("$TAG: $isolate configuration epoch changed, clearing delegate cache");
+      Log.d(
+          "$TAG: $isolate configuration epoch changed, clearing delegate cache");
     }
 
     // lookup the cache and see if a new delegate is required - note that we
@@ -2152,7 +2270,8 @@ class ApproovHttpClient implements HttpClient {
 
       // create a new delegate client and add its future to the cache
       String isolate = ApproovService._isRootIsolate ? "root" : "background";
-      Log.d("$TAG: $isolate creating pinned delegate creation for $url.host:$url.port");
+      Log.d(
+          "$TAG: $isolate creating pinned delegate creation for $url.host:$url.port");
       futureDelegateClient = _createPinnedHttpClient(url);
       _createdPinnedHttpClients.add(futureDelegateClient);
       _delegatePinnedHttpClients[url.host] = futureDelegateClient;
@@ -2163,7 +2282,8 @@ class ApproovHttpClient implements HttpClient {
   }
 
   @override
-  Future<HttpClientRequest> open(String method, String host, int port, String path) async {
+  Future<HttpClientRequest> open(
+      String method, String host, int port, String path) async {
     // obtain the delegate HttpClient to be used (with null meaning no connection should
     // be forced) and then wrap the provided HttpClientRequest
     Uri url = Uri(scheme: "https", host: host, port: port, path: path);
@@ -2186,37 +2306,43 @@ class ApproovHttpClient implements HttpClient {
   }
 
   @override
-  Future<HttpClientRequest> get(String host, int port, String path) => open("get", host, port, path);
+  Future<HttpClientRequest> get(String host, int port, String path) =>
+      open("get", host, port, path);
 
   @override
   Future<HttpClientRequest> getUrl(Uri url) => openUrl("get", url);
 
   @override
-  Future<HttpClientRequest> post(String host, int port, String path) => open("post", host, port, path);
+  Future<HttpClientRequest> post(String host, int port, String path) =>
+      open("post", host, port, path);
 
   @override
   Future<HttpClientRequest> postUrl(Uri url) => openUrl("post", url);
 
   @override
-  Future<HttpClientRequest> put(String host, int port, String path) => open("put", host, port, path);
+  Future<HttpClientRequest> put(String host, int port, String path) =>
+      open("put", host, port, path);
 
   @override
   Future<HttpClientRequest> putUrl(Uri url) => openUrl("put", url);
 
   @override
-  Future<HttpClientRequest> delete(String host, int port, String path) => open("delete", host, port, path);
+  Future<HttpClientRequest> delete(String host, int port, String path) =>
+      open("delete", host, port, path);
 
   @override
   Future<HttpClientRequest> deleteUrl(Uri url) => openUrl("delete", url);
 
   @override
-  Future<HttpClientRequest> head(String host, int port, String path) => open("head", host, port, path);
+  Future<HttpClientRequest> head(String host, int port, String path) =>
+      open("head", host, port, path);
 
   @override
   Future<HttpClientRequest> headUrl(Uri url) => openUrl("head", url);
 
   @override
-  Future<HttpClientRequest> patch(String host, int port, String path) => open("patch", host, port, path);
+  Future<HttpClientRequest> patch(String host, int port, String path) =>
+      open("patch", host, port, path);
 
   @override
   Future<HttpClientRequest> patchUrl(Uri url) => openUrl("patch", url);
@@ -2273,7 +2399,9 @@ class ApproovHttpClient implements HttpClient {
   }
 
   @override
-  set connectionFactory(Future<ConnectionTask<Socket>> f(Uri url, String? proxyHost, int? proxyPort)?) {
+  set connectionFactory(
+      Future<ConnectionTask<Socket>> f(
+          Uri url, String? proxyHost, int? proxyPort)?) {
     _connectionFactory = f;
     _delegatePinnedHttpClients.clear();
   }
@@ -2285,7 +2413,8 @@ class ApproovHttpClient implements HttpClient {
   }
 
   @override
-  void addCredentials(Uri url, String realm, HttpClientCredentials credentials) {
+  void addCredentials(
+      Uri url, String realm, HttpClientCredentials credentials) {
     _credentials.add({url, realm, credentials});
     _delegatePinnedHttpClients.clear();
   }
@@ -2297,19 +2426,22 @@ class ApproovHttpClient implements HttpClient {
   }
 
   @override
-  set authenticateProxy(Future<bool> f(String host, int port, String scheme, String? realm)?) {
+  set authenticateProxy(
+      Future<bool> f(String host, int port, String scheme, String? realm)?) {
     _authenticateProxy = f;
     _delegatePinnedHttpClients.clear();
   }
 
   @override
-  void addProxyCredentials(String host, int port, String realm, HttpClientCredentials credentials) {
+  void addProxyCredentials(
+      String host, int port, String realm, HttpClientCredentials credentials) {
     _proxyCredentials.add({host, port, realm, credentials});
     _delegatePinnedHttpClients.clear();
   }
 
   @override
-  set badCertificateCallback(bool callback(X509Certificate cert, String host, int port)?) {
+  set badCertificateCallback(
+      bool callback(X509Certificate cert, String host, int port)?) {
     _badCertificateCallback = callback;
   }
 
@@ -2353,7 +2485,8 @@ class ApproovClient extends http.BaseClient {
   //     initialization. If no config is provided the comment string is
   //     ignored.
   ApproovClient([String? initialConfig, String? initialComment])
-      : _delegateClient = httpio.IOClient(ApproovHttpClient(initialConfig, initialComment)),
+      : _delegateClient =
+            httpio.IOClient(ApproovHttpClient(initialConfig, initialComment)),
         super() {}
 
   @override

@@ -22,7 +22,6 @@ void main() {
     ApproovService.disableMessageSigning();
   });
 
-
   test('signature base matches HTTP message signatures format', () {
     final bodyBytes = Uint8List.fromList(utf8.encode('{"hello":"world"}'));
     final headers = <String, List<String>>{
@@ -37,7 +36,8 @@ void main() {
       bodyBytes: bodyBytes,
       tokenHeaderName: 'Approov-Token',
       onSetHeader: (name, value) => headers[name.toLowerCase()] = [value],
-      onAddHeader: (name, value) => headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
+      onAddHeader: (name, value) =>
+          headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
     );
 
     final factory = SignatureParametersFactory()
@@ -46,13 +46,16 @@ void main() {
           ..addComponentIdentifier('@target-uri'))
         .setUseAccountMessageSigning()
         .setAddApproovTokenHeader(true)
-        .addOptionalHeaders(const ['content-type'])
-        .setBodyDigestConfig(SignatureDigest.sha256.identifier, required: false);
+        .addOptionalHeaders(const ['content-type']).setBodyDigestConfig(
+            SignatureDigest.sha256.identifier,
+            required: false);
 
     final params = factory.build(context);
-    final signatureBase = SignatureBaseBuilder(params, context).createSignatureBase();
+    final signatureBase =
+        SignatureBaseBuilder(params, context).createSignatureBase();
 
-    final digestHeader = 'sha-256=:${base64Encode(sha256.convert(bodyBytes).bytes)}:';
+    final digestHeader =
+        'sha-256=:${base64Encode(sha256.convert(bodyBytes).bytes)}:';
     expect(headers['content-digest'], [digestHeader]);
     final expectedString = [
       '"@method": POST',
@@ -78,7 +81,8 @@ void main() {
       bodyBytes: Uint8List(0),
       tokenHeaderName: 'Approov-Token',
       onSetHeader: (name, value) => headers[name.toLowerCase()] = [value],
-      onAddHeader: (name, value) => headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
+      onAddHeader: (name, value) =>
+          headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
     );
 
     final factory = SignatureParametersFactory.generateDefaultFactory();
@@ -88,7 +92,8 @@ void main() {
         .map((item) => item.bareItem.value as String)
         .toList();
     expect(componentNames.contains('content-length'), isFalse);
-    expect(params.serializeComponentValue().contains('"content-length"'), isFalse);
+    expect(
+        params.serializeComponentValue().contains('"content-length"'), isFalse);
   });
 
   test('signature parameters serialize using structured fields', () {
@@ -100,7 +105,8 @@ void main() {
       ..setTag('tagged');
 
     // Duplicate component with identical parameters should be ignored.
-    params.addComponentIdentifier('content-type', parameters: {'charset': 'utf-8'});
+    params.addComponentIdentifier('content-type',
+        parameters: {'charset': 'utf-8'});
     expect(params.componentIdentifiers.length, 2);
 
     final serialized = params.serializeComponentValue();
@@ -138,10 +144,12 @@ void main() {
 
   test('enableMessageSigning configures default and host factories', () {
     final defaultFactory = SignatureParametersFactory()
-        .setBaseParameters(SignatureParameters()..addComponentIdentifier('@method'))
+        .setBaseParameters(
+            SignatureParameters()..addComponentIdentifier('@method'))
         .setUseAccountMessageSigning();
     final hostFactory = SignatureParametersFactory()
-        .setBaseParameters(SignatureParameters()..addComponentIdentifier('@path'))
+        .setBaseParameters(
+            SignatureParameters()..addComponentIdentifier('@path'))
         .setUseInstallMessageSigning();
 
     ApproovService.enableMessageSigning(
@@ -152,23 +160,27 @@ void main() {
     final messageSigning = ApproovService.messageSigningForTesting();
     expect(messageSigning, isNotNull);
 
-    final defaultContext = _buildSigningContext(Uri.parse('https://example.org/resource'));
-    final defaultParams = messageSigning!.buildParametersFor(defaultContext.uri, defaultContext);
+    final defaultContext =
+        _buildSigningContext(Uri.parse('https://example.org/resource'));
+    final defaultParams =
+        messageSigning!.buildParametersFor(defaultContext.uri, defaultContext);
     expect(defaultParams, isNotNull);
     final defaultComponents = defaultParams!.componentIdentifiers
         .map((item) => item.bareItem.value as String)
         .toList();
     expect(defaultComponents, contains('@method'));
-    expect(defaultParams.algorithm, SignatureAlgorithm.hmacSha256);
+    expect(defaultParams.algorithmIdentifier, 'hmac-sha256');
 
-    final hostContext = _buildSigningContext(Uri.parse('https://api.example.com/resource'));
-    final hostParams = messageSigning.buildParametersFor(hostContext.uri, hostContext);
+    final hostContext =
+        _buildSigningContext(Uri.parse('https://api.example.com/resource'));
+    final hostParams =
+        messageSigning.buildParametersFor(hostContext.uri, hostContext);
     expect(hostParams, isNotNull);
     final hostComponents = hostParams!.componentIdentifiers
         .map((item) => item.bareItem.value as String)
         .toList();
     expect(hostComponents, contains('@path'));
-    expect(hostParams.algorithm, SignatureAlgorithm.ecdsaP256Sha256);
+    expect(hostParams.algorithmIdentifier, 'ecdsa-p256-sha256');
   });
 }
 
@@ -183,6 +195,7 @@ ApproovSigningContext _buildSigningContext(Uri uri) {
     bodyBytes: null,
     tokenHeaderName: null,
     onSetHeader: (name, value) => headers[name.toLowerCase()] = [value],
-    onAddHeader: (name, value) => headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
+    onAddHeader: (name, value) =>
+        headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
   );
 }

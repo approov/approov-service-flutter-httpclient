@@ -6,14 +6,9 @@ import 'package:crypto/crypto.dart';
 
 import 'structured_fields.dart';
 
-/// Signature algorithms supported by the Approov message signing flow.
-enum SignatureAlgorithm {
-  hmacSha256,
-  ecdsaP256Sha256,
-}
-
 /// Builds a component identifier item with optional Structured Fields parameters.
-SfItem _buildComponentIdentifier(String value, Map<String, dynamic>? parameters) {
+SfItem _buildComponentIdentifier(
+    String value, Map<String, dynamic>? parameters) {
   return SfItem.string(value, parameters);
 }
 
@@ -37,21 +32,32 @@ class SignatureParameters {
   SignatureParameters.copy(SignatureParameters other)
       : _componentIdentifiers = List<SfItem>.from(other._componentIdentifiers),
         _parameters = LinkedHashMap<String, SfBareItem>.from(other._parameters),
-        debugMode = other.debugMode,
-        algorithm = other.algorithm;
+        debugMode = other.debugMode;
 
   final List<SfItem> _componentIdentifiers;
   final LinkedHashMap<String, SfBareItem> _parameters;
 
   bool debugMode = false;
-  SignatureAlgorithm algorithm = SignatureAlgorithm.hmacSha256;
+
+  /// Returns the configured signing algorithm identifier (`alg` parameter), if any.
+  String? get algorithmIdentifier {
+    final algItem = _parameters['alg'];
+    if (algItem == null) return null;
+    if (algItem.type != SfBareItemType.string) {
+      throw StateError('alg parameter must be an sf-string');
+    }
+    return algItem.value as String;
+  }
 
   /// The ordered list of Structured Field components that will be signed.
-  List<SfItem> get componentIdentifiers => List.unmodifiable(_componentIdentifiers);
+  List<SfItem> get componentIdentifiers =>
+      List.unmodifiable(_componentIdentifiers);
 
   /// Adds a component identifier to the signature, avoiding duplicates.
-  void addComponentIdentifier(String identifier, {Map<String, dynamic>? parameters}) {
-    final normalized = identifier.startsWith('@') ? identifier : identifier.toLowerCase();
+  void addComponentIdentifier(String identifier,
+      {Map<String, dynamic>? parameters}) {
+    final normalized =
+        identifier.startsWith('@') ? identifier : identifier.toLowerCase();
     final candidateParameters = SfParameters(parameters);
     // Skip adding duplicate component identifiers that only differ in letter case or parameter identity.
     if (_componentIdentifiers.any(
@@ -60,11 +66,13 @@ class SignatureParameters {
     )) {
       return;
     }
-    _componentIdentifiers.add(_buildComponentIdentifier(normalized, parameters));
+    _componentIdentifiers
+        .add(_buildComponentIdentifier(normalized, parameters));
   }
 
   /// Returns whether the candidate `SfItem` matches an existing component.
-  bool _componentIdentifierMatches(SfItem item, String value, SfParameters candidate) {
+  bool _componentIdentifierMatches(
+      SfItem item, String value, SfParameters candidate) {
     if (_componentIdentifierValue(item) != value) return false;
     return _parametersMatch(item.parameters, candidate);
   }
@@ -113,19 +121,9 @@ class SignatureParameters {
     _parameters['tag'] = SfBareItem.string(tag);
   }
 
-  /// Derives the Approov signature label for the configured algorithm.
-  String signatureLabel() {
-    switch (algorithm) {
-      case SignatureAlgorithm.ecdsaP256Sha256:
-        return 'install';
-      case SignatureAlgorithm.hmacSha256:
-      default:
-        return 'account';
-    }
-  }
-
   /// Returns the Structured Field identifier used for the `Signature-Params` entry.
-  SfItem signatureParamsIdentifier() => _buildComponentIdentifier('@signature-params', null);
+  SfItem signatureParamsIdentifier() =>
+      _buildComponentIdentifier('@signature-params', null);
 
   /// Serializes the signature parameters into the canonical inner list representation.
   String serializeComponentValue() {
@@ -156,7 +154,8 @@ class SignatureParametersFactory {
   }
 
   /// Configures body digest requirements and the hashing algorithm.
-  SignatureParametersFactory setBodyDigestConfig(String? algorithm, {required bool required}) {
+  SignatureParametersFactory setBodyDigestConfig(String? algorithm,
+      {required bool required}) {
     if (algorithm != null &&
         algorithm != SignatureDigest.sha256.identifier &&
         algorithm != SignatureDigest.sha512.identifier) {
@@ -216,15 +215,17 @@ class SignatureParametersFactory {
 
   /// Builds a concrete parameter set for the supplied signing context.
   SignatureParameters build(ApproovSigningContext context) {
-    final params = _baseParameters != null ? SignatureParameters.copy(_baseParameters!) : SignatureParameters();
+    final params = _baseParameters != null
+        ? SignatureParameters.copy(_baseParameters!)
+        : SignatureParameters();
     params.debugMode = _debugMode;
-    // Message signing algorithm is selected by swapping between account (HMAC) and install (ECDSA) modes.
-    params.algorithm = _useAccountMessageSigning ? SignatureAlgorithm.hmacSha256 : SignatureAlgorithm.ecdsaP256Sha256;
-    params.setAlg(_useAccountMessageSigning ? 'hmac-sha256' : 'ecdsa-p256-sha256');
+    params.setAlg(
+        _useAccountMessageSigning ? 'hmac-sha256' : 'ecdsa-p256-sha256');
 
     final now = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
     if (_addCreated) params.setCreated(now);
-    if (_expiresLifetimeSeconds > 0) params.setExpires(now + _expiresLifetimeSeconds);
+    if (_expiresLifetimeSeconds > 0)
+      params.setExpires(now + _expiresLifetimeSeconds);
 
     if (_addApproovTokenHeader) {
       final tokenHeader = context.tokenHeaderName;
@@ -236,11 +237,13 @@ class SignatureParametersFactory {
     for (final header in _optionalHeaders) {
       if (!context.hasField(header)) continue;
       if (header == 'content-length') {
-        final hasBodyBytes = context.bodyBytes != null && context.bodyBytes!.isNotEmpty;
-        final contentLengthValue = context.getComponentValue(SfItem.string('content-length'));
+        final hasBodyBytes =
+            context.bodyBytes != null && context.bodyBytes!.isNotEmpty;
+        final contentLengthValue =
+            context.getComponentValue(SfItem.string('content-length'));
         // Avoid signing Content-Length: 0 to mirror how Dart's HttpClient elides that header on the wire.
-        final shouldIncludeContentLength =
-            hasBodyBytes || (contentLengthValue != null && contentLengthValue.trim() != '0');
+        final shouldIncludeContentLength = hasBodyBytes ||
+            (contentLengthValue != null && contentLengthValue.trim() != '0');
         if (!shouldIncludeContentLength) {
           // Dart's HttpClient drops an automatic "Content-Length: 0" header for GETs,
           // so skip signing it to keep the canonical representation aligned with the
@@ -252,8 +255,9 @@ class SignatureParametersFactory {
     }
 
     if (_bodyDigestAlgorithm != null) {
-      final digestHeader =
-          context.ensureContentDigest(SignatureDigest.fromIdentifier(_bodyDigestAlgorithm!), required: _bodyDigestRequired);
+      final digestHeader = context.ensureContentDigest(
+          SignatureDigest.fromIdentifier(_bodyDigestAlgorithm!),
+          required: _bodyDigestRequired);
       if (digestHeader != null) {
         params.addComponentIdentifier('content-digest');
       }
@@ -263,7 +267,8 @@ class SignatureParametersFactory {
   }
 
   /// Generates the default Approov configuration, optionally layering on an override base.
-  static SignatureParametersFactory generateDefaultFactory({SignatureParameters? overrideBase}) {
+  static SignatureParametersFactory generateDefaultFactory(
+      {SignatureParameters? overrideBase}) {
     final base = overrideBase ??
         (SignatureParameters()
           ..addComponentIdentifier('@method')
@@ -274,8 +279,11 @@ class SignatureParametersFactory {
         .setAddCreated(true)
         .setExpiresLifetime(15)
         .setAddApproovTokenHeader(true)
-        .addOptionalHeaders(const ['authorization', 'content-length', 'content-type'])
-        .setBodyDigestConfig(SignatureDigest.sha256.identifier, required: false);
+        .addOptionalHeaders(const [
+      'authorization',
+      'content-length',
+      'content-type'
+    ]).setBodyDigestConfig(SignatureDigest.sha256.identifier, required: false);
   }
 }
 
@@ -294,7 +302,8 @@ class SignatureBaseBuilder {
     for (final component in params.componentIdentifiers) {
       final value = context.getComponentValue(component);
       if (value == null) {
-        throw StateError('Missing component value for ${_componentIdentifierValue(component)}');
+        throw StateError(
+            'Missing component value for ${_componentIdentifierValue(component)}');
       }
       buffer.write(component.serialize());
       buffer.write(': ');
@@ -336,7 +345,8 @@ class ApproovSigningContext {
     this.onSetHeader,
     this.onAddHeader,
   }) : _headers = LinkedHashMap<String, List<String>>.fromEntries(
-            headers.entries.map((entry) => MapEntry(entry.key.toLowerCase(), List<String>.from(entry.value))));
+            headers.entries.map((entry) => MapEntry(
+                entry.key.toLowerCase(), List<String>.from(entry.value))));
 
   final String requestMethod;
   final Uri uri;
@@ -387,7 +397,8 @@ class ApproovSigningContext {
             throw StateError('Missing name parameter for @query-param');
           }
           if (paramValue.type != SfBareItemType.string) {
-            throw StateError('name parameter for @query-param must be an sf-string');
+            throw StateError(
+                'name parameter for @query-param must be an sf-string');
           }
           return _queryParameterValue(paramValue.value as String);
         default:
@@ -401,7 +412,8 @@ class ApproovSigningContext {
   }
 
   /// Ensures the `Content-Digest` header exists by hashing the request body.
-  String? ensureContentDigest(SignatureDigest digest, {required bool required}) {
+  String? ensureContentDigest(SignatureDigest digest,
+      {required bool required}) {
     if (bodyBytes == null) {
       if (required) {
         throw StateError('Body digest required but body is not available');
@@ -420,7 +432,9 @@ class ApproovSigningContext {
 
   /// Returns the authority component normalized per HTTP request rules.
   String _authority() {
-    if ((uri.scheme == 'http' && uri.port == 80) || (uri.scheme == 'https' && uri.port == 443) || (uri.port == 0)) {
+    if ((uri.scheme == 'http' && uri.port == 80) ||
+        (uri.scheme == 'https' && uri.port == 443) ||
+        (uri.port == 0)) {
       return uri.host;
     }
     return '${uri.host}:${uri.port}';
@@ -467,7 +481,8 @@ class ApproovMessageSigning {
   }
 
   /// Registers a signature parameters factory for a specific host.
-  ApproovMessageSigning putHostFactory(String host, SignatureParametersFactory factory) {
+  ApproovMessageSigning putHostFactory(
+      String host, SignatureParametersFactory factory) {
     _hostFactories[host] = factory;
     return this;
   }
@@ -478,7 +493,8 @@ class ApproovMessageSigning {
   }
 
   /// Builds signature parameters for the supplied URI if a factory is configured.
-  SignatureParameters? buildParametersFor(Uri uri, ApproovSigningContext context) {
+  SignatureParameters? buildParametersFor(
+      Uri uri, ApproovSigningContext context) {
     final factory = _factoryForHost(uri.host);
     if (factory == null) return null;
     return factory.build(context);
