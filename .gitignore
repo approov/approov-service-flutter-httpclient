@@ -8,3 +8,5 @@ android/local.properties
 android/build/
 AGENTS.md
 build/
+# Exclude .json test files used for testing only. 
+test/third_party/structured_field_tests/ 

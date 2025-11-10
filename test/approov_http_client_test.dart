@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:approov_service_flutter_httpclient/approov_service_flutter_httpclient.dart';
 import 'package:crypto/crypto.dart';

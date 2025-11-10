@@ -139,12 +139,11 @@ class SfDecimal {
 
   /// Creates a Structured Field decimal from a numeric value.
   factory SfDecimal.fromNum(num value) {
-    final scaled = value * 1000;
-    final rounded = scaled.round();
-    if ((scaled - rounded).abs() > 1e-9) {
-      // Enforce the three-decimal fixed scale defined by Structured Fields decimals.
-      throw SfFormatException('Decimals must have at most three fractional digits: $value');
+    if (value.isInfinite || value.isNaN) {
+      throw SfFormatException('Decimals must be finite numbers: $value');
     }
+    final scaled = value * 1000;
+    final rounded = _roundTiesToEven(scaled);
     return SfDecimal._checked(rounded);
   }
 
@@ -168,6 +167,19 @@ class SfDecimal {
       throw SfFormatException('Decimal magnitude exceeds allowed range');
     }
     return SfDecimal._(scaled);
+  }
+
+  /// Rounds the scaled value using ties-to-even (bankers rounding).
+  static int _roundTiesToEven(num value) {
+    if (value is int) return value;
+    final doubleValue = value.toDouble();
+    final lower = doubleValue.floor();
+    final fraction = doubleValue - lower;
+    const epsilon = 1e-9;
+    if ((fraction - 0.5).abs() <= epsilon) {
+      return lower.isEven ? lower : lower + 1;
+    }
+    return fraction < 0.5 ? lower : lower + 1;
   }
 
   final int _scaledValue;

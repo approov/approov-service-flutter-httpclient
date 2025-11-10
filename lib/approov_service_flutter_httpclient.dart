@@ -34,7 +34,6 @@ import 'package:http/io_client.dart' as httpio;
 import 'package:logger/logger.dart';
 import 'package:pem/pem.dart';
 import 'package:mutex/mutex.dart';
-import 'package:meta/meta.dart';
 import 'src/message_signing.dart';
 export 'src/message_signing.dart'
     show
