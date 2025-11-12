@@ -471,7 +471,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     } else if ([@"setDevKey" isEqualToString:call.method]) {
         [Approov setDevKey:call.arguments[@"devKey"]];
         result(nil);
-  } else if ([@"getMessageSignature" isEqualToString:call.method]) {
+    } else if ([@"getMessageSignature" isEqualToString:call.method]) {
     @try {
       result([Approov getMessageSignature:call.arguments[@"message"]]);
     }
@@ -480,7 +480,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
                                  message:exception.reason
                                  details:nil]);
     }
-  } else if ([@"getAccountMessageSignature" isEqualToString:call.method]) {
+    } else if ([@"getAccountMessageSignature" isEqualToString:call.method]) {
     @try {
       if ([Approov respondsToSelector:@selector(getAccountMessageSignature:)]) {
         result([Approov getAccountMessageSignature:call.arguments[@"message"]]);
@@ -493,7 +493,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
                                  message:exception.reason
                                  details:nil]);
     }
-  } else if ([@"getInstallMessageSignature" isEqualToString:call.method]) {
+    } else if ([@"getInstallMessageSignature" isEqualToString:call.method]) {
     @try {
       result([Approov getInstallMessageSignature:call.arguments[@"message"]]);
     }
@@ -527,7 +527,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             }
             result(nil);
         }
-     } else if ([@"waitForHostCertificates" isEqualToString:call.method]) {
+    } else if ([@"waitForHostCertificates" isEqualToString:call.method]) {
         NSString *transactionID = call.arguments[@"transactionID"];
         CertificatesFetcher *certFetcher = nil;
         @synchronized(_activeCertFetches) {
@@ -539,7 +539,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
                 details:@"No active certificate fetch for transaction ID"]);
         } else {
             @synchronized(_activeCertFetches) {
-               [_activeCertFetches removeObjectForKey:transactionID];
+                [_activeCertFetches removeObjectForKey:transactionID];
             }
             NSDictionary *certResults = [certFetcher getResult];
             result(certResults);
@@ -589,19 +589,19 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             }
         }
         result(nil);
-     } else if ([@"waitForFetchValue" isEqualToString:call.method]) {
+    } else if ([@"waitForFetchValue" isEqualToString:call.method]) {
         NSString *transactionID = call.arguments[@"transactionID"];
         InternalCallBackHandler *callBackHandler = nil;
         @synchronized(_activeCallBackHandlers) {
             callBackHandler = [_activeCallBackHandlers objectForKey:transactionID];
         }
         if (callBackHandler == nil) {
-           result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
-                message:@"ApproovService has no active fetch"
-                details:@"No active fetch for transaction ID"]);
+        result([FlutterError errorWithCode:[NSString stringWithFormat:@"%d", -1]
+            message:@"ApproovService has no active fetch"
+            details:@"No active fetch for transaction ID"]);
         } else {
             @synchronized(_activeCallBackHandlers) {
-               [_activeCallBackHandlers removeObjectForKey:transactionID];
+                [_activeCallBackHandlers removeObjectForKey:transactionID];
             }
             result([callBackHandler getResult]);
         }
