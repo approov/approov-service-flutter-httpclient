@@ -341,6 +341,27 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       } catch(Exception e) {
         result.error("Approov.getMessageSignature", e.getLocalizedMessage(), null);
       }
+    } else if (call.method.equals("getAccountMessageSignature")) {
+      try {
+        String messageSignature = Approov.getAccountMessageSignature((String) call.argument("message"));
+        result.success(messageSignature);
+      } catch (NoSuchMethodError e) {
+        try {
+          String messageSignature = Approov.getMessageSignature((String) call.argument("message"));
+          result.success(messageSignature);
+        } catch(Exception inner) {
+          result.error("Approov.getAccountMessageSignature", inner.getLocalizedMessage(), null);
+        }
+      } catch(Exception e) {
+        result.error("Approov.getAccountMessageSignature", e.getLocalizedMessage(), null);
+      }
+    } else if (call.method.equals("getInstallMessageSignature")) {
+      try {
+        String messageSignature = Approov.getInstallMessageSignature((String) call.argument("message"));
+        result.success(messageSignature);
+      } catch(Exception e) {
+        result.error("Approov.getInstallMessageSignature", e.getLocalizedMessage(), null);
+      }
     } else if (call.method.equals("setUserProperty")) {
       try {
         Approov.setUserProperty(call.argument("property"));
