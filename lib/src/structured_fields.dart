@@ -185,6 +185,8 @@ class SfDecimal {
   final int _scaledValue;
 
   /// Returns the scaled integer representation (value * 1000).
+  /// implements SfDecimal by storing the value as an integer scaled by 1,000. 
+  /// This matches RFC 8941’s requirement that decimals have up to three fractional digits and use banker's rounding.
   int get scaledValue => _scaledValue;
 
   /// Converts the decimal into a floating point number.

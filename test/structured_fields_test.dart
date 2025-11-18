@@ -340,7 +340,7 @@ void main() {
     expect(map['count']!.type, SfBareItemType.integer);
     expect(map['count']!.value, 5);
     expect(map['ratio']!.type, SfBareItemType.decimal);
-    expect((map['ratio']!.value as SfDecimal).scaledValue, 2500);
+    expect((map['ratio']!.value as SfDecimal).scaledValue, 2500); // Why do we useStoring the value as an integer scaled by 1,000This matches RFC 8941’s requirement that decimals have up to three fractional digits and use banker's rounding.
     expect(map['digest']!.type, SfBareItemType.token);
     expect(map['digest']!.value, 'sha-256');
     expect(map['tag']!.type, SfBareItemType.string);
