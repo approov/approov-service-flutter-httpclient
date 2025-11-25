@@ -44,5 +44,5 @@ artifacts.add("default", file('approov-sdk.aar'))
 
 dependencies {
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    implementation 'io.approov:approov-android-sdk:3.5.2'
+    implementation 'io.approov:approov-android-sdk:3.5.3'
 }
