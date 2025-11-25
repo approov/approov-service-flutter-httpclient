@@ -1,3 +1,6 @@
+## [3.5.3] - (25-November-2025)
+- Update Android SDK to version 3.5.3
+
 ## [3.5.2] - (12-November-2025)
 - Update platform SDK to version 3.5.2
 - HTTP Message Signing Support
