@@ -18,8 +18,9 @@
 package com.criticalblue.approov_service_flutter_httpclient;
 
 import android.content.Context;
-import android.os.Looper;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.Log;
 
 import com.criticalblue.approovsdk.Approov;
@@ -236,6 +237,12 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // Handler for the main thread to allow call backs since they must be in the context of that thread
   private Handler handler;
 
+  // Worker thread handler to offload blocking work away from the main thread
+  private Handler workerHandler;
+
+  // Worker thread for processing method calls
+  private HandlerThread workerThread;
+
   // Active set of callback handlers to the Approov SDK - a concurrent map is used since this could be
   // accessed from multiple threads
   private Map<String, InternalCallBackHandler> activeCallBackHandlers;
@@ -255,6 +262,9 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
     bgChannel.setMethodCallHandler(this);
     appContext = flutterPluginBinding.getApplicationContext();
     handler = new Handler(Looper.getMainLooper());
+    workerThread = new HandlerThread("ApproovServiceFlutterWorker");
+    workerThread.start();
+    workerHandler = new Handler(workerThread.getLooper());
     activeCallBackHandlers = new ConcurrentHashMap<String, InternalCallBackHandler>();
     activeCertFetches = new ConcurrentHashMap<String, CertificatesFetcher>();
   }
@@ -263,10 +273,30 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
     bgChannel.setMethodCallHandler(null);
     fgChannel.setMethodCallHandler(null);
+    if (workerHandler != null) {
+      workerHandler.removeCallbacksAndMessages(null);
+      workerHandler = null;
+    }
+    if (workerThread != null) {
+      workerThread.quitSafely();
+      workerThread = null;
+    }
   }
   
   @Override
   public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
+    if (workerHandler != null) {
+      workerHandler.post(() -> handleMethodCallInternal(call, result));
+    } else {
+      handleMethodCallInternal(call, result);
+    }
+  }
+
+  /**
+   * Handles the incoming MethodChannel call off the main thread to avoid UI blocking.
+   */
+  private void handleMethodCallInternal(@NonNull MethodCall call, @NonNull Result result) {
+    Log.d("Approov", "Is main thread: " + Looper.getMainLooper().isCurrentThread());
     if (call.method.equals("initialize")) {
       // get the initialization arguments
       String initialConfig = call.argument("initialConfig");

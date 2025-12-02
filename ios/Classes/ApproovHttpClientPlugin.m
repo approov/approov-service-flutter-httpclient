@@ -415,6 +415,18 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 }
 
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
+    FlutterResult mainThreadResult = ^(id _Nullable value) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            result(value);
+        });
+    };
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [self handleMethodCallInternal:call result:mainThreadResult];
+    });
+}
+
+- (void)handleMethodCallInternal:(FlutterMethodCall *)call result:(FlutterResult)result {
+    NSLog(@"Is main thread: %@", [NSThread isMainThread] ? @"YES" : @"NO");
     if ([@"initialize" isEqualToString:call.method]) {
         // get the initialization arguments
         NSError* error = nil;
