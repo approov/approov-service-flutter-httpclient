@@ -1,3 +1,6 @@
+## [3.5.4] - (05-December-2025)
+- Ensure compatibility with Flutter 3.29+ threading model changes.
+
 ## [3.5.3] - (25-November-2025)
 - Update Android SDK to version 3.5.3
 
