@@ -193,9 +193,9 @@ class ApproovService {
   static const MethodChannel _fgChannel =
       const MethodChannel('approov_service_flutter_httpclient_fg');
 
-  // background channel for communicating with the platform specific layers (used by background isolates) - this is
-  // used in cases where the operation may block for an extended period and it is necessary to use this in that
-  // case to avoid the main isolate thread being blocked by the operation
+  // background channel for communicating with the platform specific layers  - this is
+  // used by background isolates & in cases where the operation may block for an extended period and to ensure potentially blocking calls,
+  // such as initialize or getPins, do not tie up the caller's thread
   static const MethodChannel _bgChannel =
       const MethodChannel('approov_service_flutter_httpclient_bg');
 
@@ -347,7 +347,7 @@ class ApproovService {
             "updateConfig": "auto",
             "comment": comment,
           };
-          await _fgChannel.invokeMethod('initialize', arguments);
+          await _bgChannel.invokeMethod('initialize', arguments);
 
           // set the user property to represent the framework being used
           arguments = <String, dynamic>{
@@ -969,7 +969,7 @@ class ApproovService {
       "pinType": pinType,
     };
     try {
-      Map pins = await _fgChannel.invokeMethod('getPins', arguments);
+      Map pins = await _bgChannel.invokeMethod('getPins', arguments);
       return pins;
     } catch (err) {
       throw ApproovException('$err');
