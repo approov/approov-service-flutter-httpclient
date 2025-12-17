@@ -1,3 +1,7 @@
+## [3.5.5] - (17-December-2025)
+- Updates Approov IOS SDK to 3.5.3
+- Adding the ability to retrieve an ARC (Attestation Response Code)
+
 ## [3.5.4] - (05-December-2025)
 - Ensure compatibility with Flutter 3.29+ threading model changes.
 
