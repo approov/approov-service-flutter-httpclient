@@ -659,7 +659,7 @@ class ApproovService {
     Log.i("$TAG: getLastARC invoked");
     try {
       await _requireInitialized();
-      final pins = await _getPins("public-key-sha256");
+      final pins = await getPins("public-key-sha256");
       String? hostname;
       for (final key in pins.keys) {
         if (key is String && key != "*") {
@@ -1032,7 +1032,7 @@ class ApproovService {
   /// @param pinType is the type of pinning information that is required
   /// @return Map from domain to the list of strings providing the pins
   /// @throws ApproovException if there was a problem
-  static Future<Map> _getPins(String pinType) async {
+  static Future<Map> getPins(String pinType) async {
     await _requireInitialized();
     final Map<String, dynamic> arguments = <String, dynamic>{
       "pinType": pinType,
@@ -2204,7 +2204,7 @@ class ApproovHttpClient implements HttpClient {
     String isolate = ApproovService._isRootIsolate ? "root" : "background";
     if (isExcluded) {
       // get whatever pins we currently have without forcing a fetch of new ones
-      allPins = await ApproovService._getPins("public-key-sha256");
+      allPins = await ApproovService.getPins("public-key-sha256");
     } else {
       // start the process of fetching an Approov token to get the latest configuration
       final futureApproovToken = ApproovService._fetchApproovToken(urlString);
@@ -2227,7 +2227,7 @@ class ApproovHttpClient implements HttpClient {
 
       // get pins from Approov - note that it is still possible at this point if the token fetch failed that no pins
       // have are available, in which case we detect that at the time we are processing a request to add Approov
-      allPins = await ApproovService._getPins("public-key-sha256");
+      allPins = await ApproovService.getPins("public-key-sha256");
 
       // if we didn't manage to fetch a token before then it is possible we have never fetched a token and therefore
       // not have any available pins - we force another token fetch in that case so that we can check
