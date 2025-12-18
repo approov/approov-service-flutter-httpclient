@@ -658,9 +658,7 @@ class ApproovService {
   static Future<String> getLastARC() async {
     Log.i("$TAG: getLastARC invoked");
     try {
-      Log.i("$TAG: getLastARC invoked: before requireInitialized");
       await _requireInitialized();
-      Log.i("$TAG: getLastARC invoked: after requireInitialized");
       final pins = await _getPins("public-key-sha256");
       String? hostname;
       for (final key in pins.keys) {
