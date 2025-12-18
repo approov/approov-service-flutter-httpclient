@@ -649,6 +649,77 @@ class ApproovService {
     }
   }
 
+  /// Gets the last ARC (Attestation Response Code) for the device, if available.
+  ///
+  /// This triggers an Approov token fetch against one configured protected host (selected from the
+  /// dynamic pin set) to ensure an ARC is obtained. The wildcard pin entry (`*`) is ignored.
+  ///
+  /// @return the ARC string or an empty string if none is available
+  static Future<String> getLastARC() async {
+    Log.i("$TAG: getLastARC invoked");
+    try {
+      Log.i("$TAG: getLastARC invoked: before requireInitialized");
+      await _requireInitialized();
+      Log.i("$TAG: getLastARC invoked: after requireInitialized");
+      final pins = await _getPins("public-key-sha256");
+      String? hostname;
+      for (final key in pins.keys) {
+        if (key is String && key != "*") {
+          hostname = key;
+          break;
+        }
+      }
+      if (hostname == null || hostname.isEmpty) {
+        Log.i("$TAG: getLastARC: no host pinning information available");
+        return "";
+      }
+
+      final url = "https://$hostname/";
+      // Avoid relying on platform->Dart callbacks: we only need the final ARC value, so we
+      // always use the background "waitForFetchValue" mechanism which works consistently
+      // across isolates.
+      final fetchResult = await _fetchApproovTokenNoCallback(url);
+      final arc = fetchResult.token.isNotEmpty ? fetchResult.ARC : "";
+      Log.i("$TAG: getLastARC: $arc");
+      return arc;
+    } on ApproovException catch (e) {
+      debugPrint('$TAG: getLastARC Approov error: $e');
+      return ""; 
+    } catch (err) {
+      Log.e("$TAG: getLastARC exception $err");
+      return "";
+    }
+  }
+
+  static Future<_TokenFetchResult> _fetchApproovTokenNoCallback(
+      String url) async {
+    await _requireInitialized();
+    Log.i("$TAG: _fetchApproovTokenNoCallback invoked: after requireInitialized");
+
+    try {
+      final transactionID = ApproovService.transactionID.toString();
+      ApproovService.transactionID++;
+
+      final Map<String, dynamic> arguments = <String, dynamic>{
+        "transactionID": transactionID,
+        "url": url,
+        "performCallBack": "NO",
+      };
+
+      await _fgChannel.invokeMethod('fetchApproovToken', arguments);
+
+      final Map<String, dynamic> waitArgs = <String, dynamic>{
+        "transactionID": transactionID,
+      };
+      final results =
+          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      _configEpoch = results['ConfigEpoch'];
+      return _TokenFetchResult.fromTokenFetchResultMap(results);
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
   /// Sets a hash of the given data value into any future Approov tokens obtained in the 'pay' claim. If the data values
   /// are transmitted to the API backend along with the Approov token then this allows the backend to check that the
   /// data value was indeed known to the app at the time of the token fetch and hasn't been spoofed. If the data is the
@@ -1177,7 +1248,9 @@ class ApproovService {
     // check the status of Approov token fetch
     if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
       // we successfully obtained a token so add it to the header for the request
-      request.headers.set(_approovTokenHeader, _approovTokenPrefix + fetchResult.token, preserveHeaderCase: true);
+      request.headers.set(
+          _approovTokenHeader, _approovTokenPrefix + fetchResult.token,
+          preserveHeaderCase: true);
       final String? traceIDHeader = _approovTraceIDHeader;
       final String traceID = fetchResult.traceID;
       if ((traceIDHeader != null) && traceID.isNotEmpty) {
@@ -1842,7 +1915,7 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
     if (_pendingWriteOps.isEmpty) {
       return Uint8List(0);
     }
-    final encoding = _delegateRequest.encoding ?? utf8;
+    final encoding = _delegateRequest.encoding;
     final builder = BytesBuilder(copy: false);
     for (final pending in _pendingWriteOps) {
       switch (pending.type) {
@@ -2164,7 +2237,8 @@ class ApproovHttpClient implements HttpClient {
           (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
         // perform another attempted token fetch
         fetchResult = await ApproovService._fetchApproovToken(urlString);
-        Log.d("$TAG: $isolate pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
+        Log.d(
+            "$TAG: $isolate pinning setup retry fetch token for ${url.host}: ${fetchResult.tokenFetchStatus.name}");
 
         // if we are forced to update pins then this likely means that no pins were ever fetched and in this
         // case we must force a no connection so that another fetch can be tried again. This is because
