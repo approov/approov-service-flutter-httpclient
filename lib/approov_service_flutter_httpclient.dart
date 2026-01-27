@@ -1404,7 +1404,16 @@ class ApproovService {
     if (alg == null) {
       throw StateError('Signature parameters missing alg identifier');
     }
-    final signature = await _signCanonicalMessage(signatureBase, alg);
+    String signature;
+    try {
+      signature = await _signCanonicalMessage(signatureBase, alg);
+    } catch (err) {
+      if (alg == 'ecdsa-p256-sha256') {
+        Log.w("$TAG: skipping install message signing; $err");
+        return;
+      }
+      rethrow;
+    }
     if (signature.isEmpty) {
       Log.d(
           "$TAG: message signing returned empty signature for ${request.uri}");
