@@ -168,6 +168,10 @@ class ApproovService {
     }
   }
 
+  /// Creates a detached snapshot of headers for callback-safe mutation logic.
+  ///
+  /// @param headers are the live request headers to snapshot
+  /// @return map copy of header names to value lists
   static Map<String, List<String>> _snapshotHeaders(HttpHeaders headers) {
     final snapshot = <String, List<String>>{};
     headers.forEach((name, values) {
@@ -176,6 +180,10 @@ class ApproovService {
     return snapshot;
   }
 
+  /// Checks whether a URL matches any configured exclusion regex.
+  ///
+  /// @param url is the URL string to test
+  /// @return true if request protection should be excluded, otherwise false
   static bool _isExcludedUrl(String url) {
     for (final regExp in _exclusionURLRegexs.values) {
       if (regExp.hasMatch(url)) return true;
@@ -183,6 +191,12 @@ class ApproovService {
     return false;
   }
 
+  /// Builds a request snapshot for mutator callbacks.
+  ///
+  /// @param method is the request HTTP method
+  /// @param uri is the request URI
+  /// @param headers are request headers at snapshot time
+  /// @return immutable snapshot for mutator decision callbacks
   static ApproovRequestSnapshot _requestSnapshotFromUri(
       String method, Uri uri, Map<String, List<String>> headers) {
     return ApproovRequestSnapshot(
@@ -193,6 +207,15 @@ class ApproovService {
     );
   }
 
+  /// Invokes a mutator callback with consistent async and error normalization.
+  ///
+  /// All callback invocations are wrapped in [Future.sync] so both sync and async
+  /// callback implementations are handled uniformly. Non-Approov exceptions are
+  /// normalized to [ApproovException].
+  ///
+  /// @param callback is the mutator callback to invoke
+  /// @return callback result value
+  /// @throws ApproovException for callback failures
   static Future<T> _invokeMutator<T>(
       FutureOr<T> Function(ApproovServiceMutator mutator) callback) async {
     final mutator = _serviceMutator;
@@ -402,6 +425,8 @@ class ApproovService {
   /// Sets the service mutator callbacks that customize Approov behavior.
   ///
   /// Passing null restores [ApproovServiceMutator.DEFAULT].
+  ///
+  /// @param mutator is the mutator implementation, or null to reset to default
   static void setServiceMutator(ApproovServiceMutator? mutator) {
     _serviceMutator = mutator ?? ApproovServiceMutator.DEFAULT;
     Log.d(
@@ -409,16 +434,30 @@ class ApproovService {
   }
 
   /// Gets the currently configured service mutator.
+  ///
+  /// @return the active mutator implementation
   static ApproovServiceMutator getServiceMutator() {
     return _serviceMutator;
   }
 
+  /// Sets interceptor extensions via the legacy API alias.
+  ///
+  /// This method is retained for compatibility and delegates to
+  /// [setServiceMutator].
+  ///
+  /// @param mutator is the mutator implementation, or null to reset to default
   /// @deprecated Use [setServiceMutator] instead.
   @Deprecated('Use setServiceMutator instead')
   static void setApproovInterceptorExtensions(ApproovServiceMutator? mutator) {
     setServiceMutator(mutator);
   }
 
+  /// Gets interceptor extensions via the legacy API alias.
+  ///
+  /// This method is retained for compatibility and delegates to
+  /// [getServiceMutator].
+  ///
+  /// @return the active mutator implementation
   /// @deprecated Use [getServiceMutator] instead.
   @Deprecated('Use getServiceMutator instead')
   static ApproovServiceMutator getApproovInterceptorExtensions() {
@@ -451,7 +490,13 @@ class ApproovService {
     _substitutionHeaders.remove(header);
   }
 
-  /// Adds the key name of a query parameter that should be substituted with a secure string.
+  /// Adds a query parameter key for automatic secure string substitution.
+  ///
+  /// When this key is present in an outgoing URL, the existing value is treated
+  /// as a secure string key and replaced using [substituteQueryParam] before the
+  /// request is opened.
+  ///
+  /// @param key is the query parameter key to register for substitution
   static void addSubstitutionQueryParam(String key) {
     Log.d("$TAG: addSubstitutionQueryParam $key");
     try {
@@ -462,7 +507,9 @@ class ApproovService {
     }
   }
 
-  /// Removes a query parameter key name previously added using addSubstitutionQueryParam.
+  /// Removes a query parameter key previously registered for substitution.
+  ///
+  /// @param key is the query parameter key to unregister
   static void removeSubstitutionQueryParam(String key) {
     Log.d("$TAG: removeSubstitutionQueryParam $key");
     _substitutionQueryParams.remove(key);
@@ -1090,6 +1137,15 @@ class ApproovService {
     return uri;
   }
 
+  /// Prepares request mutation and pinning decisions before opening a request.
+  ///
+  /// This method evaluates mutator gates, applies automatic query parameter
+  /// substitution (if configured), and records resulting mutation metadata.
+  ///
+  /// @param method is the HTTP request method
+  /// @param uri is the original request URI
+  /// @return preparation payload with effective URI and processing decisions
+  /// @throws ApproovException if preparation callbacks fail
   static Future<_ApproovRequestPreparation> _prepareRequestForApproov(
       String method, Uri uri) async {
     await _requireInitialized();
@@ -1693,6 +1749,12 @@ class ApproovService {
 }
 
 class _ApproovRequestPreparation {
+  /// Creates a request-preparation payload for open/openUrl processing.
+  ///
+  /// @param uri is the URI to use when opening the request
+  /// @param shouldProcessApproov indicates if request mutation should execute
+  /// @param shouldApplyPinning indicates if pinning setup should execute
+  /// @param requestMutations tracks pre-request mutations already applied
   _ApproovRequestPreparation({
     required this.uri,
     required this.shouldProcessApproov,
@@ -1700,9 +1762,16 @@ class _ApproovRequestPreparation {
     required this.requestMutations,
   });
 
+  /// Effective URI after any pre-open substitutions.
   final Uri uri;
+
+  /// True when interceptor mutation should execute on the request.
   final bool shouldProcessApproov;
+
+  /// True when pinning setup should be used for the request.
   final bool shouldApplyPinning;
+
+  /// Mutation tracker passed into later processing callbacks.
   final ApproovRequestMutations requestMutations;
 }
 
@@ -1822,6 +1891,8 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   // the headers are still mutable.
   //
   // @param request is the HttpClientRequest to be delegated to
+  // @param shouldProcessApproov indicates if this request should be mutated by Approov
+  // @param requestMutations tracks all request mutations for callback reporting
   _ApproovHttpClientRequest(
     HttpClientRequest request, {
     required bool shouldProcessApproov,
@@ -1854,6 +1925,12 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
     }
   }
 
+  /// Builds a best-effort byte snapshot of pending buffered request body writes.
+  ///
+  /// This is used by message signing so the signature can include request body
+  /// bytes when the body has been written with buffered write APIs.
+  ///
+  /// @return buffered body bytes, empty bytes if none, or null for stream bodies
   Uint8List? _snapshotPendingBodyBytes() {
     if (_hasStreamBody) {
       return null;
@@ -2128,6 +2205,7 @@ class ApproovHttpClient implements HttpClient {
   /// HTTP client is copied from the current delegate.
   ///
   /// @param url for which to set up pinning
+  /// @param shouldApplyPinning is true to apply pinning setup, false to bypass
   /// @return the future delegate HTTP client, or null if the no connnection client should be used
   Future<HttpClient?> _createPinnedHttpClient(
     Uri url, {
@@ -2262,10 +2340,18 @@ class ApproovHttpClient implements HttpClient {
     return newHttpClient;
   }
 
+  /// Creates the delegate cache key for a request host and pinning mode.
+  ///
+  /// @param url is the request URL used to derive host cache identity
+  /// @param shouldApplyPinning indicates the requested pinning mode
+  /// @return cache key used for delegate client lookup
   String _delegateCacheKey(Uri url, bool shouldApplyPinning) {
     return "${url.host}|p:${shouldApplyPinning ? 1 : 0}";
   }
 
+  /// Copies `HttpClient` configuration state from this wrapper to a delegate.
+  ///
+  /// @param newHttpClient is the delegate receiving mirrored state
   void _copyClientState(HttpClient newHttpClient) {
     newHttpClient.idleTimeout = _idleTimeout;
     newHttpClient.connectionTimeout = _connectionTimeout;
