@@ -1,3 +1,10 @@
+## [3.5.6] - (04-March-2026)
+- Add `ApproovServiceMutator` support across fetch APIs, request mutation flow, and pinning gate callbacks.
+- Add request mutation models: `ApproovRequestMutations`, `ApproovRequestSnapshot`, `ApproovTokenFetchResult`, and `ApproovTokenFetchStatus`.
+- Add `setServiceMutator()` / `getServiceMutator()` plus deprecated alias methods for naming parity.
+- Add automatic query substitution APIs: `addSubstitutionQueryParam()` and `removeSubstitutionQueryParam()`.
+- Restructure docs to OkHttp-style layout with `README.md`, `USAGE.md`, and `REFERENCE.md`.
+- (fix) Don't throw exception on missing public key
 ## [3.5.5] - (17-December-2025)
 - Updates Approov IOS SDK to 3.5.3
 - Add a capability to retrieve an ARC(Attestation Response Code) via getLastARC()

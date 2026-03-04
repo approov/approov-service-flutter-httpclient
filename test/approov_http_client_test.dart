@@ -10,18 +10,27 @@ void main() {
 
   const MethodChannel fgChannel =
       MethodChannel('approov_service_flutter_httpclient_fg');
+  const MethodChannel bgChannel =
+      MethodChannel('approov_service_flutter_httpclient_bg');
   late Future<dynamic> Function(MethodCall call) channelHandler;
+  late Future<dynamic> Function(MethodCall call) bgChannelHandler;
 
   setUp(() {
     channelHandler = (MethodCall methodCall) async => '42';
+    bgChannelHandler = (MethodCall methodCall) async => null;
     fgChannel.setMockMethodCallHandler(
       (MethodCall call) => channelHandler(call),
+    );
+    bgChannel.setMockMethodCallHandler(
+      (MethodCall call) => bgChannelHandler(call),
     );
   });
 
   tearDown(() {
     fgChannel.setMockMethodCallHandler(null);
+    bgChannel.setMockMethodCallHandler(null);
     ApproovService.disableMessageSigning();
+    ApproovService.setServiceMutator(null);
   });
 
   test('signature base matches HTTP message signatures format', () {
@@ -208,7 +217,7 @@ void main() {
     expect(signature, 'account-signature');
     expect(
       calls.map((call) => call.method),
-      ['initialize', 'setUserProperty', 'getAccountMessageSignature'],
+      ['setUserProperty', 'getAccountMessageSignature'],
     );
   });
 
@@ -237,12 +246,7 @@ void main() {
     expect(signature, 'legacy-signature');
     expect(
       calls.map((call) => call.method),
-      [
-        'initialize',
-        'setUserProperty',
-        'getAccountMessageSignature',
-        'getMessageSignature'
-      ],
+      ['setUserProperty', 'getAccountMessageSignature', 'getMessageSignature'],
     );
   });
 }

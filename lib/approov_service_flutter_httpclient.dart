@@ -26,7 +26,6 @@ import 'dart:typed_data';
 import 'package:asn1lib/asn1lib.dart';
 import 'package:crypto/crypto.dart';
 import 'package:collection/collection.dart';
-import 'package:enum_to_string/enum_to_string.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -35,6 +34,7 @@ import 'package:logger/logger.dart';
 import 'package:pem/pem.dart';
 import 'package:mutex/mutex.dart';
 import 'src/message_signing.dart';
+import 'src/request_mutator.dart';
 export 'src/message_signing.dart'
     show
         ApproovMessageSigning,
@@ -43,143 +43,19 @@ export 'src/message_signing.dart'
         SignatureDigest,
         SignatureParameters,
         SignatureParametersFactory;
+export 'src/request_mutator.dart'
+    show
+        ApproovException,
+        ApproovNetworkException,
+        ApproovRejectionException,
+        ApproovRequestMutations,
+        ApproovRequestSnapshot,
+        ApproovServiceMutator,
+        ApproovTokenFetchResult,
+        ApproovTokenFetchStatus;
 
 // Logger
 final Logger Log = Logger();
-
-/// Potential status results from an Approov fetch attempt
-enum _TokenFetchStatus {
-  SUCCESS, // token was successfully received
-  NO_NETWORK, // there is no token because there is no network connectivity currently
-  MITM_DETECTED, // there is no token because there is a Man-In-The-Middle (MITM) to the Approov cloud service
-  POOR_NETWORK, // no token could be obtained due to poor network connectivity
-  NO_APPROOV_SERVICE, // no token could be obtained, perhaps because Approov services are down
-  BAD_URL, // provided URL was not https or otherwise in the correct format
-  UNKNOWN_URL, // provided URL is not one that one configured for Approov
-  UNPROTECTED_URL, // provided URL does not need an Approov token
-  NO_NETWORK_PERMISSION, // app does not have ACCESS_NETWORK_STATE or INTERNET permission
-  MISSING_LIB_DEPENDENCY, // app is missing a needed library dependency
-  INTERNAL_ERROR, // there has been an internal error in the SDK
-  REJECTED, // indicates a custom JWT or secure string fetch has been rejected because Approov attestation fails
-  DISABLED, // indicates that a custom JWT or secure string fetch fails because the feature is not enabled
-  UNKNOWN_KEY, // indicates an attempt to fetch a secure string that has not been defined
-  BAD_KEY, // indicates an attempt to fetch a secure string with a bad key
-  BAD_PAYLOAD // indicates an attempt to fetch a custom JWT with a bad payload
-}
-
-/// Results from an Approov token fetch
-class _TokenFetchResult {
-  // Status of the last Approov token fetch
-  _TokenFetchStatus tokenFetchStatus = _TokenFetchStatus.INTERNAL_ERROR;
-
-  // Token string of the last Approov fetch. This may be an empty string if the fetch did not succeed or wasn't to fetch a token.
-  String token = "";
-
-  // Secure string of the last Approov fetch. This may be an null if the fetch did not succeed or wasn't to fetch a secure string.
-  String? secureString = null;
-
-  // An Attestation Response Code (ARC) providing details of the device properties. This is the empty string if no ARC
-  // was obtained.
-  String ARC = "";
-
-  // Any rejection reasons describing why Approov attestation has failed. This is a comma separated list of device properties, or
-  // an empty string for a pass or if the feature is not enabled.
-  String rejectionReasons = "";
-
-  // Indicates whether a new configuration is available from fetchConfig()
-  bool isConfigChanged = false;
-
-  // Indicates whether current user APIs must be updated to reflect a new version available from getPins(). Calling
-  // getPins() will clear this flag for the next Approov token fetch.
-  bool isForceApplyPins = false;
-
-  // Measurement configuration if the last token fetch was to perform an integrity measurement and was successful.
-  Uint8List measurementConfig = Uint8List(0);
-
-  // Loggable Approov token string.
-  String loggableToken = "";
-
-  // Trace identifier associated with the last Approov token fetch, if provided by the SDK.
-  String traceID = "";
-
-  /// Convenience constructor to generate the results from a results map from the underlying platform call.
-  ///
-  /// @param tokenFetchResultMap holds the results of the fetch
-  _TokenFetchResult.fromTokenFetchResultMap(Map tokenFetchResultMap) {
-    _TokenFetchStatus? newTokenFetchStatus = EnumToString.fromString(
-        _TokenFetchStatus.values, tokenFetchResultMap["TokenFetchStatus"]);
-    if (newTokenFetchStatus != null) tokenFetchStatus = newTokenFetchStatus;
-    token = tokenFetchResultMap["Token"];
-    String? newSecureString = tokenFetchResultMap["SecureString"];
-    if (newSecureString != null) secureString = newSecureString;
-    ARC = tokenFetchResultMap["ARC"];
-    rejectionReasons = tokenFetchResultMap["RejectionReasons"];
-    isConfigChanged = tokenFetchResultMap["IsConfigChanged"];
-    isForceApplyPins = tokenFetchResultMap["IsForceApplyPins"];
-    Uint8List? newMeasurementConfig = tokenFetchResultMap["MeasurementConfig"];
-    if (newMeasurementConfig != null) measurementConfig = newMeasurementConfig;
-    loggableToken = tokenFetchResultMap["LoggableToken"];
-    String? newTraceID = tokenFetchResultMap["TraceID"];
-    if (newTraceID != null) traceID = newTraceID;
-  }
-}
-
-/// ApproovException is thrown if there is an error from Approov.
-class ApproovException implements Exception {
-  // cause of the exception
-  String? cause;
-
-  /// ApproovExeception constructs a new Approov exception.
-  ///
-  /// @param cause is a message giving the cause of the exception
-  ApproovException(String cause) {
-    this.cause = cause;
-  }
-
-  @override
-  String toString() {
-    return "ApproovException: $cause";
-  }
-}
-
-/// ApproovNetworkException indicates an exception caused by networking conditions which is likely to be
-/// temporary so a user initiated retry should be performed.
-class ApproovNetworkException extends ApproovException {
-  /// ApproovNetworkException constructs a new exception as a result of a temporary networking issue.
-  ///
-  /// @param cause is a message giving the cause of the exception
-  ApproovNetworkException(String cause) : super(cause) {}
-
-  @override
-  String toString() {
-    return "ApproovNetworkException: $cause";
-  }
-}
-
-/// ApproovRejectionException provides additional information if the app has been rejected by Approov.
-class ApproovRejectionException extends ApproovException {
-  // provides a code of the app state for support purposes
-  String? arc;
-
-  // provides a comma separated list of rejection reasons (if the feature is enabled in Approov)
-  String? rejectionReasons;
-
-  /// ApproovRejectionException constructs a new exception as a result of an app rejection.
-  ///
-  /// @param cause is a message giving the cause of the exception
-  /// @param arc is the code that can be used for support purposes
-  /// @param rejectionReasons may provide a comma separated list of rejection reasons
-  ApproovRejectionException(String cause, String arc, String rejectionReasons)
-      : super(cause) {
-    this.arc = arc;
-    this.rejectionReasons = rejectionReasons;
-  }
-
-  @override
-  String toString() {
-    return "ApproovRejectionException: $cause ARC:$arc reasons:$rejectionReasons";
-  }
-}
 
 // ApproovService is a singleton for managing the underlying Approov SDK itself. It provides a number of user accessible
 // methods and management for its configuration.
@@ -248,8 +124,15 @@ class ApproovService {
   // required prefixes
   static Map<String, String> _substitutionHeaders = {};
 
+  // map of query parameter keys that should have their values substituted for secure strings,
+  // mapped to compiled regular expressions that capture the value.
+  static Map<String, RegExp> _substitutionQueryParams = {};
+
   // map of URL regexs that should be excluded from any Approov protection, mapped to the regular expressions
   static Map<String, RegExp> _exclusionURLRegexs = {};
+
+  // mutator used to customize Approov behavior.
+  static ApproovServiceMutator _serviceMutator = ApproovServiceMutator.DEFAULT;
 
   // configuration for automatically signing outbound requests using Approov
   static ApproovMessageSigning? _messageSigning;
@@ -291,6 +174,35 @@ class ApproovService {
       snapshot[name] = List<String>.from(values);
     });
     return snapshot;
+  }
+
+  static bool _isExcludedUrl(String url) {
+    for (final regExp in _exclusionURLRegexs.values) {
+      if (regExp.hasMatch(url)) return true;
+    }
+    return false;
+  }
+
+  static ApproovRequestSnapshot _requestSnapshotFromUri(
+      String method, Uri uri, Map<String, List<String>> headers) {
+    return ApproovRequestSnapshot(
+      requestMethod: method,
+      uri: uri,
+      headers: headers,
+      isURLExcluded: _isExcludedUrl(uri.toString()),
+    );
+  }
+
+  static Future<T> _invokeMutator<T>(
+      FutureOr<T> Function(ApproovServiceMutator mutator) callback) async {
+    final mutator = _serviceMutator;
+    try {
+      return await Future.sync(() => callback(mutator));
+    } on ApproovException {
+      rethrow;
+    } catch (err) {
+      throw ApproovException("Mutator error: $err");
+    }
   }
 
   /// Initialize the Approov SDK. This must be called prior to any other methods on the ApproovService. This does not
@@ -487,6 +399,32 @@ class ApproovService {
     _bindingHeader = header;
   }
 
+  /// Sets the service mutator callbacks that customize Approov behavior.
+  ///
+  /// Passing null restores [ApproovServiceMutator.DEFAULT].
+  static void setServiceMutator(ApproovServiceMutator? mutator) {
+    _serviceMutator = mutator ?? ApproovServiceMutator.DEFAULT;
+    Log.d(
+        "$TAG: Applied ApproovServiceMutator: ${_serviceMutator.runtimeType}");
+  }
+
+  /// Gets the currently configured service mutator.
+  static ApproovServiceMutator getServiceMutator() {
+    return _serviceMutator;
+  }
+
+  /// @deprecated Use [setServiceMutator] instead.
+  @Deprecated('Use setServiceMutator instead')
+  static void setApproovInterceptorExtensions(ApproovServiceMutator? mutator) {
+    setServiceMutator(mutator);
+  }
+
+  /// @deprecated Use [getServiceMutator] instead.
+  @Deprecated('Use getServiceMutator instead')
+  static ApproovServiceMutator getApproovInterceptorExtensions() {
+    return getServiceMutator();
+  }
+
   /// Adds the name of a header which should be subject to secure strings substitution. This
   /// means that if the header is present then the value will be used as a key to look up a
   /// secure string value which will be substituted into the header value instead. This allows
@@ -511,6 +449,23 @@ class ApproovService {
   static void removeSubstitutionHeader(String header) {
     Log.d("$TAG: removeSubstitutionHeader $header");
     _substitutionHeaders.remove(header);
+  }
+
+  /// Adds the key name of a query parameter that should be substituted with a secure string.
+  static void addSubstitutionQueryParam(String key) {
+    Log.d("$TAG: addSubstitutionQueryParam $key");
+    try {
+      final pattern = RegExp("[\\?&]${RegExp.escape(key)}=([^&;]+)");
+      _substitutionQueryParams[key] = pattern;
+    } on FormatException catch (e) {
+      Log.d("$TAG: addSubstitutionQueryParam $key: ${e.message}");
+    }
+  }
+
+  /// Removes a query parameter key name previously added using addSubstitutionQueryParam.
+  static void removeSubstitutionQueryParam(String key) {
+    Log.d("$TAG: removeSubstitutionQueryParam $key");
+    _substitutionQueryParams.remove(key);
   }
 
   /// Adds an exclusion URL regular expression. If a URL for a request matches this regular expression
@@ -602,35 +557,21 @@ class ApproovService {
     }
 
     // wait for the secure string fetch to complete
-    _TokenFetchResult fetchResult;
+    ApproovTokenFetchResult fetchResult;
     try {
       Map fetchResultMap = await completer.future;
-      fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+      fetchResult = ApproovTokenFetchResult.fromTokenFetchResultMap(
+        fetchResultMap,
+        proceedOnNetworkFail: _proceedOnNetworkFail,
+      );
       String isolate = _isRootIsolate ? "root" : "background";
       Log.d("$TAG: $isolate precheck: ${fetchResult.tokenFetchStatus.name}");
     } catch (err) {
       throw ApproovException('$err');
     }
 
-    // process the returned Approov status
-    if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
-      // if the request is rejected then we provide a special exception with additional information
-      throw new ApproovRejectionException(
-          "precheck: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
-          fetchResult.ARC,
-          fetchResult.rejectionReasons);
-    else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED))
-      // we are unable to get the secure string due to network conditions so the request can
-      // be retried by the user later
-      throw new ApproovNetworkException(
-          "precheck: ${fetchResult.tokenFetchStatus.name}");
-    else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
-        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY))
-      // we are unable to get the secure string due to a more permanent error
-      throw new ApproovException(
-          "precheck: ${fetchResult.tokenFetchStatus.name}");
+    await _invokeMutator(
+        (mutator) => mutator.handlePrecheckResult(fetchResult));
   }
 
   /// Gets the device ID used by Approov to identify the particular device that the SDK is running on. Note that
@@ -677,22 +618,23 @@ class ApproovService {
       // always use the background "waitForFetchValue" mechanism which works consistently
       // across isolates.
       final fetchResult = await _fetchApproovTokenNoCallback(url);
-      final arc = fetchResult.token.isNotEmpty ? fetchResult.ARC : "";
+      final arc = fetchResult.token.isNotEmpty ? fetchResult.arc : "";
       Log.i("$TAG: getLastARC: $arc");
       return arc;
     } on ApproovException catch (e) {
       debugPrint('$TAG: getLastARC Approov error: $e');
-      return ""; 
+      return "";
     } catch (err) {
       Log.e("$TAG: getLastARC exception $err");
       return "";
     }
   }
 
-  static Future<_TokenFetchResult> _fetchApproovTokenNoCallback(
+  static Future<ApproovTokenFetchResult> _fetchApproovTokenNoCallback(
       String url) async {
     await _requireInitialized();
-    Log.i("$TAG: _fetchApproovTokenNoCallback invoked: after requireInitialized");
+    Log.i(
+        "$TAG: _fetchApproovTokenNoCallback invoked: after requireInitialized");
 
     try {
       final transactionID = ApproovService.transactionID.toString();
@@ -712,7 +654,11 @@ class ApproovService {
       final results =
           await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
       _configEpoch = results['ConfigEpoch'];
-      return _TokenFetchResult.fromTokenFetchResultMap(results);
+      return ApproovTokenFetchResult.fromTokenFetchResultMap(
+        results,
+        requestURL: url,
+        proceedOnNetworkFail: _proceedOnNetworkFail,
+      );
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -762,28 +708,13 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
     // fetch the Approov token
-    _TokenFetchResult fetchResult = await _fetchApproovToken(url);
+    ApproovTokenFetchResult fetchResult = await _fetchApproovToken(url);
     String isolate = _isRootIsolate ? "root" : "background";
     Log.d("$TAG: $isolate fetchToken for $url: ${fetchResult.loggableToken}");
 
-    // check the status of Approov token fetch
-    if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) ||
-        (fetchResult.tokenFetchStatus ==
-            _TokenFetchStatus.NO_APPROOV_SERVICE)) {
-      // we successfully obtained a token so provide it, or provide an empty one on complete Approov service failure
-      return fetchResult.token;
-    } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
-      // we are unable to get an Approov token due to network conditions so the request can
-      // be retried by the user later
-      throw new ApproovNetworkException(
-          "fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
-    } else {
-      // we have failed to get an Approov token with a more serious permanent error
-      throw ApproovException(
-          "fetchToken for $url: ${fetchResult.tokenFetchStatus.name}");
-    }
+    await _invokeMutator(
+        (mutator) => mutator.handleFetchTokenResult(fetchResult));
+    return fetchResult.token;
   }
 
   /// Gets the signature for the given message. This uses an account specific message signing key that is
@@ -887,10 +818,13 @@ class ApproovService {
     }
 
     // wait for the secure string fetch to complete
-    _TokenFetchResult fetchResult;
+    ApproovTokenFetchResult fetchResult;
     try {
       Map fetchResultMap = await completer.future;
-      fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+      fetchResult = ApproovTokenFetchResult.fromTokenFetchResultMap(
+        fetchResultMap,
+        proceedOnNetworkFail: _proceedOnNetworkFail,
+      );
       String isolate = _isRootIsolate ? "root" : "background";
       Log.d(
           "$TAG: $isolate fetchSecureString $type: $key, ${fetchResult.tokenFetchStatus.name}");
@@ -898,25 +832,8 @@ class ApproovService {
       throw ApproovException('$err');
     }
 
-    // process the returned Approov status
-    if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
-      // if the request is rejected then we provide a special exception with additional information
-      throw new ApproovRejectionException(
-          "fetchSecureString $type for $key: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
-          fetchResult.ARC,
-          fetchResult.rejectionReasons);
-    else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED))
-      // we are unable to get the secure string due to network conditions so the request can
-      // be retried by the user later
-      throw new ApproovNetworkException(
-          "fetchSecureString $type for $key: ${fetchResult.tokenFetchStatus.name}");
-    else if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
-        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY))
-      // we are unable to get the secure string due to a more permanent error
-      throw new ApproovException(
-          "fetchSecureString $type for $key: ${fetchResult.tokenFetchStatus.name}");
+    await _invokeMutator((mutator) =>
+        mutator.handleFetchSecureStringResult(fetchResult, type, key));
     return fetchResult.secureString;
   }
 
@@ -968,10 +885,13 @@ class ApproovService {
     }
 
     // wait until the custom JWT creation is completed
-    _TokenFetchResult fetchResult;
+    ApproovTokenFetchResult fetchResult;
     try {
       Map fetchResultMap = await completer.future;
-      fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+      fetchResult = ApproovTokenFetchResult.fromTokenFetchResultMap(
+        fetchResultMap,
+        proceedOnNetworkFail: _proceedOnNetworkFail,
+      );
       String isolate = _isRootIsolate ? "root" : "background";
       Log.d(
           "$TAG: $isolate fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
@@ -979,24 +899,8 @@ class ApproovService {
       throw ApproovException('$err');
     }
 
-    // process the returned Approov status
-    if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
-      // if the request is rejected then we provide a special exception with additional information
-      throw new ApproovRejectionException(
-          "fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
-          fetchResult.ARC,
-          fetchResult.rejectionReasons);
-    else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED))
-      // we are unable to get the custom JWT due to network conditions so the request can
-      // be retried by the user later
-      throw new ApproovNetworkException(
-          "fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
-    else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS)
-      // we are unable to get the custom JWT due to a more permanent error
-      throw new ApproovException(
-          "fetchCustomJWT: ${fetchResult.tokenFetchStatus.name}");
+    await _invokeMutator(
+        (mutator) => mutator.handleFetchCustomJWTResult(fetchResult));
 
     // provide the custom JWT
     return fetchResult.token;
@@ -1050,7 +954,7 @@ class ApproovService {
   /// @param url provides the full request URL (including path) for which a token is being fetched
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
-  static Future<_TokenFetchResult> _fetchApproovToken(String url) async {
+  static Future<ApproovTokenFetchResult> _fetchApproovToken(String url) async {
     await _requireInitialized();
     try {
       // setup a Completer for the transaction ID we are going to use
@@ -1085,8 +989,12 @@ class ApproovService {
       // wait for the transaction to complete
       final results = await completer.future;
       _configEpoch = results['ConfigEpoch'];
-      _TokenFetchResult tokenFetchResult =
-          _TokenFetchResult.fromTokenFetchResultMap(results);
+      ApproovTokenFetchResult tokenFetchResult =
+          ApproovTokenFetchResult.fromTokenFetchResultMap(
+        results,
+        requestURL: url,
+        proceedOnNetworkFail: _proceedOnNetworkFail,
+      );
       return tokenFetchResult;
     } catch (err) {
       throw ApproovException('$err');
@@ -1113,9 +1021,7 @@ class ApproovService {
     if (queryValue != null) {
       // check if the URL matches one of the exclusion regexs and just return the provided Uri if so
       String url = uri.toString();
-      for (RegExp regExp in _exclusionURLRegexs.values) {
-        if (regExp.hasMatch(url)) return uri;
-      }
+      if (_isExcludedUrl(url)) return uri;
 
       // setup a Completer for the transaction ID we are going to use
       Completer<dynamic> completer = new Completer<dynamic>();
@@ -1153,10 +1059,14 @@ class ApproovService {
       }
 
       // wait for the secure string fetch to complete
-      _TokenFetchResult fetchResult;
+      ApproovTokenFetchResult fetchResult;
       try {
         Map fetchResultMap = await completer.future;
-        fetchResult = _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+        fetchResult = ApproovTokenFetchResult.fromTokenFetchResultMap(
+          fetchResultMap,
+          requestURL: url,
+          proceedOnNetworkFail: _proceedOnNetworkFail,
+        );
         String isolate = _isRootIsolate ? "root" : "background";
         Log.d(
             "$TAG: $isolate substituting query parameter $queryParameter: ${fetchResult.tokenFetchStatus.name}");
@@ -1164,33 +1074,52 @@ class ApproovService {
         throw ApproovException('$err');
       }
 
-      // process the returned Approov status
-      if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+      final shouldSubstitute = await _invokeMutator((mutator) =>
+          mutator.handleInterceptorQueryParamSubstitutionResult(
+              fetchResult, queryParameter));
+      if (shouldSubstitute &&
+          fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS &&
+          fetchResult.secureString != null) {
         // perform a query substitution
         Map<String, String> updatedParams =
             Map<String, String>.from(uri.queryParameters);
         updatedParams[queryParameter] = fetchResult.secureString!;
         return uri.replace(queryParameters: updatedParams);
-      } else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
-        // if the request is rejected then we provide a special exception with additional information
-        throw new ApproovRejectionException(
-            "Query parameter substitution for $queryParameter: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
-            fetchResult.ARC,
-            fetchResult.rejectionReasons);
-      else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-          (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-          (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
-        // we are unable to get the secure string due to network conditions so the request can
-        // be retried by the user later - unless this is overridden
-        if (!_proceedOnNetworkFail)
-          throw new ApproovNetworkException(
-              "Query parameter substitution for $queryParameter: ${fetchResult.tokenFetchStatus.name}");
-      } else if (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_KEY)
-        // we have failed to get a secure string with a more serious permanent error
-        throw new ApproovException(
-            "Query parameter substitution for $queryParameter: ${fetchResult.tokenFetchStatus.name}");
+      }
     }
     return uri;
+  }
+
+  static Future<_ApproovRequestPreparation> _prepareRequestForApproov(
+      String method, Uri uri) async {
+    await _requireInitialized();
+    final snapshot = _requestSnapshotFromUri(method, uri, const {});
+    final shouldProcessApproov = await _invokeMutator(
+        (mutator) => mutator.handleInterceptorShouldProcessRequest(snapshot));
+    final shouldApplyPinning = await _invokeMutator(
+        (mutator) => mutator.handlePinningShouldProcessRequest(snapshot));
+
+    final requestMutations = ApproovRequestMutations();
+    var effectiveUri = uri;
+    if (shouldProcessApproov && _substitutionQueryParams.isNotEmpty) {
+      for (final entry in _substitutionQueryParams.entries) {
+        final queryKey = entry.key;
+        if (!effectiveUri.queryParameters.containsKey(queryKey)) continue;
+        final originalUri = effectiveUri;
+        effectiveUri = await substituteQueryParam(effectiveUri, queryKey);
+        if (effectiveUri.toString() != originalUri.toString()) {
+          requestMutations.addSubstitutionQueryParamKey(
+              queryKey, originalUri.toString());
+        }
+      }
+    }
+
+    return _ApproovRequestPreparation(
+      uri: effectiveUri,
+      shouldProcessApproov: shouldProcessApproov,
+      shouldApplyPinning: shouldApplyPinning,
+      requestMutations: requestMutations,
+    );
   }
 
   /// Adds Approov to the given request by adding the Approov token in a header. If a binding header has been specified
@@ -1205,13 +1134,11 @@ class ApproovService {
   /// @param pendingBodyBytes holds any buffered body bytes available before the request is sent, or null for streaming
   /// @throws ApproovException if it is not possible to obtain an Approov token or perform required header substitutions
   static Future<void> _updateRequest(
-      HttpClientRequest request, Uint8List? pendingBodyBytes) async {
-    // check if the URL matches one of the exclusion regexs and just return if so
+      HttpClientRequest request, Uint8List? pendingBodyBytes,
+      {required bool shouldProcessApproov,
+      required ApproovRequestMutations requestMutations}) async {
     await _requireInitialized();
-    String url = request.uri.toString();
-    for (RegExp regExp in _exclusionURLRegexs.values) {
-      if (regExp.hasMatch(url)) return;
-    }
+    if (!shouldProcessApproov) return;
 
     // update the data hash based on any token binding header that is present
     String? bindingHeader = _bindingHeader;
@@ -1226,7 +1153,7 @@ class ApproovService {
     final Uri requestUri = request.uri;
     final String host = requestUri.host;
     final String requestUrl = requestUri.toString();
-    _TokenFetchResult fetchResult = await _fetchApproovToken(requestUrl);
+    ApproovTokenFetchResult fetchResult = await _fetchApproovToken(requestUrl);
 
     // provide information about the obtained token or error (note "approov token -check" can
     // be used to check the validity of the token and if you use token annotations they
@@ -1243,40 +1170,27 @@ class ApproovService {
       Log.d("$TAG: $isolate updateRequest, dynamic configuration update");
     }
 
-    // check the status of Approov token fetch
-    if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+    final continueProcessing = await _invokeMutator((mutator) =>
+        mutator.handleInterceptorFetchTokenResult(fetchResult, requestUrl));
+    if (!continueProcessing) {
+      await _invokeMutator((mutator) =>
+          mutator.handleInterceptorProcessedRequest(request, requestMutations));
+      return;
+    }
+
+    if (fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS) {
       // we successfully obtained a token so add it to the header for the request
       request.headers.set(
           _approovTokenHeader, _approovTokenPrefix + fetchResult.token,
           preserveHeaderCase: true);
+      requestMutations.setTokenHeaderKey(_approovTokenHeader);
       final String? traceIDHeader = _approovTraceIDHeader;
       final String traceID = fetchResult.traceID;
       if ((traceIDHeader != null) && traceID.isNotEmpty) {
         request.headers.set(traceIDHeader, traceID, preserveHeaderCase: true);
+        requestMutations.setTraceIDHeaderKey(traceIDHeader);
       }
-    } else if ((fetchResult.tokenFetchStatus == _TokenFetchStatus.NO_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-        (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
-      // we are unable to get an Approov token due to network conditions so the request can
-      // be retried by the user later - unless overridden
-      if (!_proceedOnNetworkFail)
-        throw new ApproovNetworkException(
-            "Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
-    } else if ((fetchResult.tokenFetchStatus !=
-            _TokenFetchStatus.NO_APPROOV_SERVICE) &&
-        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL) &&
-        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL)) {
-      // we have failed to get an Approov token with a more serious permanent error
-      throw ApproovException(
-          "Approov token fetch for $host: ${fetchResult.tokenFetchStatus.name}");
     }
-
-    // we only continue additional processing if we had a valid status from Approov, to prevent additional delays
-    // by trying to fetch from Approov again and this also protects against header substiutions in domains not
-    // protected by Approov and therefore potentially subject to a MitM
-    if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
-        (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNPROTECTED_URL))
-      return;
 
     // we now deal with any header substitutions, which may require further fetches but these
     // should be using cached results
@@ -1322,49 +1236,41 @@ class ApproovService {
         }
 
         // wait for the secure string fetch to complete
-        _TokenFetchResult fetchResult;
+        ApproovTokenFetchResult secureStringFetchResult;
         try {
           Map fetchResultMap = await completer.future;
-          fetchResult =
-              _TokenFetchResult.fromTokenFetchResultMap(fetchResultMap);
+          secureStringFetchResult =
+              ApproovTokenFetchResult.fromTokenFetchResultMap(
+            fetchResultMap,
+            requestURL: requestUrl,
+            proceedOnNetworkFail: _proceedOnNetworkFail,
+          );
           String isolate = _isRootIsolate ? "root" : "background";
           Log.d(
-              "$TAG: $isolate updateRequest substituting header $header: ${fetchResult.tokenFetchStatus.name}");
+              "$TAG: $isolate updateRequest substituting header $header: ${secureStringFetchResult.tokenFetchStatus.name}");
         } catch (err) {
           throw ApproovException('$err');
         }
 
-        // process the returned Approov status
-        if (fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+        final shouldSubstitute = await _invokeMutator((mutator) =>
+            mutator.handleInterceptorHeaderSubstitutionResult(
+                secureStringFetchResult, header));
+        if (shouldSubstitute &&
+            secureStringFetchResult.tokenFetchStatus ==
+                ApproovTokenFetchStatus.SUCCESS &&
+            secureStringFetchResult.secureString != null) {
           // substitute the header value
-          final substitutedValue = prefix + fetchResult.secureString!;
+          final substitutedValue =
+              prefix + secureStringFetchResult.secureString!;
           request.headers
               .set(header, substitutedValue, preserveHeaderCase: true);
-        } else if (fetchResult.tokenFetchStatus == _TokenFetchStatus.REJECTED)
-          // if the request is rejected then we provide a special exception with additional information
-          throw new ApproovRejectionException(
-              "Header substitution for $header: ${fetchResult.tokenFetchStatus.name}: ${fetchResult.ARC} ${fetchResult.rejectionReasons}",
-              fetchResult.ARC,
-              fetchResult.rejectionReasons);
-        else if ((fetchResult.tokenFetchStatus ==
-                _TokenFetchStatus.NO_NETWORK) ||
-            (fetchResult.tokenFetchStatus == _TokenFetchStatus.POOR_NETWORK) ||
-            (fetchResult.tokenFetchStatus == _TokenFetchStatus.MITM_DETECTED)) {
-          // we are unable to get the secure string due to network conditions so the request can
-          // be retried by the user later - unless overridden
-          if (!_proceedOnNetworkFail)
-            throw new ApproovNetworkException(
-                "Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
-        } else if (fetchResult.tokenFetchStatus !=
-            _TokenFetchStatus.UNKNOWN_KEY)
-          // we are unable to get the secure string due to a more permanent error
-          throw new ApproovException(
-              "Header substitution for $header: ${fetchResult.tokenFetchStatus.name}");
+          requestMutations.addSubstitutionHeaderKey(header);
+        }
       }
     }
 
     if (_messageSigning != null &&
-        fetchResult.tokenFetchStatus == _TokenFetchStatus.SUCCESS) {
+        fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS) {
       try {
         await _applyMessageSigning(request, pendingBodyBytes);
       } on ApproovException {
@@ -1373,6 +1279,9 @@ class ApproovService {
         throw ApproovException("Message signing failed: $err");
       }
     }
+
+    await _invokeMutator((mutator) =>
+        mutator.handleInterceptorProcessedRequest(request, requestMutations));
   }
 
   static Future<void> _applyMessageSigning(
@@ -1783,6 +1692,20 @@ class ApproovService {
   }
 }
 
+class _ApproovRequestPreparation {
+  _ApproovRequestPreparation({
+    required this.uri,
+    required this.shouldProcessApproov,
+    required this.shouldApplyPinning,
+    required this.requestMutations,
+  });
+
+  final Uri uri;
+  final bool shouldProcessApproov;
+  final bool shouldApplyPinning;
+  final ApproovRequestMutations requestMutations;
+}
+
 /// Possible write operations that may need to be placed in the pending list
 enum _WriteOpType {
   unknown,
@@ -1879,6 +1802,12 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   // request to be delegated to
   late HttpClientRequest _delegateRequest;
 
+  // true if request should go through Approov processing.
+  final bool _shouldProcessApproov;
+
+  // changes applied before and during request mutation.
+  final ApproovRequestMutations _requestMutations;
+
   // list of write operations (that update the body of the request) which have been delayed until there
   // is a possibility of updating the headers in the request with Approov
   List<_PendingWriteOp> _pendingWriteOps = <_PendingWriteOp>[];
@@ -1893,7 +1822,12 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
   // the headers are still mutable.
   //
   // @param request is the HttpClientRequest to be delegated to
-  _ApproovHttpClientRequest(HttpClientRequest request) {
+  _ApproovHttpClientRequest(
+    HttpClientRequest request, {
+    required bool shouldProcessApproov,
+    required ApproovRequestMutations requestMutations,
+  })  : _shouldProcessApproov = shouldProcessApproov,
+        _requestMutations = requestMutations {
     _delegateRequest = request;
   }
 
@@ -1904,7 +1838,12 @@ class _ApproovHttpClientRequest implements HttpClientRequest {
     if (!_requestUpdated) {
       final Uint8List? pendingBodyBytes = _snapshotPendingBodyBytes();
       // update the request while the headers can still be mutated
-      await ApproovService._updateRequest(_delegateRequest, pendingBodyBytes);
+      await ApproovService._updateRequest(
+        _delegateRequest,
+        pendingBodyBytes,
+        shouldProcessApproov: _shouldProcessApproov,
+        requestMutations: _requestMutations,
+      );
       _requestUpdated = true;
 
       // now perform any pending write operations
@@ -2171,7 +2110,8 @@ class ApproovHttpClient implements HttpClient {
     // them to be recreated
     Log.d("$TAG: pinning failure callback for $host");
     ApproovService._removeCertificates(host);
-    _delegatePinnedHttpClients.remove(host);
+    _delegatePinnedHttpClients
+        .removeWhere((key, _) => key == host || key.startsWith('$host|'));
 
     // call any user defined function for its side effects only (as we are going to reject anyway)
     Function(X509Certificate cert, String host, int port)?
@@ -2189,9 +2129,20 @@ class ApproovHttpClient implements HttpClient {
   ///
   /// @param url for which to set up pinning
   /// @return the future delegate HTTP client, or null if the no connnection client should be used
-  Future<HttpClient?> _createPinnedHttpClient(Uri url) async {
+  Future<HttpClient?> _createPinnedHttpClient(
+    Uri url, {
+    required bool shouldApplyPinning,
+  }) async {
     // enusre the SDK has been initialized at this point
     await ApproovService._requireInitialized();
+
+    if (!shouldApplyPinning) {
+      final unpinnedHttpClient = HttpClient();
+      _copyClientState(unpinnedHttpClient);
+      String isolate = ApproovService._isRootIsolate ? "root" : "background";
+      Log.d("$TAG: $isolate client ready for ${url.host}, pinning bypassed");
+      return unpinnedHttpClient;
+    }
 
     // prefetch the host certificates for the URL so this can be done in parallel with the token fetch
     final stopWatch = Stopwatch();
@@ -2220,7 +2171,7 @@ class ApproovHttpClient implements HttpClient {
       tokenStartTime = stopWatch.elapsedMilliseconds - certStartTime;
 
       // wait on the Approov token fetching to complete - but note we do not fail if a token fetch was not possible
-      _TokenFetchResult fetchResult = await futureApproovToken;
+      ApproovTokenFetchResult fetchResult = await futureApproovToken;
       tokenFinishTime =
           stopWatch.elapsedMilliseconds - tokenStartTime - certStartTime;
       Log.d(
@@ -2240,8 +2191,9 @@ class ApproovHttpClient implements HttpClient {
 
       // if we didn't manage to fetch a token before then it is possible we have never fetched a token and therefore
       // not have any available pins - we force another token fetch in that case so that we can check
-      if ((fetchResult.tokenFetchStatus != _TokenFetchStatus.SUCCESS) &&
-          (fetchResult.tokenFetchStatus != _TokenFetchStatus.UNKNOWN_URL)) {
+      if ((fetchResult.tokenFetchStatus != ApproovTokenFetchStatus.SUCCESS) &&
+          (fetchResult.tokenFetchStatus !=
+              ApproovTokenFetchStatus.UNKNOWN_URL)) {
         // perform another attempted token fetch
         fetchResult = await ApproovService._fetchApproovToken(urlString);
         Log.d(
@@ -2304,6 +2256,17 @@ class ApproovHttpClient implements HttpClient {
     }
 
     // copy state to the new delegate HttpClient
+    _copyClientState(newHttpClient);
+
+    // provide the new http client with a pinned security context
+    return newHttpClient;
+  }
+
+  String _delegateCacheKey(Uri url, bool shouldApplyPinning) {
+    return "${url.host}|p:${shouldApplyPinning ? 1 : 0}";
+  }
+
+  void _copyClientState(HttpClient newHttpClient) {
     newHttpClient.idleTimeout = _idleTimeout;
     newHttpClient.connectionTimeout = _connectionTimeout;
     if (_maxConnectionsPerHost != null) {
@@ -2326,9 +2289,6 @@ class ApproovHttpClient implements HttpClient {
           proxyCredential[2], proxyCredential[3]);
     }
     newHttpClient.badCertificateCallback = _pinningFailureCallback;
-
-    // provide the new http client with a pinned security context
-    return newHttpClient;
   }
 
   // Constructor for a custom Approov HttpClient. Either providing the initial
@@ -2359,7 +2319,10 @@ class ApproovHttpClient implements HttpClient {
   //
   // @param url for which to get the delegate HttpClient
   // @return the future delegate HttpClient (which will be null for no connection)
-  Future<HttpClient?> _getDelegateHttpClient(Uri url) async {
+  Future<HttpClient?> _getDelegateHttpClient(
+    Uri url, {
+    required bool shouldApplyPinning,
+  }) async {
     // check that the cache is still valid and hasn't been fully invalidated due to
     // a cnnfiguration epoch change which invalidates all clients because the pins
     // may have changed which impacts the pinned security contexts
@@ -2375,7 +2338,8 @@ class ApproovHttpClient implements HttpClient {
     // want to do this without an awaits because we wish parallel fetch operations
     // to the same domain to share the same delegate client if possible
     var createNewDelegate = false;
-    var futureDelegateClient = _delegatePinnedHttpClients[url.host];
+    final cacheKey = _delegateCacheKey(url, shouldApplyPinning);
+    var futureDelegateClient = _delegatePinnedHttpClients[cacheKey];
     if (futureDelegateClient == null) {
       // if the cache is empty for the host then we definitely need to create a new delegate
       // and we don't need to await on its result
@@ -2397,11 +2361,13 @@ class ApproovHttpClient implements HttpClient {
 
       // create a new delegate client and add its future to the cache
       String isolate = ApproovService._isRootIsolate ? "root" : "background";
-      Log.d(
-          "$TAG: $isolate creating pinned delegate creation for $url.host:$url.port");
-      futureDelegateClient = _createPinnedHttpClient(url);
+      Log.d("$TAG: $isolate creating pinned delegate creation for $cacheKey");
+      futureDelegateClient = _createPinnedHttpClient(
+        url,
+        shouldApplyPinning: shouldApplyPinning,
+      );
       _createdPinnedHttpClients.add(futureDelegateClient);
-      _delegatePinnedHttpClients[url.host] = futureDelegateClient;
+      _delegatePinnedHttpClients[cacheKey] = futureDelegateClient;
     }
 
     // provide the future delegate client
@@ -2411,24 +2377,38 @@ class ApproovHttpClient implements HttpClient {
   @override
   Future<HttpClientRequest> open(
       String method, String host, int port, String path) async {
-    // obtain the delegate HttpClient to be used (with null meaning no connection should
-    // be forced) and then wrap the provided HttpClientRequest
     Uri url = Uri(scheme: "https", host: host, port: port, path: path);
-    var delegateClient = await _getDelegateHttpClient(url);
+    final preparation =
+        await ApproovService._prepareRequestForApproov(method, url);
+    var delegateClient = await _getDelegateHttpClient(
+      preparation.uri,
+      shouldApplyPinning: preparation.shouldApplyPinning,
+    );
     if (delegateClient == null) delegateClient = _noConnectionClient;
-    return delegateClient.open(method, host, port, path).then((request) {
-      return _ApproovHttpClientRequest(request);
+    return delegateClient.openUrl(method, preparation.uri).then((request) {
+      return _ApproovHttpClientRequest(
+        request,
+        shouldProcessApproov: preparation.shouldProcessApproov,
+        requestMutations: preparation.requestMutations,
+      );
     });
   }
 
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
-    // obtain the delegate HttpClient to be used (with null meaning no connection should
-    // be fored) and then wrap the provided HttpClientRequest
-    var delegateClient = await _getDelegateHttpClient(url);
+    final preparation =
+        await ApproovService._prepareRequestForApproov(method, url);
+    var delegateClient = await _getDelegateHttpClient(
+      preparation.uri,
+      shouldApplyPinning: preparation.shouldApplyPinning,
+    );
     if (delegateClient == null) delegateClient = _noConnectionClient;
-    return delegateClient.openUrl(method, url).then((request) {
-      return _ApproovHttpClientRequest(request);
+    return delegateClient.openUrl(method, preparation.uri).then((request) {
+      return _ApproovHttpClientRequest(
+        request,
+        shouldProcessApproov: preparation.shouldProcessApproov,
+        requestMutations: preparation.requestMutations,
+      );
     });
   }
 
