@@ -54,8 +54,44 @@ export 'src/request_mutator.dart'
         ApproovTokenFetchResult,
         ApproovTokenFetchStatus;
 
+/// Service-layer logging levels for the Approov Flutter integration.
+///
+/// - [OFF]: disables all package logging output.
+/// - [ERROR]: logs only errors.
+/// - [WARNING]: logs warnings and errors.
+/// - [TRACE]: enables detailed service-layer tracing.
+enum ApproovLogLevel { OFF, ERROR, WARNING, TRACE }
+
+ApproovLogLevel _approovLoggingLevel = ApproovLogLevel.WARNING;
+
+class _ApproovLogFilter extends LogFilter {
+  @override
+  bool shouldLog(LogEvent event) {
+    switch (_approovLoggingLevel) {
+      case ApproovLogLevel.OFF:
+        return false;
+      case ApproovLogLevel.ERROR:
+        return event.level.index >= Level.error.index;
+      case ApproovLogLevel.WARNING:
+        return event.level.index >= Level.warning.index;
+      case ApproovLogLevel.TRACE:
+        return true;
+    }
+  }
+}
+
 // Logger
-final Logger Log = Logger();
+final Logger Log = Logger(
+  filter: _ApproovLogFilter(),
+  printer: PrettyPrinter(
+    methodCount: 0,
+    errorMethodCount: 8,
+    lineLength: 120,
+    colors: false,
+    printEmojis: false,
+    printTime: true,
+  ),
+);
 
 // ApproovService is a singleton for managing the underlying Approov SDK itself. It provides a number of user accessible
 // methods and management for its configuration.
@@ -117,6 +153,10 @@ class ApproovService {
   // true if the interceptor should proceed on network failures and not add an Approov token
   static bool _proceedOnNetworkFail = false;
 
+  // true if network-related token fetch failures should be injected in the configured
+  // token header as status enum values when no token is available.
+  static bool _useApproovStatusIfNoToken = false;
+
   // any header to be used for binding in Approov tokens or null if not set
   static String? _bindingHeader = null;
 
@@ -149,6 +189,112 @@ class ApproovService {
   // map of transactions that are being performed asynchronously in the platform layer
   static Map<String, Completer<dynamic>> _platformTransactions =
       Map<String, Completer<dynamic>>();
+
+  static const int _maxTraceLogValueLength = 1200;
+  static const int _maxTraceLogStringLength = 256;
+
+  static bool _isSensitiveLogField(String? key) {
+    if (key == null) return false;
+    final lowerKey = key.toLowerCase();
+    const sensitiveFields = <String>[
+      "token",
+      "securestring",
+      "signature",
+      "authorization",
+      "devkey",
+      "initialconfig",
+      "payload",
+      "newdef",
+      "message",
+      "data",
+      "measurementconfig",
+      "loggabletoken",
+      "traceid",
+    ];
+    for (final field in sensitiveFields) {
+      if (lowerKey.contains(field)) return true;
+    }
+    return false;
+  }
+
+  static dynamic _sanitizeForTraceLog(dynamic value,
+      {String? fieldName, int depth = 0}) {
+    if (depth > 4) return "<depth-limit>";
+    if (value == null) return "null";
+    if (value is Uint8List) return "<Uint8List len=${value.length}>";
+    if (value is ByteData) return "<ByteData len=${value.lengthInBytes}>";
+    if (value is Map) {
+      final sanitized = <String, dynamic>{};
+      value.forEach((key, mapValue) {
+        final mapKey = key.toString();
+        sanitized[mapKey] =
+            _sanitizeForTraceLog(mapValue, fieldName: mapKey, depth: depth + 1);
+      });
+      return sanitized;
+    }
+    if (value is Iterable) {
+      return value
+          .map((entry) => _sanitizeForTraceLog(entry, depth: depth + 1))
+          .toList(growable: false);
+    }
+    if (value is String) {
+      if (_isSensitiveLogField(fieldName)) {
+        return "<redacted len=${value.length}>";
+      }
+      if (value.length > _maxTraceLogStringLength) {
+        return "${value.substring(0, _maxTraceLogStringLength)}...(${value.length} chars)";
+      }
+      return value;
+    }
+    if (value is num || value is bool) return value;
+    return value.toString();
+  }
+
+  static String _traceLogValue(dynamic value, {String? fieldName}) {
+    final sanitized = _sanitizeForTraceLog(value, fieldName: fieldName);
+    final asString = sanitized.toString();
+    if (asString.length <= _maxTraceLogValueLength) return asString;
+    final overflow = asString.length - _maxTraceLogValueLength;
+    return "${asString.substring(0, _maxTraceLogValueLength)}...(+$overflow chars)";
+  }
+
+  static Future<T?> _invokeMethodChannel<T>(
+    MethodChannel channel,
+    String channelName,
+    String method, [
+    dynamic arguments,
+  ]) async {
+    final stopWatch = Stopwatch()..start();
+    Log.d(
+        "$TAG: -> [$channelName] $method args=${_traceLogValue(arguments, fieldName: method)}");
+    try {
+      final result = await channel.invokeMethod<T>(method, arguments);
+      Log.d(
+          "$TAG: <- [$channelName] $method ${stopWatch.elapsedMilliseconds}ms result=${_traceLogValue(result, fieldName: method)}");
+      return result;
+    } on PlatformException catch (err) {
+      Log.e(
+          "$TAG: [$channelName] $method failed after ${stopWatch.elapsedMilliseconds}ms: ${err.code} ${err.message}");
+      Log.d(
+          "$TAG: [$channelName] $method details=${_traceLogValue(err.details, fieldName: method)}");
+      rethrow;
+    } catch (err, stack) {
+      Log.e(
+          "$TAG: [$channelName] $method failed after ${stopWatch.elapsedMilliseconds}ms: $err");
+      Log.d("$TAG: [$channelName] $method stack: $stack");
+      rethrow;
+    }
+  }
+
+  static Future<T?> _invokeFgMethod<T>(String method,
+      [dynamic arguments]) async {
+    return await _invokeMethodChannel<T>(_fgChannel, "fg", method, arguments);
+  }
+
+  static Future<T?> _invokeBgMethod<T>(String method,
+      [dynamic arguments]) async {
+    return await _invokeMethodChannel<T>(_bgChannel, "bg", method, arguments);
+  }
 
   /**
    * Handles a response from the platform layer for an asynchronous transaction. This
@@ -189,6 +335,41 @@ class ApproovService {
       if (regExp.hasMatch(url)) return true;
     }
     return false;
+  }
+
+  /// Indicates if status fallback is allowed for token-header injection.
+  ///
+  /// @param status is the token fetch status to evaluate
+  /// @return true if this status is allowed to be injected as fallback
+  static bool _isAllowedStatusFallback(ApproovTokenFetchStatus status) {
+    switch (status) {
+      case ApproovTokenFetchStatus.NO_NETWORK:
+      case ApproovTokenFetchStatus.POOR_NETWORK:
+      case ApproovTokenFetchStatus.MITM_DETECTED:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /// Computes status fallback header value for token injection, if applicable.
+  ///
+  /// This is only used when:
+  /// - token fetch did not return a token
+  /// - `setUseApproovStatusIfNoToken(true)` is active
+  /// - fetch status is in the fallback allowlist
+  ///
+  /// @param fetchResult is the token fetch result for the current request
+  /// @return status enum string to inject in token header, or null if not allowed
+  static String? _statusFallbackHeaderValue(
+      ApproovTokenFetchResult fetchResult) {
+    if (!_useApproovStatusIfNoToken) return null;
+    if (fetchResult.token.isNotEmpty) return null;
+    final status = fetchResult.tokenFetchStatus;
+    if (_isAllowedStatusFallback(status)) {
+      return status.name;
+    }
+    return null;
   }
 
   /// Builds a request snapshot for mutator callbacks.
@@ -282,13 +463,13 @@ class ApproovService {
             "updateConfig": "auto",
             "comment": comment,
           };
-          await _bgChannel.invokeMethod('initialize', arguments);
+          await _invokeBgMethod('initialize', arguments);
 
           // set the user property to represent the framework being used
           arguments = <String, dynamic>{
             "property": "approov-service-flutter-httpclient",
           };
-          await _fgChannel.invokeMethod('setUserProperty', arguments);
+          await _invokeFgMethod('setUserProperty', arguments);
 
           // setup ready for callbacks from the platform layer if we are running
           // in the root isolate (this is not possible in background isolates)
@@ -329,6 +510,44 @@ class ApproovService {
     _proceedOnNetworkFail = proceed;
   }
 
+  /// Enables or disables status fallback in the configured token header when no token
+  /// is available.
+  ///
+  /// When enabled, and a mutator allows interceptor token processing to continue, the
+  /// configured token header receives status enum values for allowlisted statuses:
+  /// `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`.
+  ///
+  /// @param shouldUse is true to enable status fallback, false to disable
+  static void setUseApproovStatusIfNoToken(bool shouldUse) {
+    Log.d("$TAG: setUseApproovStatusIfNoToken $shouldUse");
+    _useApproovStatusIfNoToken = shouldUse;
+  }
+
+  /// Gets whether status fallback in the configured token header is enabled.
+  ///
+  /// @return true if status fallback is enabled, otherwise false
+  static bool getUseApproovStatusIfNoToken() {
+    return _useApproovStatusIfNoToken;
+  }
+
+  /// Sets service-layer logging level.
+  ///
+  /// This controls all logging emitted by this package. Set [ApproovLogLevel.TRACE]
+  /// when collecting diagnostics for customer issues.
+  ///
+  /// @param level is the desired service-layer logging level
+  static void setLoggingLevel(ApproovLogLevel level) {
+    _approovLoggingLevel = level;
+    Log.d("$TAG: logging level set to ${level.name}");
+  }
+
+  /// Gets the currently configured service-layer logging level.
+  ///
+  /// @return current service-layer logging level
+  static ApproovLogLevel getLoggingLevel() {
+    return _approovLoggingLevel;
+  }
+
   /// Sets a development key indicating that the app is a development version and it should
   /// pass attestation even if the app is not registered or it is running on an emulator. The
   /// development key value can be rotated at any point in the account if a version of the app
@@ -345,7 +564,7 @@ class ApproovService {
       "devKey": devKey,
     };
     try {
-      await _fgChannel.invokeMethod('setDevKey', arguments);
+      await _invokeFgMethod('setDevKey', arguments);
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -585,7 +804,7 @@ class ApproovService {
 
     // initiate the fetch at the platform layer
     try {
-      await _fgChannel.invokeMethod('fetchSecureString', arguments);
+      await _invokeFgMethod('fetchSecureString', arguments);
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -597,8 +816,7 @@ class ApproovService {
       final Map<String, dynamic> waitArgs = <String, dynamic>{
         "transactionID": transactionID,
       };
-      final results =
-          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      final results = await _invokeBgMethod('waitForFetchValue', waitArgs);
       completer.complete(results);
       _platformTransactions.remove(transactionID);
     }
@@ -610,6 +828,7 @@ class ApproovService {
       fetchResult = ApproovTokenFetchResult.fromTokenFetchResultMap(
         fetchResultMap,
         proceedOnNetworkFail: _proceedOnNetworkFail,
+        useApproovStatusIfNoToken: _useApproovStatusIfNoToken,
       );
       String isolate = _isRootIsolate ? "root" : "background";
       Log.d("$TAG: $isolate precheck: ${fetchResult.tokenFetchStatus.name}");
@@ -629,7 +848,7 @@ class ApproovService {
   static Future<String> getDeviceID() async {
     await _requireInitialized();
     try {
-      String deviceID = await _fgChannel.invokeMethod('getDeviceID');
+      String deviceID = await _invokeFgMethod('getDeviceID');
       Log.d("$TAG: getDeviceID: $deviceID");
       return deviceID;
     } catch (err) {
@@ -693,18 +912,18 @@ class ApproovService {
         "performCallBack": "NO",
       };
 
-      await _fgChannel.invokeMethod('fetchApproovToken', arguments);
+      await _invokeFgMethod('fetchApproovToken', arguments);
 
       final Map<String, dynamic> waitArgs = <String, dynamic>{
         "transactionID": transactionID,
       };
-      final results =
-          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      final results = await _invokeBgMethod('waitForFetchValue', waitArgs);
       _configEpoch = results['ConfigEpoch'];
       return ApproovTokenFetchResult.fromTokenFetchResultMap(
         results,
         requestURL: url,
         proceedOnNetworkFail: _proceedOnNetworkFail,
+        useApproovStatusIfNoToken: _useApproovStatusIfNoToken,
       );
     } catch (err) {
       throw ApproovException('$err');
@@ -728,7 +947,7 @@ class ApproovService {
       "data": data,
     };
     try {
-      await _fgChannel.invokeMethod('setDataHashInToken', arguments);
+      await _invokeFgMethod('setDataHashInToken', arguments);
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -782,7 +1001,7 @@ class ApproovService {
     };
     try {
       String messageSignature =
-          await _fgChannel.invokeMethod('getMessageSignature', arguments);
+          await _invokeFgMethod('getMessageSignature', arguments);
       return messageSignature;
     } catch (err) {
       throw ApproovException('$err');
@@ -799,8 +1018,7 @@ class ApproovService {
       "message": message,
     };
     try {
-      return await _fgChannel.invokeMethod(
-          'getAccountMessageSignature', arguments);
+      return await _invokeFgMethod('getAccountMessageSignature', arguments);
     } on MissingPluginException {
       return await getMessageSignature(message);
     } catch (err) {
@@ -846,7 +1064,7 @@ class ApproovService {
 
     // start the secure string fetch in the platform layer
     try {
-      await _fgChannel.invokeMethod('fetchSecureString', arguments);
+      await _invokeFgMethod('fetchSecureString', arguments);
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -858,8 +1076,7 @@ class ApproovService {
       final Map<String, dynamic> waitArgs = <String, dynamic>{
         "transactionID": transactionID,
       };
-      final results =
-          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      final results = await _invokeBgMethod('waitForFetchValue', waitArgs);
       completer.complete(results);
       _platformTransactions.remove(transactionID);
     }
@@ -871,6 +1088,7 @@ class ApproovService {
       fetchResult = ApproovTokenFetchResult.fromTokenFetchResultMap(
         fetchResultMap,
         proceedOnNetworkFail: _proceedOnNetworkFail,
+        useApproovStatusIfNoToken: _useApproovStatusIfNoToken,
       );
       String isolate = _isRootIsolate ? "root" : "background";
       Log.d(
@@ -913,7 +1131,7 @@ class ApproovService {
 
     // start the custom JWT creation in the platform layer
     try {
-      await _fgChannel.invokeMethod('fetchCustomJWT', arguments);
+      await _invokeFgMethod('fetchCustomJWT', arguments);
     } catch (err) {
       throw ApproovException('$err');
     }
@@ -925,8 +1143,7 @@ class ApproovService {
       final Map<String, dynamic> waitArgs = <String, dynamic>{
         "transactionID": transactionID,
       };
-      final results =
-          await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+      final results = await _invokeBgMethod('waitForFetchValue', waitArgs);
       completer.complete(results);
       _platformTransactions.remove(transactionID);
     }
@@ -938,6 +1155,7 @@ class ApproovService {
       fetchResult = ApproovTokenFetchResult.fromTokenFetchResultMap(
         fetchResultMap,
         proceedOnNetworkFail: _proceedOnNetworkFail,
+        useApproovStatusIfNoToken: _useApproovStatusIfNoToken,
       );
       String isolate = _isRootIsolate ? "root" : "background";
       Log.d(
@@ -965,8 +1183,8 @@ class ApproovService {
   static Future<String> _fetchConfig() async {
     await _requireInitialized();
     try {
-      String config = await _fgChannel.invokeMethod('fetchConfig');
-      _configEpoch = await _fgChannel.invokeMethod('getConfigEpoch');
+      String config = await _invokeFgMethod('fetchConfig');
+      _configEpoch = await _invokeFgMethod('getConfigEpoch');
       return config;
     } catch (err) {
       throw ApproovException('$err');
@@ -989,7 +1207,7 @@ class ApproovService {
       "pinType": pinType,
     };
     try {
-      Map pins = await _bgChannel.invokeMethod('getPins', arguments);
+      Map pins = await _invokeBgMethod('getPins', arguments);
       return pins;
     } catch (err) {
       throw ApproovException('$err');
@@ -1018,7 +1236,7 @@ class ApproovService {
       };
 
       // start the Approov token fetching process
-      await _fgChannel.invokeMethod('fetchApproovToken', arguments);
+      await _invokeFgMethod('fetchApproovToken', arguments);
 
       // if we are running in a background isolate then we cannot receive callbacks
       // so we must wait on the result, but we do this in the background channel which
@@ -1027,8 +1245,7 @@ class ApproovService {
         final Map<String, dynamic> waitArgs = <String, dynamic>{
           "transactionID": transactionID,
         };
-        final results =
-            await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+        final results = await _invokeBgMethod('waitForFetchValue', waitArgs);
         completer.complete(results);
         _platformTransactions.remove(transactionID);
       }
@@ -1041,6 +1258,7 @@ class ApproovService {
         results,
         requestURL: url,
         proceedOnNetworkFail: _proceedOnNetworkFail,
+        useApproovStatusIfNoToken: _useApproovStatusIfNoToken,
       );
       return tokenFetchResult;
     } catch (err) {
@@ -1087,7 +1305,7 @@ class ApproovService {
 
       // initiate the secure string fetch in the platform layer
       try {
-        await _fgChannel.invokeMethod('fetchSecureString', arguments);
+        await _invokeFgMethod('fetchSecureString', arguments);
       } catch (err) {
         throw ApproovException('$err');
       }
@@ -1099,8 +1317,7 @@ class ApproovService {
         final Map<String, dynamic> waitArgs = <String, dynamic>{
           "transactionID": transactionID,
         };
-        final results =
-            await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+        final results = await _invokeBgMethod('waitForFetchValue', waitArgs);
         completer.complete(results);
         _platformTransactions.remove(transactionID);
       }
@@ -1113,6 +1330,7 @@ class ApproovService {
           fetchResultMap,
           requestURL: url,
           proceedOnNetworkFail: _proceedOnNetworkFail,
+          useApproovStatusIfNoToken: _useApproovStatusIfNoToken,
         );
         String isolate = _isRootIsolate ? "root" : "background";
         Log.d(
@@ -1234,7 +1452,9 @@ class ApproovService {
       return;
     }
 
-    if (fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS) {
+    final statusFallbackValue = _statusFallbackHeaderValue(fetchResult);
+    if (fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS &&
+        fetchResult.token.isNotEmpty) {
       // we successfully obtained a token so add it to the header for the request
       request.headers.set(
           _approovTokenHeader, _approovTokenPrefix + fetchResult.token,
@@ -1246,6 +1466,13 @@ class ApproovService {
         request.headers.set(traceIDHeader, traceID, preserveHeaderCase: true);
         requestMutations.setTraceIDHeaderKey(traceIDHeader);
       }
+    } else if (statusFallbackValue != null) {
+      request.headers.set(
+          _approovTokenHeader, _approovTokenPrefix + statusFallbackValue,
+          preserveHeaderCase: true);
+      requestMutations.setTokenHeaderKey(_approovTokenHeader);
+      Log.d(
+          "$TAG: $isolate updateRequest fallback token header injected for $host: $statusFallbackValue");
     }
 
     // we now deal with any header substitutions, which may require further fetches but these
@@ -1273,7 +1500,7 @@ class ApproovService {
 
         // initiate the secure string fetch in the platform layer
         try {
-          await _fgChannel.invokeMethod('fetchSecureString', arguments);
+          await _invokeFgMethod('fetchSecureString', arguments);
         } catch (err) {
           throw ApproovException('$err');
         }
@@ -1285,8 +1512,7 @@ class ApproovService {
           final Map<String, dynamic> waitArgs = <String, dynamic>{
             "transactionID": transactionID,
           };
-          final results =
-              await _bgChannel.invokeMethod('waitForFetchValue', waitArgs);
+          final results = await _invokeBgMethod('waitForFetchValue', waitArgs);
           completer.complete(results);
           _platformTransactions.remove(transactionID);
         }
@@ -1300,6 +1526,7 @@ class ApproovService {
             fetchResultMap,
             requestURL: requestUrl,
             proceedOnNetworkFail: _proceedOnNetworkFail,
+            useApproovStatusIfNoToken: _useApproovStatusIfNoToken,
           );
           String isolate = _isRootIsolate ? "root" : "background";
           Log.d(
@@ -1602,6 +1829,7 @@ class ApproovService {
         // determine the channel to be used depending on if it is the root or
         // a background isolate
         MethodChannel channel = _isRootIsolate ? _fgChannel : _bgChannel;
+        String channelName = _isRootIsolate ? "fg" : "bg";
 
         // create the arguments for the transaction
         final Map<String, dynamic> arguments = <String, dynamic>{
@@ -1611,7 +1839,8 @@ class ApproovService {
         };
 
         // start the certificate fetching process
-        await channel.invokeMethod('fetchHostCertificates', arguments);
+        await _invokeMethodChannel(
+            channel, channelName, 'fetchHostCertificates', arguments);
 
         // if we are running in a background isolate then we cannot receive callbacks
         // so we must wait on the result, but we do this in the background channel which
@@ -1620,8 +1849,8 @@ class ApproovService {
           final Map<String, dynamic> waitArgs = <String, dynamic>{
             "transactionID": transactionID,
           };
-          final results =
-              await channel.invokeMethod('waitForHostCertificates', waitArgs);
+          final results = await _invokeMethodChannel(
+              channel, channelName, 'waitForHostCertificates', waitArgs);
           completer.complete(results);
           _platformTransactions.remove(transactionID);
         }

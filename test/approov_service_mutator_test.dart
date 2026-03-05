@@ -7,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   tearDown(() {
     ApproovService.setServiceMutator(null);
+    ApproovService.setLoggingLevel(ApproovLogLevel.WARNING);
+    ApproovService.setUseApproovStatusIfNoToken(false);
   });
 
   test('setServiceMutator and aliases update active mutator', () {
@@ -73,6 +75,34 @@ void main() {
           'https://api.example.com'),
       isFalse,
     );
+    expect(
+      mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.NO_NETWORK,
+              useApproovStatusIfNoToken: true),
+          'https://api.example.com'),
+      isTrue,
+    );
+    expect(
+      mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.POOR_NETWORK,
+              useApproovStatusIfNoToken: true),
+          'https://api.example.com'),
+      isTrue,
+    );
+    expect(
+      mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.MITM_DETECTED,
+              useApproovStatusIfNoToken: true),
+          'https://api.example.com'),
+      isTrue,
+    );
+    expect(
+      mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
+              useApproovStatusIfNoToken: true),
+          'https://api.example.com'),
+      isFalse,
+    );
   });
 
   test('default mutator handles header and query substitution statuses', () {
@@ -100,6 +130,25 @@ void main() {
         .handleFetchTokenResult(_result(ApproovTokenFetchStatus.SUCCESS));
     expect(mutator.called, isTrue);
   });
+
+  test('setLoggingLevel updates active level', () {
+    ApproovService.setLoggingLevel(ApproovLogLevel.TRACE);
+    expect(ApproovService.getLoggingLevel(), ApproovLogLevel.TRACE);
+
+    ApproovService.setLoggingLevel(ApproovLogLevel.ERROR);
+    expect(ApproovService.getLoggingLevel(), ApproovLogLevel.ERROR);
+
+    ApproovService.setLoggingLevel(ApproovLogLevel.OFF);
+    expect(ApproovService.getLoggingLevel(), ApproovLogLevel.OFF);
+  });
+
+  test('setUseApproovStatusIfNoToken updates active value', () {
+    expect(ApproovService.getUseApproovStatusIfNoToken(), isFalse);
+    ApproovService.setUseApproovStatusIfNoToken(true);
+    expect(ApproovService.getUseApproovStatusIfNoToken(), isTrue);
+    ApproovService.setUseApproovStatusIfNoToken(false);
+    expect(ApproovService.getUseApproovStatusIfNoToken(), isFalse);
+  });
 }
 
 class _RecordingMutator extends ApproovServiceMutator {
@@ -116,6 +165,7 @@ class _RecordingMutator extends ApproovServiceMutator {
 ApproovTokenFetchResult _result(
   ApproovTokenFetchStatus status, {
   bool proceedOnNetworkFail = false,
+  bool useApproovStatusIfNoToken = false,
 }) {
   return ApproovTokenFetchResult(
     tokenFetchStatus: status,
@@ -130,6 +180,6 @@ ApproovTokenFetchResult _result(
     traceID: '',
     requestURL: 'https://api.example.com',
     proceedOnNetworkFail: proceedOnNetworkFail,
-    useApproovStatusIfNoToken: false,
+    useApproovStatusIfNoToken: useApproovStatusIfNoToken,
   );
 }

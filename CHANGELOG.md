@@ -1,7 +1,16 @@
+## [3.5.7] - (05-March-2026)
+- Add `setUseApproovStatusIfNoToken(bool)` and `getUseApproovStatusIfNoToken()` to control token-header status fallback behavior.
+- Add interceptor token-header fallback injection for allowlisted statuses when no token is available: `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`.
+- Preserve mutator-first decision ordering: fallback injection only occurs when `handleInterceptorFetchTokenResult(...)` allows continuation.
+- Ensure configured token header name and prefix from `setApproovHeader(...)` apply equally to JWT and status fallback values.
+- Update `USAGE.md` and `REFERENCE.md` with status-fallback behavior, defaults, allowlist, and mutator interaction.
+
 ## [3.5.6] - (04-March-2026)
 - Add `ApproovServiceMutator` support across fetch APIs, request mutation flow, and pinning gate callbacks.
 - Add request mutation models: `ApproovRequestMutations`, `ApproovRequestSnapshot`, `ApproovTokenFetchResult`, and `ApproovTokenFetchStatus`.
 - Add `setServiceMutator()` / `getServiceMutator()` plus deprecated alias methods for naming parity.
+- Add service-layer logging controls: `ApproovLogLevel` with `OFF`, `ERROR`, `WARNING`, `TRACE` and `setLoggingLevel()` / `getLoggingLevel()`.
+- Add detailed TRACE diagnostics for platform-channel method calls, timing, and failures (with sensitive-value redaction).
 - Add automatic query substitution APIs: `addSubstitutionQueryParam()` and `removeSubstitutionQueryParam()`.
 - Restructure docs to OkHttp-style layout with `README.md`, `USAGE.md`, and `REFERENCE.md`.
 - (fix) Don't throw exception on missing public key
