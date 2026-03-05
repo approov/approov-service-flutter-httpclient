@@ -449,7 +449,10 @@ class ApproovServiceMutator {
   /// Default behavior:
   /// - continues for `SUCCESS` and `UNPROTECTED_URL`
   /// - skips token/header mutation for `NO_APPROOV_SERVICE` and `UNKNOWN_URL`
-  /// - on network failures, either throws or skips based on
+  /// - on `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED`, continues when
+  ///   `approovResults.useApproovStatusIfNoToken` is enabled so service-layer
+  ///   token-header fallback can inject the status enum
+  /// - otherwise for network failures, either throws or skips based on
   ///   `approovResults.proceedOnNetworkFail`
   /// - throws [ApproovException] for all other statuses
   ///
@@ -466,6 +469,9 @@ class ApproovServiceMutator {
       case ApproovTokenFetchStatus.NO_NETWORK:
       case ApproovTokenFetchStatus.POOR_NETWORK:
       case ApproovTokenFetchStatus.MITM_DETECTED:
+        if (approovResults.useApproovStatusIfNoToken) {
+          return true;
+        }
         if (!approovResults.proceedOnNetworkFail) {
           throw ApproovNetworkException(
               "Approov token fetch for $url: ${status.name}");

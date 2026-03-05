@@ -21,7 +21,7 @@ By default, `ApproovServiceMutator.DEFAULT` preserves existing Flutter service b
 | Approov Fetch Status | Default Action |
 | --- | --- |
 | `SUCCESS` | Continue |
-| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | Throw `ApproovNetworkException` (unless `setProceedOnNetworkFail(true)` is active in interceptor flows) |
+| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | If `setUseApproovStatusIfNoToken(true)` is active, interceptor flow continues and status fallback can be injected in the token header. Otherwise throw `ApproovNetworkException` (unless `setProceedOnNetworkFail(true)` is active in interceptor flows). |
 | `REJECTED` | Throw `ApproovRejectionException` |
 | `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: continue without token. |
 | `UNKNOWN_URL` | Interceptor flow continues without token |
@@ -53,6 +53,51 @@ To reset to defaults:
 ```dart
 ApproovService.setServiceMutator(null);
 ```
+
+## Service-layer logging
+
+Use service-layer logging when diagnosing production issues.
+
+```dart
+ApproovService.setLoggingLevel(ApproovLogLevel.TRACE);
+```
+
+Available levels:
+
+- `ApproovLogLevel.OFF`
+- `ApproovLogLevel.ERROR`
+- `ApproovLogLevel.WARNING`
+- `ApproovLogLevel.TRACE`
+
+`TRACE` enables detailed diagnostics from the service layer, including platform channel method calls, timing, and result/error traces (with sensitive values redacted).
+
+## Failure status fallback in token header
+
+Use this when you want backend services to receive a fetch-failure reason in the configured token header when no token is available.
+
+```dart
+ApproovService.setUseApproovStatusIfNoToken(true);
+```
+
+Defaults:
+
+- `useApproovStatusIfNoToken = false`
+- fallback allowlist: `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`
+
+Behavior in interceptor request flow:
+
+1. Approov token fetch runs as normal.
+2. Mutator callback `handleInterceptorFetchTokenResult(...)` is evaluated first.
+3. If mutator allows processing:
+   - `SUCCESS` + token present -> inject `<prefix><jwt>`
+   - no token + status-fallback enabled + allowlisted status -> inject `<prefix><STATUS_ENUM>`
+4. Otherwise no fallback value is injected.
+
+Notes:
+
+- Header name and prefix come from `setApproovHeader(header, prefix)`.
+- Fallback is not injected by default for `NO_APPROOV_SERVICE`, `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses.
+- Trace ID behavior is unchanged (only standard token success path controls trace ID injection).
 
 ## Message signing with a mutator
 

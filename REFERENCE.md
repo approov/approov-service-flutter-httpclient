@@ -39,6 +39,23 @@ Alias for `setServiceMutator`.
 
 Alias for `getServiceMutator`.
 
+## Logging APIs
+
+### `setLoggingLevel(ApproovLogLevel level)`
+
+Sets service-layer log verbosity:
+
+- `ApproovLogLevel.OFF`
+- `ApproovLogLevel.ERROR`
+- `ApproovLogLevel.WARNING`
+- `ApproovLogLevel.TRACE`
+
+`TRACE` enables detailed diagnostics in the service layer, including platform method call/return timing and error tracing with sensitive values redacted.
+
+### `getLoggingLevel()`
+
+Returns the currently configured service-layer logging level.
+
 ## Network behavior
 
 ### `setProceedOnNetworkFail(bool proceed)`
@@ -48,6 +65,11 @@ Controls whether interceptor flows can continue when Approov fetch fails due to 
 ### `setApproovHeader(String header, String prefix)`
 
 Sets token header name and optional prefix.
+
+This applies to both:
+
+- normal token injection (`<prefix><jwt>`)
+- optional status fallback injection (`<prefix><STATUS_ENUM>`)
 
 ### `setApproovTraceIDHeader(String? header)`
 
@@ -60,6 +82,20 @@ Returns the current trace ID header or `null`.
 ### `setBindingHeader(String header)`
 
 Binds tokens to a header value hash.
+
+### `setUseApproovStatusIfNoToken(bool shouldUse)`
+
+Enables/disables status fallback in the configured token header when no token is available.
+
+When enabled, and interceptor mutator processing allows continuation, allowlisted token-fetch failure statuses can be sent in the token header:
+
+- `NO_NETWORK`
+- `POOR_NETWORK`
+- `MITM_DETECTED`
+
+### `getUseApproovStatusIfNoToken()`
+
+Returns the current status-fallback toggle value.
 
 ### `addExclusionURLRegex(String urlRegex)`
 
