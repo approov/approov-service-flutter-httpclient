@@ -179,6 +179,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       resultMap.put("TransactionID", transactionID);
       resultMap.put("TokenFetchStatus", tokenFetchResult.getStatus().toString());
       resultMap.put("Token", tokenFetchResult.getToken());
+      resultMap.put("TraceID", tokenFetchResult.getTraceID());
       resultMap.put("SecureString", tokenFetchResult.getSecureString());
       resultMap.put("ARC", tokenFetchResult.getARC());
       resultMap.put("RejectionReasons", tokenFetchResult.getRejectionReasons());

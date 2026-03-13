@@ -530,6 +530,41 @@ class ApproovService {
     return _useApproovStatusIfNoToken;
   }
 
+  static void _applyTokenFetchResultHeaders(
+    void Function(String name, String value) setHeader,
+    ApproovTokenFetchResult fetchResult,
+    ApproovRequestMutations requestMutations,
+  ) {
+    final statusFallbackValue = _statusFallbackHeaderValue(fetchResult);
+    if (fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS &&
+        fetchResult.token.isNotEmpty) {
+      setHeader(_approovTokenHeader, _approovTokenPrefix + fetchResult.token);
+      requestMutations.setTokenHeaderKey(_approovTokenHeader);
+      final String? traceIDHeader = _approovTraceIDHeader;
+      final String traceID = fetchResult.traceID;
+      if ((traceIDHeader != null) && traceID.isNotEmpty) {
+        setHeader(traceIDHeader, traceID);
+        requestMutations.setTraceIDHeaderKey(traceIDHeader);
+      }
+    } else if (statusFallbackValue != null) {
+      setHeader(_approovTokenHeader, _approovTokenPrefix + statusFallbackValue);
+      requestMutations.setTokenHeaderKey(_approovTokenHeader);
+    }
+  }
+
+  @visibleForTesting
+  static void applyTokenFetchResultHeadersForTesting(
+    Map<String, String> headers,
+    ApproovTokenFetchResult fetchResult,
+    ApproovRequestMutations requestMutations,
+  ) {
+    _applyTokenFetchResultHeaders(
+      (name, value) => headers[name] = value,
+      fetchResult,
+      requestMutations,
+    );
+  }
+
   /// Sets service-layer logging level.
   ///
   /// This controls all logging emitted by this package. Set [ApproovLogLevel.TRACE]
@@ -1453,24 +1488,14 @@ class ApproovService {
     }
 
     final statusFallbackValue = _statusFallbackHeaderValue(fetchResult);
-    if (fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS &&
-        fetchResult.token.isNotEmpty) {
-      // we successfully obtained a token so add it to the header for the request
-      request.headers.set(
-          _approovTokenHeader, _approovTokenPrefix + fetchResult.token,
-          preserveHeaderCase: true);
-      requestMutations.setTokenHeaderKey(_approovTokenHeader);
-      final String? traceIDHeader = _approovTraceIDHeader;
-      final String traceID = fetchResult.traceID;
-      if ((traceIDHeader != null) && traceID.isNotEmpty) {
-        request.headers.set(traceIDHeader, traceID, preserveHeaderCase: true);
-        requestMutations.setTraceIDHeaderKey(traceIDHeader);
-      }
-    } else if (statusFallbackValue != null) {
-      request.headers.set(
-          _approovTokenHeader, _approovTokenPrefix + statusFallbackValue,
-          preserveHeaderCase: true);
-      requestMutations.setTokenHeaderKey(_approovTokenHeader);
+    _applyTokenFetchResultHeaders(
+      (name, value) =>
+          request.headers.set(name, value, preserveHeaderCase: true),
+      fetchResult,
+      requestMutations,
+    );
+    if (requestMutations.tokenHeaderKey != null &&
+        fetchResult.tokenFetchStatus != ApproovTokenFetchStatus.SUCCESS) {
       Log.d(
           "$TAG: $isolate updateRequest fallback token header injected for $host: $statusFallbackValue");
     }
