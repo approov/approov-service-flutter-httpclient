@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:approov_service_flutter_httpclient/approov_service_flutter_httpclient.dart';
 import 'package:crypto/crypto.dart';
@@ -31,6 +32,7 @@ void main() {
     bgChannel.setMockMethodCallHandler(null);
     ApproovService.disableMessageSigning();
     ApproovService.setServiceMutator(null);
+    ApproovService.setApproovTraceIDHeader('Approov-TraceID');
   });
 
   test('signature base matches HTTP message signatures format', () {
@@ -249,6 +251,40 @@ void main() {
       ['setUserProperty', 'getAccountMessageSignature', 'getMessageSignature'],
     );
   });
+
+  test('service layer adds trace header by default when fetch result has one',
+      () {
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _successfulFetchResult(traceID: 'trace-id-123'),
+      mutations,
+    );
+
+    expect(headers['Approov-Token'], 'trace-test-token');
+    expect(headers['Approov-TraceID'], 'trace-id-123');
+    expect(mutations.tokenHeaderKey, 'Approov-Token');
+    expect(mutations.traceIDHeaderKey, 'Approov-TraceID');
+  });
+
+  test('service layer omits trace header when disabled', () {
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovTraceIDHeader(null);
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _successfulFetchResult(traceID: 'trace-id-123'),
+      mutations,
+    );
+
+    expect(headers['Approov-Token'], 'trace-test-token');
+    expect(headers.containsKey('Approov-TraceID'), isFalse);
+    expect(mutations.tokenHeaderKey, 'Approov-Token');
+    expect(mutations.traceIDHeaderKey, isNull);
+  });
 }
 
 ApproovSigningContext _buildSigningContext(Uri uri) {
@@ -264,5 +300,23 @@ ApproovSigningContext _buildSigningContext(Uri uri) {
     onSetHeader: (name, value) => headers[name.toLowerCase()] = [value],
     onAddHeader: (name, value) =>
         headers.putIfAbsent(name.toLowerCase(), () => <String>[]).add(value),
+  );
+}
+
+ApproovTokenFetchResult _successfulFetchResult({required String traceID}) {
+  return ApproovTokenFetchResult(
+    tokenFetchStatus: ApproovTokenFetchStatus.SUCCESS,
+    token: 'trace-test-token',
+    secureString: null,
+    arc: 'ARC',
+    rejectionReasons: '',
+    isConfigChanged: false,
+    isForceApplyPins: false,
+    measurementConfig: Uint8List(0),
+    loggableToken: 'trace-loggable',
+    traceID: traceID,
+    requestURL: 'https://api.example.com',
+    proceedOnNetworkFail: false,
+    useApproovStatusIfNoToken: false,
   );
 }
