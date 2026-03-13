@@ -1,7 +1,7 @@
 # Ignore MacOS .DS_Store files
 .DS_Store
 .gradle
-.dart_tool
+.dart_tool/
 pubspec.lock
 .idea
 android/local.properties
