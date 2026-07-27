@@ -446,7 +446,17 @@ class ApproovService {
       bool isRootIsolate = (RootIsolateToken.instance != null);
       String isolate = isRootIsolate ? "root" : "background";
       if (_isInitialized &&
-          ((comment == null) || !comment.startsWith("reinit"))) {
+          ((comment == null) || !comment.startsWith("reinit")) &&
+          config.isEmpty) {
+        // Empty configuration after any prior initialization (valid or bypass)
+        // is ignored outright - it must never silently drop an already-active
+        // configuration back into bypass mode (TESTING_REQUIREMENTS.md §1,
+        // "Empty Configuration after Valid Configuration").
+        Log.d(
+            "$TAG: $isolate initialization ignoring empty configuration; already initialized");
+      } else if (_isInitialized &&
+          ((comment == null) || !comment.startsWith("reinit")) &&
+          (_initialConfig?.isNotEmpty ?? false)) {
         // this is a reinitialization attempt and we need to check if the config is the same
         if (_initialConfig != config) {
           throw ApproovException(
@@ -455,6 +465,10 @@ class ApproovService {
         Log.d(
             "$TAG: $isolate initialization ignoring attempt with the same config");
       } else {
+        // Reached when: never initialized, OR previously in bypass mode and now
+        // given any config (the "Empty Then Valid Configuration" upgrade path -
+        // this must fall through to a real initialization below), OR the comment
+        // starts with "reinit".
         // perform the actual initialization
         try {
           // initialize the Approov SDK
