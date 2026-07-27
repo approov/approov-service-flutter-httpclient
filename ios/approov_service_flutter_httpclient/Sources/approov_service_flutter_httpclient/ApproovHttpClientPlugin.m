@@ -390,6 +390,12 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 @end
 
+// Returns true when the service layer is initialized and Approov-backed request
+// protection is active (i.e. initialized with a non-empty config).
+static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
+    return (self.initializedConfig != nil) && (self.initializedConfig.length != 0);
+}
+
 // ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
 // MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
 // presented on any particular URL to implement the pinning.
@@ -430,25 +436,36 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
         // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
         // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
         // that the SDK is already initialized whereas this native layer holds its state
+        if (ApproovHttpClientIsEnabled(self) && initialConfig.length == 0) {
+            NSLog(@"ApproovService: already initialized with a valid config; ignoring empty configuration");
+            result(nil);
+            return;
+        }
+
         if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || ![_initializedComment isEqualToString:commentString]) {
             // this is a new config or a reinitialization
             NSString *updateConfig = nil;
             if (call.arguments[@"updateConfig"] != [NSNull null])
                 updateConfig = call.arguments[@"updateConfig"];
-            [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
-            if (error != nil) {
-                // check if the error message contains "Approov SDK already initialized"
-                if ([error.localizedDescription rangeOfString:@"Approov SDK already initialized" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
-                    // different isolates and the initialization was made by a different quickstart (note we don't currently check
-                    // for the compatibility of the SDK parameters but a future version of the SDK will do this to avoid needing to
-                    // catch this at all)
-                    NSLog(@"ApproovService: Ignoring initialization error in Approov SDK: %@", error.localizedDescription);
-                } else {
-                    result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
-                                            message:error.domain
-                                            details:error.localizedDescription]);
-                    return;
+            // Bypass mode: an empty config skips the native SDK call entirely, but
+            // the service layer still records itself as initialized below, so
+            // isInitialized is true and isApproovEnabled is false.
+            if (initialConfig.length != 0) {
+                [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
+                if (error != nil) {
+                    // check if the error message contains "Approov SDK already initialized"
+                    if ([error.localizedDescription rangeOfString:@"Approov SDK already initialized" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                        // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
+                        // different isolates and the initialization was made by a different quickstart (note we don't currently check
+                        // for the compatibility of the SDK parameters but a future version of the SDK will do this to avoid needing to
+                        // catch this at all)
+                        NSLog(@"ApproovService: Ignoring initialization error in Approov SDK: %@", error.localizedDescription);
+                    } else {
+                        result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
+                                                message:error.domain
+                                                details:error.localizedDescription]);
+                        return;
+                    }
                 }
             }
             _initializedConfig = initialConfig;
@@ -458,6 +475,10 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             // the previous initialization is compatible
             result(nil);
         }
+    } else if ([@"isInitialized" isEqualToString:call.method]) {
+        result(@(_initializedConfig != nil));
+    } else if ([@"isApproovEnabled" isEqualToString:call.method]) {
+        result(@(ApproovHttpClientIsEnabled(self)));
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
         _configEpoch++;
         result([Approov fetchConfig]);
