@@ -1,3 +1,7 @@
+## [3.5.7] - (27-July-2026)
+- Add Swift Package Manager (SPM) support for iOS, alongside continued CocoaPods support.
+- Move iOS native sources from `ios/Classes` to `ios/approov_service_flutter_httpclient/Sources/approov_service_flutter_httpclient` per Flutter's plugin SPM layout.
+
 ## [3.5.6] - (05-March-2026)
 - Add `ApproovServiceMutator` support across fetch APIs, request mutation flow, and pinning gate callbacks.
 - Add request mutation models: `ApproovRequestMutations`, `ApproovRequestSnapshot`, `ApproovTokenFetchResult`, and `ApproovTokenFetchStatus`.

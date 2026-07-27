@@ -17,7 +17,7 @@
 * OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-#import "ApproovHttpClientPlugin.h"
+#import "./include/approov_service_flutter_httpclient/ApproovHttpClientPlugin.h"
 #import "Approov/Approov.h"
 
 // Timeout in seconds for a getting the host certificates
