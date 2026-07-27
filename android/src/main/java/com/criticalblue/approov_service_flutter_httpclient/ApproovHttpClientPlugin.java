@@ -234,6 +234,14 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // across multiple different isolates which have independent Dart level state.
   private int configEpoch = 0;
 
+  /**
+   * Returns true when the service layer is initialized and Approov-backed
+   * request protection is active (i.e. initialized with a non-empty config).
+   */
+  private boolean isApproovEnabled() {
+    return (initializedConfig != null) && !initializedConfig.isEmpty();
+  }
+
   // Handler for the main thread to allow call backs since they must be in the context of that thread
   private Handler handler;
 
@@ -276,13 +284,26 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
         commentString = "";
       }
 
+      // An empty config after a valid config is already active must be ignored -
+      // it must never silently drop back into bypass mode.
+      if (isApproovEnabled() && initialConfig.isEmpty()) {
+        Log.i("ApproovService", "already initialized with a valid config; ignoring empty configuration");
+        result.success(null);
+        return;
+      }
+
       // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
       // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
       // that the SDK is already initialized whereas this native layer holds its state
       if ((initializedConfig == null) || !initializedConfig.equals(initialConfig) || !initializedComment.equals(commentString)) {
         // this is a new config or a reinitialization
         try {
-          Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
+          // Bypass mode: an empty config skips the native SDK call entirely, but
+          // the service layer still records itself as initialized below, so
+          // isInitialized() is true and isApproovEnabled() is false.
+          if (!initialConfig.isEmpty()) {
+            Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
+          }
         } catch (IllegalStateException e) {
           // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
           // different isolates and the initialization was made by a different quickstart (note we don't currently check
@@ -300,6 +321,10 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
         // the previous initialization is compatible
         result.success(null);
       }
+    } else if (call.method.equals("isInitialized")) {
+      result.success(initializedConfig != null);
+    } else if (call.method.equals("isApproovEnabled")) {
+      result.success(isApproovEnabled());
     } else if (call.method.equals("fetchConfig")) {
       try {
         configEpoch++;
