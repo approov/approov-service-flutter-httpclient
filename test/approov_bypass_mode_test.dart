@@ -73,4 +73,40 @@ void main() {
       ],
     );
   });
+
+  test('isInitialized and isApproovEnabled reflect bypass mode', () async {
+    fgHandler = (call) async {
+      switch (call.method) {
+        case 'isInitialized':
+          return true;
+        case 'isApproovEnabled':
+          return false;
+        default:
+          return null;
+      }
+    };
+
+    await ApproovService.initialize('', 'reinit-c');
+
+    expect(await ApproovService.isInitialized(), true);
+    expect(await ApproovService.isApproovEnabled(), false);
+  });
+
+  test('isInitialized and isApproovEnabled reflect protected mode', () async {
+    fgHandler = (call) async {
+      switch (call.method) {
+        case 'isInitialized':
+          return true;
+        case 'isApproovEnabled':
+          return true;
+        default:
+          return null;
+      }
+    };
+
+    await ApproovService.initialize('real-config-3', 'reinit-d');
+
+    expect(await ApproovService.isInitialized(), true);
+    expect(await ApproovService.isApproovEnabled(), true);
+  });
 }

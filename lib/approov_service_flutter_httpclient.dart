@@ -905,6 +905,39 @@ class ApproovService {
     }
   }
 
+  /// Returns whether the Approov service layer has been initialized. This is true
+  /// even when initialized in bypass mode with an empty configuration string - it
+  /// does not indicate that Approov protection is actually active. Use
+  /// [isApproovEnabled] for that. Queries the native layer directly rather than a
+  /// local Dart flag, since Dart-level state is per-isolate and can be stale
+  /// relative to the process-wide native SDK state.
+  ///
+  /// @return true if the service layer has been initialized
+  static Future<bool> isInitialized() async {
+    await _requireInitialized();
+    try {
+      bool? result = await _invokeFgMethod('isInitialized');
+      return result ?? false;
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
+  /// Returns whether Approov-backed protection (token injection, pinning, secure
+  /// string substitution) is actually active. Returns false when the service
+  /// layer is initialized in bypass mode with an empty configuration string.
+  ///
+  /// @return true if Approov protection is active
+  static Future<bool> isApproovEnabled() async {
+    await _requireInitialized();
+    try {
+      bool? result = await _invokeFgMethod('isApproovEnabled');
+      return result ?? false;
+    } catch (err) {
+      throw ApproovException('$err');
+    }
+  }
+
   /// Gets the last ARC (Attestation Response Code) for the device, if available.
   ///
   /// This triggers an Approov token fetch against one configured protected host (selected from the
