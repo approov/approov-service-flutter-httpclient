@@ -476,7 +476,7 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
             result(nil);
         }
     } else if ([@"isInitialized" isEqualToString:call.method]) {
-        result(@(_initializedConfig != nil));
+        result(@((BOOL)(_initializedConfig != nil)));
     } else if ([@"isApproovEnabled" isEqualToString:call.method]) {
         result(@(ApproovHttpClientIsEnabled(self)));
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
