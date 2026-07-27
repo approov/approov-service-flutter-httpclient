@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-We maintain updates and patches in the latest release. Earlier versions will still work, but will have less functionalities than later versions.
+We maintain updates and patches in the latest release. Earlier versions will still work, but will have less functionality than later versions.
 We encourage all users of these service layers to update to the latest version for the best experience.
 
 | Version | Supported          |
