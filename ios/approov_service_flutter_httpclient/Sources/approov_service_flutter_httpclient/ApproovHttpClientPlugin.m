@@ -444,7 +444,7 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
         // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
         // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
         // that the SDK is already initialized whereas this native layer holds its state
-        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || ![_initializedComment isEqualToString:commentString]) {
+        if ((self.initializedConfig == nil) || ![self.initializedConfig isEqualToString:initialConfig] || ![self.initializedComment isEqualToString:commentString]) {
             // this is a new config or a reinitialization
             NSString *updateConfig = nil;
             if (call.arguments[@"updateConfig"] != [NSNull null])
@@ -470,15 +470,15 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
                     }
                 }
             }
-            _initializedConfig = initialConfig;
-            _initializedComment = commentString;
+            self.initializedConfig = initialConfig;
+            self.initializedComment = commentString;
             result(nil);
         } else {
             // the previous initialization is compatible
             result(nil);
         }
     } else if ([@"isInitialized" isEqualToString:call.method]) {
-        result(@((BOOL)(_initializedConfig != nil)));
+        result(@((BOOL)(self.initializedConfig != nil)));
     } else if ([@"isApproovEnabled" isEqualToString:call.method]) {
         result(@(ApproovHttpClientIsEnabled(self)));
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
