@@ -751,3 +751,58 @@ git push origin feature/use-swiftpm
 ```
 
 If a fresh branch was chosen instead, create it from `main` (not from `feature/use-swiftpm`, to avoid pulling in the still-under-review SPM changes) and push that, then open a new PR with `gh pr create`.
+
+---
+
+## Addendum: Tasks 8-9 — per-call bypass guards (I2)
+
+Added after a final whole-branch review of Tasks 1-6 found that `isInitialized()`/`isApproovEnabled()` and `initialize('')` itself work correctly, but nothing else in the API guards against calling the native SDK when it was never actually initialized. A bypass-mode app's first real HTTP request, or any direct call to most of the other public methods, still fails — a different failure mode than the original bug, but the same underlying problem: the plugin doesn't actually "behave as a plain network client" yet, contradicting `TESTING_REQUIREMENTS.md` §1 and the docs written in Task 6.
+
+Decided explicitly (not silently) by the user: fix this now, following the same per-call-guard pattern already proven and shipped in `approov-service-react-native` (`android/src/main/java/io/approov/reactnative/ApproovService.java` and `ios/ApproovService.m`, both reviewed in detail below) — not a novel design.
+
+**Key finding that shrinks this task considerably:** the core per-request pipeline in `lib/approov_service_flutter_httpclient.dart` already has the "skip Approov entirely" plumbing built and working — it's just never triggered automatically in bypass mode:
+- `_updateRequest(...)` (around line 1523) already does `if (!shouldProcessApproov) return;` before touching any token/substitution logic.
+- `_createPinnedHttpClient(...)` (around line 2549) already does `if (!shouldApplyPinning) { ... }` before touching `getPins`/`_pinnedSecurityContext`/`_hostPinCertificates`.
+
+Both flags are computed once, in `_prepareRequestForApproov(...)` (around line 1480), by asking the currently-installed `ApproovServiceMutator`. **Task 8 is a single change to that one function** — short-circuit before consulting the mutator when in bypass mode, so every real HTTP request automatically gets both flags forced to `false` regardless of what mutator (default or custom) is installed. This is the highest-value, lowest-risk fix in this addendum: it's the difference between "the headline feature still breaks on the first real request" and "it doesn't."
+
+Task 9 is the mechanical sweep of every other standalone public method that talks to the native SDK, matching RN's per-method pattern method-for-method (verified by reading RN's actual source, not assumed):
+
+| Method (this repo) | RN reference behavior when disabled | This plugin's guard |
+|---|---|---|
+| `precheck()` | Android+iOS: reject `"Approov is disabled"` (after an `isInitialized` check RN also has, which this repo's `_requireInitialized()` already covers) | Reject: `throw ApproovException("Approov is not enabled")` |
+| `getDeviceID()` | iOS: reject `"Approov is not enabled"`. (Android RN has no guard here at all — an apparent gap in the reference, not to be replicated) | Reject: `throw ApproovException("Approov is not enabled")` — follow the more complete iOS reference, not Android's gap |
+| `getLastARC()` | Android+iOS: resolve `""` | **No new guard needed** — already wraps its body in `try { ... } on ApproovException catch (_) { return ""; } catch (_) { return ""; }` (lines ~1003-1009), so it already degrades to `""` no matter what the methods it calls internally do. Confirm this in code, don't add a redundant guard. |
+| `setDataHashInToken(data)` | not explicitly guarded in RN | No-op: log and return without calling the platform channel — it only stages data for a future token fetch that will never happen in bypass mode |
+| `fetchToken(url)` | Android+iOS: reject `"Approov is disabled"` | Reject: `throw ApproovException("Approov is not enabled")` |
+| `getMessageSignature(message)` | Android+iOS: reject `"Approov is not enabled"` | Reject: `throw ApproovException("Approov is not enabled")` |
+| `getAccountMessageSignature(message)` | not separately exported in RN (RN only has `getMessageSignature`) | Reject: `throw ApproovException("Approov is not enabled")` — same as `getMessageSignature`, which it wraps |
+| `fetchSecureString(key, newDef)` | Android+iOS: reject `"Approov is disabled"` | Reject: `throw ApproovException("Approov is not enabled")` |
+| `fetchCustomJWT(payload)` | Android+iOS: reject `"Approov is disabled"` | Reject: `throw ApproovException("Approov is not enabled")` |
+| `setDevKey(devKey)` | Android+iOS: reject `"Approov is not enabled"` | Reject: `throw ApproovException("Approov is not enabled")` |
+| `getPins(pinType)` | not standalone-exported in RN the same way | Return `{}` (empty map), not a reject — "no pinning info" is the informationally correct answer when there's no config, and this keeps `getLastARC`'s internal use of it on its normal (not exception) path |
+| `prefetch()` | n/a (fire-and-forget in this plugin) | No-op: log "skipped, bypass mode" and return, rather than attempting a doomed native call. (It already catches `ApproovException` and just logs — this is a proactive improvement, not a bug fix, so it can be folded into Task 9 or skipped if the implementer judges the existing catch sufficient; controller's call at review time.) |
+
+**All guards check the same thing:** whichever local signal Task 1-4 already established as authoritative for "is this isolate's own understanding of the config non-empty" — read the current code to confirm the exact field/expression (it's the same one `_prepareRequestForApproov` will use in Task 8), and use it consistently across every method in this table so Task 8 and Task 9 can't disagree with each other.
+
+**Explicitly not in scope:** the ~20 pure local Dart state setters/getters (`setProceedOnNetworkFail`, `setUseApproovStatusIfNoToken`, `setLoggingLevel`, `setApproovHeader`, `setBindingHeader`, `setServiceMutator`, `addSubstitutionHeader`/`removeSubstitutionHeader`, `addExclusionURLRegex`/`removeExclusionURLRegex`, etc.) make no native call and are already safe regardless of bypass mode — do not add guards to them. `substituteQueryParam` also needs no separate guard: its only internal caller is already gated by Task 8's pipeline fix, and any direct app call to it will already throw via `fetchSecureString`'s own new guard (which it calls internally) — don't add a second, redundant guard there.
+
+### Task 8: Core request pipeline bypass fix
+
+**Files:** Modify `lib/approov_service_flutter_httpclient.dart`, function `_prepareRequestForApproov` (read its current exact form first — line numbers may have shifted from earlier tasks' edits).
+
+Add a short-circuit at the top of the function, immediately after the existing `await _requireInitialized();` and before the mutator is ever consulted: when the isolate's local bypass-mode signal (same one used elsewhere in this file — confirm and reuse, don't invent a second one) indicates bypass mode, return an `_ApproovRequestPreparation` with `shouldProcessApproov: false`, `shouldApplyPinning: false`, the original `uri` unchanged, and an empty `ApproovRequestMutations()` — without calling `_invokeMutator` at all, so a custom mutator can never accidentally re-enable processing in bypass mode.
+
+**Test:** add to `test/approov_bypass_mode_test.dart` (or a new file if that one is getting crowded — controller's call) a test that installs a custom `ApproovServiceMutator` subclass whose `handleInterceptorShouldProcessRequest`/`handlePinningShouldProcessRequest` overrides always return `true` (to prove the short-circuit really does bypass the mutator, not just happen to agree with its default), initializes with an empty config, and asserts a mocked request preparation still comes back with both flags `false`. This can be written against `_prepareRequestForApproov` if it's reachable from tests (check current visibility — it's private; you may need to test through whatever public surface exercises it, e.g. by constructing an `ApproovHttpClient`/`ApproovClient` and inspecting outgoing request headers with a mocked channel, or by adding a `@visibleForTesting` accessor matching the convention already used twice in this file — controller's call on which is cleaner, but the test must prove the mutator was never consulted, not just that the end result matches what the default mutator would have produced anyway).
+
+**Verify with a real build**, same throwaway-app pattern as Task 5: initialize with an empty config, issue one real HTTP GET to any HTTPS URL, confirm it succeeds with no `Approov-Token` header and no pinning failure (this is the single most important verification in this whole addendum — it's the exact gap the final review found that no earlier task's testing caught).
+
+### Task 9: Standalone method guards
+
+**Files:** Modify `lib/approov_service_flutter_httpclient.dart`, the ~11 methods in the table above.
+
+Implement each row of the table. Use the plan's own earlier reasoning (see "Context every task needs") for why the guard reads local isolate state rather than round-tripping through the new `isApproovEnabled()` platform-channel method: these guards run inside the SAME isolate that must have already called `initialize()` to reach this code at all (every one of these methods calls `_requireInitialized()` first), so the local field is reliable here — unlike the standalone `isInitialized()`/`isApproovEnabled()` query methods, which had to go to native specifically because they can be called from a fresh isolate that never initialized anything itself.
+
+**Test:** extend `test/approov_bypass_mode_test.dart` with one test per rejecting method confirming it throws `ApproovException` with a message mentioning bypass/disabled when initialized with an empty config, one test confirming `getPins` returns `{}`, one confirming `setDataHashInToken` resolves without reaching the mocked channel (assert the mock never sees a `setDataHashInToken` call), and confirm `getLastARC`'s existing behavior needs no new test (already covered, or note if it isn't and add one).
+
+**Verify with a real build**: in the same throwaway app as Task 8, after the empty-config initialize, call two or three of the rejecting methods (e.g. `getMessageSignature`, `fetchSecureString`) and confirm they throw cleanly rather than crash the app or hang.
