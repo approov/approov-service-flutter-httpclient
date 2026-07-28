@@ -627,6 +627,12 @@ class ApproovService {
   static Future<void> setDevKey(String devKey) async {
     Log.d("$TAG: setDevKey");
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to accept a development key, so reject rather than
+      // forwarding a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "devKey": devKey,
     };
@@ -834,6 +840,12 @@ class ApproovService {
   /// Starts a prefetch to lower the effective latency of a subsequent token or secure string fetch by
   /// starting the operation earlier so the subsequent fetch should be able to use cached data.
   static void prefetch() async {
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): skip proactively rather than
+      // attempting (and then catching the failure of) a doomed token fetch.
+      Log.d("$TAG: prefetch skipped in bypass mode");
+      return;
+    }
     try {
       ApproovService._fetchApproovToken("https://approov.io/");
       Log.d("$TAG: prefetch started");
@@ -856,6 +868,12 @@ class ApproovService {
     // try and fetch a non-existent secure string in order to check for a rejection
     // setup a Completer for the transaction ID we are going to use
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to attest, so reject rather than forwarding a doomed call
+      // to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     Completer<dynamic> completer = new Completer<dynamic>();
     String transactionID = ApproovService.transactionID.toString();
     ApproovService.transactionID++;
@@ -914,6 +932,12 @@ class ApproovService {
   /// @return String representation of the device ID
   static Future<String> getDeviceID() async {
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to provide a device ID, so reject rather than forwarding a
+      // doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     try {
       String deviceID = await _invokeFgMethod('getDeviceID');
       Log.d("$TAG: getDeviceID: $deviceID");
@@ -1056,6 +1080,14 @@ class ApproovService {
   static Future<void> setDataHashInToken(String data) async {
     Log.d("$TAG: setDataHashInToken");
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): this only stages data for a
+      // future token fetch that will never happen in bypass mode, so
+      // silently accept and do nothing rather than forwarding a doomed call
+      // to the platform channel.
+      Log.d("$TAG: setDataHashInToken skipped in bypass mode");
+      return;
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "data": data,
     };
@@ -1086,6 +1118,15 @@ class ApproovService {
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch a token from, so reject rather than forwarding a
+      // doomed call to the platform channel. (This method has no direct
+      // _requireInitialized() call of its own - that happens inside
+      // _fetchApproovToken - so the guard sits at the very top instead of
+      // immediately after such a call.)
+      throw ApproovException("Approov is not enabled");
+    }
     // fetch the Approov token
     ApproovTokenFetchResult fetchResult = await _fetchApproovToken(url);
     String isolate = _isRootIsolate ? "root" : "background";
@@ -1109,6 +1150,12 @@ class ApproovService {
   static Future<String> getMessageSignature(String message) async {
     Log.d("$TAG: getMessageSignature");
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to provide a signing key, so reject rather than forwarding
+      // a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "message": message,
     };
@@ -1127,6 +1174,13 @@ class ApproovService {
   static Future<String> getAccountMessageSignature(String message) async {
     Log.d("$TAG: getAccountMessageSignature");
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): reject here, before either
+      // branch below is reached - this guard is independent of
+      // getMessageSignature's own guard (it must fire before the
+      // MissingPluginException fallback would otherwise delegate to it).
+      throw ApproovException("Approov is not enabled");
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "message": message,
     };
@@ -1156,6 +1210,12 @@ class ApproovService {
   static Future<String?> fetchSecureString(String key, String? newDef) async {
     // ensure the SDK is initialized
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch secure strings from, so reject rather than
+      // forwarding a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
 
     // determine the type of operation as the values themselves cannot be logged
     String type = "lookup";
@@ -1227,6 +1287,12 @@ class ApproovService {
   static Future<String> fetchCustomJWT(String payload) async {
     // wait on any pending initialization
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch a custom JWT from, so reject rather than
+      // forwarding a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
 
     // start the custom JWT creation in the platform layer
     // setup a Completer for the transaction ID we are going to use
@@ -1316,6 +1382,14 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<Map> getPins(String pinType) async {
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active pinning
+      // configuration, so an empty map ("no pinning info") is the
+      // informationally correct answer rather than an error. This also
+      // keeps getLastARC's internal use of getPins on its normal success
+      // path rather than forcing it through an exception branch.
+      return {};
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "pinType": pinType,
     };

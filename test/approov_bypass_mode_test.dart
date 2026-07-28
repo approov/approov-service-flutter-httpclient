@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:approov_service_flutter_httpclient/approov_service_flutter_httpclient.dart';
 import 'package:flutter/services.dart';
@@ -41,8 +42,7 @@ void main() {
     expect(
       bgCalls.map((c) => c.method).where((m) => m == 'initialize').length,
       1,
-      reason:
-          'the empty-config call must not reach native at all once a valid '
+      reason: 'the empty-config call must not reach native at all once a valid '
           'config is active',
     );
   });
@@ -177,6 +177,431 @@ void main() {
         reason: 'a real configuration must still consult the mutator for '
             'the pinning gate');
   });
+
+  group('Task 9: per-method bypass-mode guards', () {
+    test(
+        'precheck() rejects in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-precheck');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(() => ApproovService.precheck(),
+          fgCalls: fgCalls, bgCalls: bgCalls);
+    });
+
+    test(
+        'getDeviceID() rejects in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-getdeviceid');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(() => ApproovService.getDeviceID(),
+          fgCalls: fgCalls, bgCalls: bgCalls);
+    });
+
+    test(
+        'setDevKey() rejects in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-setdevkey');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(
+          () => ApproovService.setDevKey('some-dev-key'),
+          fgCalls: fgCalls,
+          bgCalls: bgCalls);
+    });
+
+    test(
+        'fetchToken() rejects in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-fetchtoken');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(
+          () => ApproovService.fetchToken('https://example.com/api'),
+          fgCalls: fgCalls,
+          bgCalls: bgCalls);
+    });
+
+    test(
+        'getMessageSignature() rejects in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-getmessagesignature');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(
+          () => ApproovService.getMessageSignature('hello-message'),
+          fgCalls: fgCalls,
+          bgCalls: bgCalls);
+    });
+
+    test(
+        'getAccountMessageSignature() rejects in bypass mode without reaching the '
+        'platform channel, independent of getMessageSignature', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-getaccountmessagesignature');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(
+          () => ApproovService.getAccountMessageSignature('hello-message'),
+          fgCalls: fgCalls,
+          bgCalls: bgCalls);
+    });
+
+    test(
+        'fetchSecureString() rejects in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-fetchsecurestring');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(
+          () => ApproovService.fetchSecureString('some-key', null),
+          fgCalls: fgCalls,
+          bgCalls: bgCalls);
+    });
+
+    test(
+        'fetchCustomJWT() rejects in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-fetchcustomjwt');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await _expectBypassRejection(
+          () => ApproovService.fetchCustomJWT('{"sub":"user1"}'),
+          fgCalls: fgCalls,
+          bgCalls: bgCalls);
+    });
+
+    test(
+        'getPins() returns an empty map in bypass mode without reaching the platform channel',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-getpins');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      final pins = await ApproovService.getPins('public-key-sha256');
+
+      expect(pins, isEmpty,
+          reason: 'bypass mode has no active pinning configuration, so an '
+              'empty map is the correct (non-error) answer');
+      expect(fgCalls, isEmpty);
+      expect(bgCalls, isEmpty,
+          reason: 'getPins uses the background channel - it must not be '
+              'reached in bypass mode');
+    });
+
+    test(
+        'setDataHashInToken() resolves normally in bypass mode without reaching the '
+        'platform channel', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-setdatahash');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // Must resolve without throwing: this only stages data for a future
+      // token fetch that will never happen in bypass mode, so silently
+      // accepting and doing nothing is the correct behavior, not an error.
+      await ApproovService.setDataHashInToken('some-binding-value');
+
+      expect(fgCalls, isEmpty);
+      expect(bgCalls, isEmpty);
+    });
+
+    test('prefetch() does not attempt a platform-channel call in bypass mode',
+        () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-prefetch');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // prefetch() returns void (fire-and-forget), not a Future, so there is
+      // nothing to await directly. Its bypass-mode guard sits before any
+      // await point, so the skip happens synchronously - but yield to the
+      // event loop once anyway so this assertion does not depend on that
+      // implementation detail staying true.
+      ApproovService.prefetch();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(fgCalls, isEmpty,
+          reason: 'prefetch must skip proactively in bypass mode rather than '
+              'attempting (and then catching the failure of) a token fetch');
+      expect(bgCalls, isEmpty);
+    });
+
+    test(
+        'getLastARC() already degrades to "" in bypass mode (no new guard needed)',
+        () async {
+      // getLastARC() calls getPins() internally, which now returns {} in
+      // bypass mode (see the getPins test above). With no pinned hostname
+      // available, getLastARC() takes its normal "no host pinning
+      // information available" return branch - it never even reaches its
+      // own pre-existing broad try/catch fallback. This test pins down that
+      // exact behavior end-to-end through the public API, complementing the
+      // code-reading confirmation in the task report.
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-getlastarc');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      final arc = await ApproovService.getLastARC();
+
+      expect(arc, '');
+      expect(fgCalls, isEmpty);
+      expect(bgCalls, isEmpty,
+          reason: 'getLastARC must not reach the platform channel in bypass '
+              'mode - getPins already short-circuits before it would');
+    });
+
+    test(
+        'bypass mode: real loopback HTTP request succeeds with no Approov-Token '
+        'header and no token/pin/cert platform-channel calls', () async {
+      // This is the offline, network-free, CI-repeatable end-to-end
+      // regression test for Task 8's core-pipeline fix: a genuine socket
+      // request over loopback (not a mocked platform channel, not a mocked
+      // HTTP client) proves the whole request path - from
+      // ApproovClient/ApproovHttpClient through _prepareRequestForApproov,
+      // _createPinnedHttpClient and _updateRequest - really does skip
+      // Approov entirely in bypass mode.
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      // Bind a real server on loopback with an OS-assigned free port so this
+      // test is deterministic and safe to run in parallel/CI.
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final observedHeaderNames = <String>{};
+      final serverSubscription = server.listen((request) async {
+        request.headers.forEach((name, values) {
+          observedHeaderNames.add(name.toLowerCase());
+        });
+        request.response.statusCode = 200;
+        request.response.write('ok');
+        await request.response.close();
+      });
+      addTearDown(() async {
+        await serverSubscription.cancel();
+        await server.close(force: true);
+      });
+
+      await ApproovService.initialize('', 'reinit-e2e-loopback');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // TestWidgetsFlutterBinding installs a global HttpOverrides that fakes
+      // every HttpClient() construction to return a canned 400 with no real
+      // socket touched (see the "at least one test in this suite creates an
+      // HttpClient" warning) - it exists so widget tests never accidentally
+      // hit the real network. This test's whole point is the opposite: it
+      // must prove a genuine socket round-trip, so the override is nulled
+      // out for its duration and restored afterwards regardless of outcome.
+      final previousHttpOverrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+      final client = ApproovClient();
+      addTearDown(client.close);
+
+      final response =
+          await client.get(Uri.parse('http://127.0.0.1:${server.port}/ping'));
+
+      expect(response.statusCode, 200);
+      expect(response.body, 'ok');
+      expect(
+        observedHeaderNames.contains('approov-token'),
+        false,
+        reason: 'a real request in bypass mode must not carry an Approov '
+            'token header - this is Task 8\'s fix, exercised here over a '
+            'genuine loopback socket rather than a mock',
+      );
+
+      final calledMethods = <String>{
+        ...fgCalls.map((c) => c.method),
+        ...bgCalls.map((c) => c.method),
+      };
+      for (final suspectMethod in const [
+        'fetchApproovToken',
+        'getPins',
+        'fetchHostCertificates',
+        'waitForFetchValue',
+      ]) {
+        expect(calledMethods.contains(suspectMethod), false,
+            reason: '$suspectMethod must never be invoked for a real '
+                'request in bypass mode');
+      }
+    });
+  });
+}
+
+/// Standard assertion for the reject-style bypass guards added in Task 9:
+/// invokes [invoke] (already running against an ApproovService initialized
+/// in bypass mode) and confirms it throws an ApproovException mentioning
+/// "not enabled", while the mocked platform channel records no call at all -
+/// proving the guard fires before any channel invocation is attempted,
+/// rather than the channel merely happening to fail gracefully on its own.
+Future<void> _expectBypassRejection(
+  Future<dynamic> Function() invoke, {
+  required List<MethodCall> fgCalls,
+  required List<MethodCall> bgCalls,
+}) async {
+  await expectLater(
+    invoke(),
+    throwsA(
+      isA<ApproovException>().having(
+        (e) => e.cause ?? '',
+        'cause',
+        contains('not enabled'),
+      ),
+    ),
+  );
+  expect(fgCalls, isEmpty,
+      reason: 'no foreground platform-channel call should be made once the '
+          'bypass-mode guard rejects the call');
+  expect(bgCalls, isEmpty,
+      reason: 'no background platform-channel call should be made once the '
+          'bypass-mode guard rejects the call');
 }
 
 /// Mutator whose gate callbacks always allow processing/pinning, while
