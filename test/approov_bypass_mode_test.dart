@@ -423,6 +423,44 @@ void main() {
       expect(bgCalls, isEmpty);
     });
 
+    test(
+        'substituteQueryParam() returns the Uri unchanged in bypass mode '
+        'without reaching the platform channel', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize('', 'reinit-substitutequeryparam');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // Unlike the reject-style guards above, substituteQueryParam has its
+      // own separate, inlined platform-channel call rather than delegating
+      // to the already-guarded fetchSecureString() - so it must not throw
+      // here, but must instead pass the Uri through unchanged, matching
+      // what the core request pipeline (_prepareRequestForApproov) already
+      // does when it uses this same substitution logic internally in
+      // bypass mode (it never reaches this method at all).
+      final originalUri =
+          Uri.parse('https://example.com/api?apiKey=some-secure-key');
+      final resultUri =
+          await ApproovService.substituteQueryParam(originalUri, 'apiKey');
+
+      expect(resultUri, originalUri,
+          reason: 'bypass mode must pass the Uri through unchanged rather '
+              'than throwing or forwarding a doomed call to the platform '
+              'channel');
+      expect(fgCalls, isEmpty);
+      expect(bgCalls, isEmpty);
+    });
+
     test('prefetch() does not attempt a platform-channel call in bypass mode',
         () async {
       final fgCalls = <MethodCall>[];
@@ -549,6 +587,11 @@ void main() {
 
       expect(response.statusCode, 200);
       expect(response.body, 'ok');
+      expect(observedHeaderNames, isNotEmpty,
+          reason: 'the server must have genuinely received the request and '
+              'recorded real headers - otherwise the assertion below would '
+              'pass vacuously even if the request never reached the server '
+              'at all');
       expect(
         observedHeaderNames.contains('approov-token'),
         false,
@@ -571,6 +614,91 @@ void main() {
             reason: '$suspectMethod must never be invoked for a real '
                 'request in bypass mode');
       }
+    });
+  });
+
+  group('Task 9 fix: protected-mode counter-tests (C1 regression)', () {
+    // These are the counter-tests C2 identified as missing: every guard
+    // added for Task 9 was only ever exercised in bypass mode, which is
+    // exactly how the C1 regression (fetchToken()/prefetch() misfiring in
+    // PROTECTED mode) shipped undetected. Each test here initializes with a
+    // REAL config and confirms the guarded method still actually reaches
+    // the platform channel, rather than incorrectly short-circuiting as if
+    // bypass mode were active.
+    test(
+        'fetchToken() reaches the platform channel after a real config '
+        'initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-fetchtoken-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // fetchToken() will hang waiting on a completer that this simple mock
+      // never resolves (it does not simulate the platform's asynchronous
+      // response callback), so it must not be awaited to completion here -
+      // this test only needs to confirm the call reaches the platform
+      // channel rather than being rejected as if in bypass mode, so it is
+      // fired and the event loop is pumped, matching the style of the
+      // fire-and-forget prefetch() tests elsewhere in this file.
+      unawaited(
+          ApproovService.fetchToken('https://example.com/api').catchError(
+              (_) => ''));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('fetchApproovToken'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for fetchToken - the bypass-mode guard must not misfire while '
+            'a genuine initialization is settled (this is the C1 '
+            'regression: the guard used to read _initialConfig before it '
+            'was reliably set)',
+      );
+    });
+
+    test(
+        'prefetch() reaches the platform channel after a real config '
+        'initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-prefetch-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // prefetch() returns void (fire-and-forget), not a Future, so there is
+      // nothing to await directly - pump the event loop instead, matching
+      // the bypass-mode prefetch() test above.
+      ApproovService.prefetch();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('fetchApproovToken'),
+        reason: 'a real configuration must still cause prefetch() to reach '
+            'the platform channel, not silently no-op as if bypass mode '
+            'were active (the C1 regression)',
+      );
     });
   });
 }

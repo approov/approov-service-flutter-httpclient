@@ -840,13 +840,27 @@ class ApproovService {
   /// Starts a prefetch to lower the effective latency of a subsequent token or secure string fetch by
   /// starting the operation earlier so the subsequent fetch should be able to use cached data.
   static void prefetch() async {
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
-      // Bypass mode (empty initial config): skip proactively rather than
-      // attempting (and then catching the failure of) a doomed token fetch.
-      Log.d("$TAG: prefetch skipped in bypass mode");
-      return;
-    }
     try {
+      // Ensure initialization has genuinely settled before consulting
+      // _initialConfig below. initialize() only awaits the PRIOR pending
+      // call's future - it never awaits its own newly-kicked-off async work
+      // - so reading _initialConfig without first awaiting
+      // _requireInitialized() here could race ahead of a real, valid
+      // initialization that is still in flight (Task 9 review, finding C1).
+      // _fetchApproovToken below already calls _requireInitialized() again
+      // internally, but it does not itself check bypass mode, so this guard
+      // cannot simply be removed; it is placed after the await instead so it
+      // reads a settled value. Any exception here (including "not
+      // initialized" if prefetch is called before initialize) is caught
+      // below rather than escaping this fire-and-forget (void) method
+      // uncaught.
+      await _requireInitialized();
+      if (!(_initialConfig?.isNotEmpty ?? false)) {
+        // Bypass mode (empty initial config): skip proactively rather than
+        // attempting (and then catching the failure of) a doomed token fetch.
+        Log.d("$TAG: prefetch skipped in bypass mode");
+        return;
+      }
       ApproovService._fetchApproovToken("https://approov.io/");
       Log.d("$TAG: prefetch started");
     } on ApproovException catch (e) {
@@ -1118,13 +1132,22 @@ class ApproovService {
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
+    // Ensure initialization has genuinely settled before consulting
+    // _initialConfig below. initialize() only awaits the PRIOR pending
+    // call's future - it never awaits its own newly-kicked-off async work -
+    // so reading _initialConfig without first awaiting
+    // _requireInitialized() here could race ahead of a real, valid
+    // initialization that is still in flight (Task 9 review, finding C1).
+    // This is safe even though _fetchApproovToken below calls
+    // _requireInitialized() again internally: awaiting an already-completed
+    // Future a second time is harmless, and it also gives the correct,
+    // specific "not initialized" error for the genuinely-never-initialized
+    // case rather than the misleading "Approov is not enabled".
+    await _requireInitialized();
     if (!(_initialConfig?.isNotEmpty ?? false)) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to fetch a token from, so reject rather than forwarding a
-      // doomed call to the platform channel. (This method has no direct
-      // _requireInitialized() call of its own - that happens inside
-      // _fetchApproovToken - so the guard sits at the very top instead of
-      // immediately after such a call.)
+      // doomed call to the platform channel.
       throw ApproovException("Approov is not enabled");
     }
     // fetch the Approov token
@@ -1469,6 +1492,19 @@ class ApproovService {
   static Future<Uri> substituteQueryParam(
       Uri uri, String queryParameter) async {
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch secure strings from. Unlike the "reject" guards
+      // elsewhere in this file, this is a pass-through no-op that returns
+      // the Uri unchanged rather than throwing - this matches what the core
+      // request pipeline (_prepareRequestForApproov) already does when it
+      // uses this same substitution logic internally: in bypass mode it
+      // never reaches this method at all and sends the original URI as-is,
+      // so a direct call here gets the same effective outcome instead of a
+      // throw where the pipeline would have silently skipped.
+      Log.d("$TAG: substituteQueryParam skipped in bypass mode");
+      return uri;
+    }
     String? queryValue = uri.queryParameters[queryParameter];
     if (queryValue != null) {
       // check if the URL matches one of the exclusion regexs and just return the provided Uri if so
