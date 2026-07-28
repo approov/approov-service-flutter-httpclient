@@ -2078,6 +2078,13 @@ class ApproovService {
         "$TAG: $isolate pinned security context with ${pinCerts.length} trusted certs, from ${approovPins.length} possible pins");
     return securityContext;
   }
+
+  @visibleForTesting
+  static void resetInitStateForTesting() {
+    _futureInitialization = null;
+    _isInitialized = false;
+    _initialConfig = null;
+  }
 }
 
 class _ApproovRequestPreparation {

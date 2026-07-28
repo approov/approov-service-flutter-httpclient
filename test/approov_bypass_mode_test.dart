@@ -13,6 +13,7 @@ void main() {
   late Future<dynamic> Function(MethodCall call) bgHandler;
 
   setUp(() {
+    ApproovService.resetInitStateForTesting();
     fgHandler = (MethodCall call) async => null;
     bgHandler = (MethodCall call) async => null;
     fgChannel.setMockMethodCallHandler((call) => fgHandler(call));
