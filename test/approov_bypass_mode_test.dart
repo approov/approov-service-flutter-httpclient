@@ -701,6 +701,450 @@ void main() {
       );
     });
   });
+
+  group('Task 9b: protected-mode counter-tests for remaining bypass guards',
+      () {
+    // These cover the remaining Task 9 guards that, like fetchToken() and
+    // prefetch() before the tests above were added, were only ever
+    // exercised in bypass mode - exactly how the C1 regression shipped
+    // undetected. Each test here initializes with a REAL config and
+    // confirms the guarded method still actually reaches the platform
+    // channel (or, for getPins()/getLastARC(), still returns real data)
+    // rather than incorrectly short-circuiting as if bypass mode were
+    // active.
+
+    test(
+        'precheck() reaches the platform channel after a real config '
+        'initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-precheck-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // precheck() waits on a Completer that only a genuine platform
+      // "response" callback would resolve, which this simple mock never
+      // sends (the root-isolate path taken in this test environment - see
+      // the fetchToken()/prefetch() tests above), so it must not be awaited
+      // to completion here; only that it reaches the platform channel
+      // rather than being rejected as if in bypass mode matters.
+      unawaited(ApproovService.precheck().catchError((_) {}));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('fetchSecureString'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for precheck via fetchSecureString - the bypass-mode guard '
+            'must not misfire while a genuine initialization is settled '
+            '(the C1 regression shape)',
+      );
+    });
+
+    test(
+        'getDeviceID() reaches the platform channel after a real config '
+        'initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        if (call.method == 'getDeviceID') return 'test-device-id';
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-getdeviceid-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // getDeviceID() awaits the platform channel result directly (no
+      // transaction/Completer indirection), so it can be awaited to
+      // completion in this test.
+      final deviceID = await ApproovService.getDeviceID();
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('getDeviceID'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for getDeviceID - the bypass-mode guard must not misfire while '
+            'a genuine initialization is settled (the C1 regression shape)',
+      );
+      expect(deviceID, 'test-device-id',
+          reason: 'getDeviceID must return the value supplied by the '
+              'platform channel rather than throwing as if bypass mode '
+              'were active');
+    });
+
+    test(
+        'setDevKey() reaches the platform channel after a real config '
+        'initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-setdevkey-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await ApproovService.setDevKey('some-dev-key');
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('setDevKey'),
+        reason: 'a real configuration must still forward setDevKey to the '
+            'platform channel rather than throwing as if bypass mode were '
+            'active (the C1 regression shape)',
+      );
+    });
+
+    test(
+        'getMessageSignature() reaches the platform channel after a real '
+        'config initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        if (call.method == 'getMessageSignature') return 'base64-signature';
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-getmessagesignature-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      final signature =
+          await ApproovService.getMessageSignature('hello-message');
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('getMessageSignature'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for getMessageSignature - the bypass-mode guard must not '
+            'misfire while a genuine initialization is settled (the C1 '
+            'regression shape)',
+      );
+      expect(signature, 'base64-signature');
+    });
+
+    test(
+        'getAccountMessageSignature() reaches the platform channel after a '
+        'real config initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        if (call.method == 'getAccountMessageSignature') {
+          return 'account-signature';
+        }
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-getaccountmessagesignature-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      final signature =
+          await ApproovService.getAccountMessageSignature('hello-message');
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('getAccountMessageSignature'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for getAccountMessageSignature - the bypass-mode guard must '
+            'not misfire while a genuine initialization is settled (the C1 '
+            'regression shape), independent of getMessageSignature',
+      );
+      expect(signature, 'account-signature');
+    });
+
+    test(
+        'fetchSecureString() reaches the platform channel after a real '
+        'config initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-fetchsecurestring-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // fetchSecureString() waits on a Completer that only a genuine
+      // platform "response" callback would resolve, which this simple mock
+      // never sends (the root-isolate path - see the fetchToken() test
+      // above), so it must not be awaited to completion here.
+      unawaited(ApproovService.fetchSecureString('some-key', null)
+          .catchError((_) => null));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('fetchSecureString'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for fetchSecureString - the bypass-mode guard must not misfire '
+            'while a genuine initialization is settled (the C1 regression '
+            'shape)',
+      );
+    });
+
+    test(
+        'fetchCustomJWT() reaches the platform channel after a real config '
+        'initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-fetchcustomjwt-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // fetchCustomJWT() waits on a Completer that only a genuine platform
+      // "response" callback would resolve, which this simple mock never
+      // sends (the root-isolate path - see the fetchToken() test above), so
+      // it must not be awaited to completion here.
+      unawaited(ApproovService.fetchCustomJWT('{"sub":"user1"}')
+          .catchError((_) => ''));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('fetchCustomJWT'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for fetchCustomJWT - the bypass-mode guard must not misfire '
+            'while a genuine initialization is settled (the C1 regression '
+            'shape)',
+      );
+    });
+
+    test(
+        'getPins() reaches the platform channel after a real config '
+        'initialization and returns real pin data', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        if (call.method == 'getPins') {
+          return {
+            'example.com': ['pin-sha256-value']
+          };
+        }
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-getpins-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      final pins = await ApproovService.getPins('public-key-sha256');
+
+      expect(
+        bgCalls.map((c) => c.method),
+        contains('getPins'),
+        reason: 'a real configuration must still reach the platform channel '
+            'for getPins - the bypass-mode guard must not misfire while a '
+            'genuine initialization is settled (the C1 regression shape)',
+      );
+      expect(pins, isNotEmpty,
+          reason: 'getPins must return the real pin data supplied by the '
+              'platform channel rather than the bypass-mode empty map');
+      expect(pins, {
+        'example.com': ['pin-sha256-value']
+      });
+    });
+
+    test(
+        'setDataHashInToken() reaches the platform channel after a real '
+        'config initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-setdatahash-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      await ApproovService.setDataHashInToken('some-binding-value');
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('setDataHashInToken'),
+        reason: 'a real configuration must still forward setDataHashInToken '
+            'to the platform channel rather than silently no-op-ing as if '
+            'bypass mode were active (the C1 regression shape)',
+      );
+    });
+
+    test(
+        'substituteQueryParam() reaches the platform channel after a real '
+        'config initialization instead of passing the Uri through '
+        'unchanged', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        return null;
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-substitutequeryparam-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      final originalUri =
+          Uri.parse('https://example.com/api?apiKey=some-secure-key');
+
+      // Like precheck()/fetchSecureString() above, this waits on a
+      // Completer that only a genuine platform "response" callback would
+      // resolve, which this simple mock never sends (the root-isolate
+      // path), so it must not be awaited to completion here; what matters
+      // is that it genuinely attempts the secure string substitution
+      // rather than short-circuiting straight back to the unchanged Uri, as
+      // bypass mode does.
+      unawaited(ApproovService.substituteQueryParam(originalUri, 'apiKey')
+          .catchError((_) => originalUri));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('fetchSecureString'),
+        reason: 'a real configuration must still attempt the secure string '
+            'substitution via fetchSecureString rather than '
+            'short-circuiting straight back to the unchanged Uri as if '
+            'bypass mode were active (the C1 regression shape)',
+      );
+      final fetchCall =
+          fgCalls.firstWhere((c) => c.method == 'fetchSecureString');
+      expect(fetchCall.arguments['key'], 'some-secure-key',
+          reason: 'the secure string lookup key must be the query '
+              'parameter value extracted from the Uri, proving the '
+              'substitution logic really ran rather than the call being '
+              'coincidental');
+    });
+
+    test(
+        'getLastARC() proceeds past the getPins short-circuit and reaches '
+        'the token-fetch path after a real config initialization', () async {
+      final fgCalls = <MethodCall>[];
+      final bgCalls = <MethodCall>[];
+      fgHandler = (call) async {
+        fgCalls.add(call);
+        return null;
+      };
+      bgHandler = (call) async {
+        bgCalls.add(call);
+        switch (call.method) {
+          case 'getPins':
+            return {
+              'example.com': ['pin-sha256-value']
+            };
+          case 'waitForFetchValue':
+            return {
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'test-arc-token',
+              'ARC': 'test-arc-value',
+              'ConfigEpoch': 1,
+            };
+          default:
+            return null;
+        }
+      };
+
+      await ApproovService.initialize(
+          'real-config', 'reinit-getlastarc-protected');
+      fgCalls.clear();
+      bgCalls.clear();
+
+      // Unlike fetchToken()/precheck() above, getLastARC() uses
+      // _fetchApproovTokenNoCallback internally, which always waits via the
+      // background "waitForFetchValue" mechanism regardless of isolate, so
+      // (with a properly-shaped mock response) it resolves normally and can
+      // be awaited to completion here.
+      final arc = await ApproovService.getLastARC();
+
+      expect(
+        fgCalls.map((c) => c.method),
+        contains('fetchApproovToken'),
+        reason: 'a real configuration with pin data available must still '
+            'reach the token-fetch path via fetchApproovToken - the '
+            'getPins-derived short-circuit must not misfire while a '
+            'genuine initialization is settled (the C1 regression shape)',
+      );
+      expect(
+        bgCalls.map((c) => c.method),
+        containsAll(['getPins', 'waitForFetchValue']),
+        reason: 'getLastARC must consult getPins for pinned hosts and then '
+            'wait for the token fetch result via the background channel',
+      );
+      expect(arc, 'test-arc-value',
+          reason: 'getLastARC must return the real ARC value from the '
+              'token fetch result rather than the "" it would return if it '
+              'incorrectly took the no-pinning-information short-circuit');
+    });
+  });
 }
 
 /// Standard assertion for the reject-style bypass guards added in Task 9:
