@@ -1,3 +1,8 @@
+## [3.5.8] - (27-July-2026)
+- Add `isInitialized()` and `isApproovEnabled()` public API methods (Dart, Android, iOS).
+- Fix `initialize('')` (empty configuration string) to actually enter bypass mode — initializes the service layer without calling the native Approov SDK, instead of throwing. Previously this would fail with a native exception surfaced as a Dart `PlatformException`, contradicting documentation that claimed bypass-mode support.
+- Fix `initialize()` re-initialization guard to allow the "empty config → valid config" upgrade transition and to silently ignore a "valid config → empty config" downgrade attempt, per the cross-service-layer `TESTING_REQUIREMENTS.md` spec, instead of throwing in both directions.
+
 ## [3.5.7] - (27-July-2026)
 - Add Swift Package Manager (SPM) support for iOS, alongside continued CocoaPods support.
 - Move iOS native sources from `ios/Classes` to `ios/approov_service_flutter_httpclient/Sources/approov_service_flutter_httpclient` per Flutter's plugin SPM layout.

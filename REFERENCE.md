@@ -20,6 +20,14 @@ Most async methods may throw:
 
 Initializes the Approov SDK. Must be called before any fetch operations.
 
+### `isInitialized()`
+
+Returns `true` once `initialize()` has been called successfully at least once — including when initialized in bypass mode with an empty configuration string. Does not indicate whether Approov protection is actually active; use `isApproovEnabled()` for that.
+
+### `isApproovEnabled()`
+
+Returns `true` only when Approov-backed protection (token injection, pinning, secure string substitution) is actually active — i.e. `initialize()` was called with a non-empty configuration string. Returns `false` in bypass mode.
+
 ## Mutator APIs
 
 ### `setServiceMutator(ApproovServiceMutator? mutator)`

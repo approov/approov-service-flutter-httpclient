@@ -71,6 +71,8 @@ The `<enter-your-config-string-here>` is a custom string that configures your Ap
 
 On success the example logs the Approov **device ID** (`getDeviceID()`) and an **app-generated session/correlation id** so a given install can be correlated across your app logs, backend, and the Approov [Live Metrics](https://approov.io/docs/latest/approov-usage-documentation/#metrics-graphs). If initialization fails, the example re-initializes with an empty config so the app keeps working — but those requests go out **without Approov protection**, so treat the backend as the enforcement point.
 
+You can confirm bypass mode programmatically with `await ApproovService.isApproovEnabled()` (returns `false` when running unprotected, `true` when a real config is active) and `await ApproovService.isInitialized()` (`true` in both cases, once `initialize()` has been called at least once).
+
 ## USING APPROOV SERVICE
 
 Use `ApproovHttpClient` as a drop-in replacement for Dart's `HttpClient`:
