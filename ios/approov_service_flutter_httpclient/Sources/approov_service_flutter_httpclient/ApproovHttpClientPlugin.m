@@ -433,15 +433,17 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
         else
             commentString = @"";
 
-        // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
-        // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
-        // that the SDK is already initialized whereas this native layer holds its state
+        // An empty config after a valid config is already active must be ignored -
+        // it must never silently drop back into bypass mode.
         if (ApproovHttpClientIsEnabled(self) && initialConfig.length == 0) {
             NSLog(@"ApproovService: already initialized with a valid config; ignoring empty configuration");
             result(nil);
             return;
         }
 
+        // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
+        // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
+        // that the SDK is already initialized whereas this native layer holds its state
         if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || ![_initializedComment isEqualToString:commentString]) {
             // this is a new config or a reinitialization
             NSString *updateConfig = nil;

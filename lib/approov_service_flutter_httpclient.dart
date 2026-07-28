@@ -417,8 +417,16 @@ class ApproovService {
   /// @param comment is an optional comment used during initialization or null if not required
   static Future<void> initialize(String config, [String? comment]) async {
     if (_futureInitialization != null) {
-      // ensure we wait in case initialize has been called previously
-      await _futureInitialization;
+      // ensure we wait in case initialize has been called previously - a failure
+      // in that previous attempt must not block this one: it is either a retry
+      // of the same config or a bypass-mode recovery (e.g. the documented
+      // try/catch(e) { initialize('') } pattern), so swallow it and proceed
+      // regardless of how the previous attempt ended.
+      try {
+        await _futureInitialization;
+      } catch (_) {
+        // ignored - see above
+      }
     }
     _futureInitialization = _initializeAsync(config, comment);
   }
@@ -445,13 +453,15 @@ class ApproovService {
     await _initMutex.protect(() async {
       bool isRootIsolate = (RootIsolateToken.instance != null);
       String isolate = isRootIsolate ? "root" : "background";
-      if (_isInitialized &&
-          ((comment == null) || !comment.startsWith("reinit")) &&
-          config.isEmpty) {
+      if (_isInitialized && config.isEmpty) {
         // Empty configuration after any prior initialization (valid or bypass)
-        // is ignored outright - it must never silently drop an already-active
-        // configuration back into bypass mode (TESTING_REQUIREMENTS.md §1,
-        // "Empty Configuration after Valid Configuration").
+        // is ignored outright, regardless of any "reinit" comment - it must
+        // never silently drop an already-active configuration back into
+        // bypass mode, and must never let Dart's _initialConfig disagree with
+        // native (which independently applies this same guard and will not
+        // actually reinitialize for an empty config either way) (see
+        // TESTING_REQUIREMENTS.md §1, "Empty Configuration after Valid
+        // Configuration").
         Log.d(
             "$TAG: $isolate initialization ignoring empty configuration; already initialized");
       } else if (_isInitialized &&
@@ -479,11 +489,19 @@ class ApproovService {
           };
           await _invokeBgMethod('initialize', arguments);
 
-          // set the user property to represent the framework being used
-          arguments = <String, dynamic>{
-            "property": "approov-service-flutter-httpclient",
-          };
-          await _invokeFgMethod('setUserProperty', arguments);
+          if (config.isNotEmpty) {
+            // set the user property to represent the framework being used - this
+            // can only be done when the native Approov SDK was actually
+            // initialized, which is skipped for an empty (bypass mode) config;
+            // calling it when the SDK was never initialized throws on Android.
+            arguments = <String, dynamic>{
+              "property": "approov-service-flutter-httpclient",
+            };
+            await _invokeFgMethod('setUserProperty', arguments);
+          } else {
+            Log.d(
+                "$TAG: $isolate initialized without the Approov SDK (bypass mode)");
+          }
 
           // setup ready for callbacks from the platform layer if we are running
           // in the root isolate (this is not possible in background isolates)
@@ -910,31 +928,44 @@ class ApproovService {
   /// does not indicate that Approov protection is actually active. Use
   /// [isApproovEnabled] for that. Queries the native layer directly rather than a
   /// local Dart flag, since Dart-level state is per-isolate and can be stale
-  /// relative to the process-wide native SDK state.
+  /// relative to the process-wide native SDK state. Returns false, rather than
+  /// throwing, if [initialize] has never been called or its most recent attempt
+  /// failed.
   ///
   /// @return true if the service layer has been initialized
   static Future<bool> isInitialized() async {
-    await _requireInitialized();
+    if (_futureInitialization == null) return false;
+    try {
+      await _futureInitialization;
+    } catch (_) {
+      return false;
+    }
     try {
       bool? result = await _invokeFgMethod('isInitialized');
       return result ?? false;
-    } catch (err) {
-      throw ApproovException('$err');
+    } catch (_) {
+      return false;
     }
   }
 
   /// Returns whether Approov-backed protection (token injection, pinning, secure
   /// string substitution) is actually active. Returns false when the service
-  /// layer is initialized in bypass mode with an empty configuration string.
+  /// layer is initialized in bypass mode with an empty configuration string, or
+  /// if [initialize] has never been called or its most recent attempt failed.
   ///
   /// @return true if Approov protection is active
   static Future<bool> isApproovEnabled() async {
-    await _requireInitialized();
+    if (_futureInitialization == null) return false;
+    try {
+      await _futureInitialization;
+    } catch (_) {
+      return false;
+    }
     try {
       bool? result = await _invokeFgMethod('isApproovEnabled');
       return result ?? false;
-    } catch (err) {
-      throw ApproovException('$err');
+    } catch (_) {
+      return false;
     }
   }
 

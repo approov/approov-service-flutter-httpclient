@@ -16,7 +16,7 @@ The Approov integration is available via [pub.dev](https://pub.dev/packages/appr
 
 ```yaml
 dependencies:
-  approov_service_flutter_httpclient: ^3.5.7
+  approov_service_flutter_httpclient: ^3.5.8
 ```
 
 Then fetch it:

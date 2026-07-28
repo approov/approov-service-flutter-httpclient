@@ -22,11 +22,11 @@ Initializes the Approov SDK. Must be called before any fetch operations.
 
 ### `isInitialized()`
 
-Returns `true` once `initialize()` has been called successfully at least once — including when initialized in bypass mode with an empty configuration string. Does not indicate whether Approov protection is actually active; use `isApproovEnabled()` for that.
+Returns `Future<bool>`, resolving to `true` once `initialize()` has been called successfully at least once — including when initialized in bypass mode with an empty configuration string. Does not indicate whether Approov protection is actually active; use `isApproovEnabled()` for that. Unlike most other async methods in this package, this does not throw when `initialize()` has never been called or its most recent attempt failed — it resolves to `false` instead.
 
 ### `isApproovEnabled()`
 
-Returns `true` only when Approov-backed protection (token injection, pinning, secure string substitution) is actually active — i.e. `initialize()` was called with a non-empty configuration string. Returns `false` in bypass mode.
+Returns `Future<bool>`, resolving to `true` only when Approov-backed protection (token injection, pinning, secure string substitution) is actually active — i.e. `initialize()` was called with a non-empty configuration string. Resolves to `false` in bypass mode, and also resolves to `false` (rather than throwing) if `initialize()` has never been called or its most recent attempt failed.
 
 ## Mutator APIs
 

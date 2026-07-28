@@ -223,11 +223,16 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   private Context appContext;
 
   // Provides any prior initial configuration supplied, to allow a reinitialization caused by
-  // a hot restart if the configuration is the same, or null if not initialized
-  private String initializedConfig = null;
+  // a hot restart if the configuration is the same, or null if not initialized. Marked volatile
+  // because it is written from the "initialize" call arriving on the background method channel
+  // thread and read from the "isInitialized"/"isApproovEnabled" calls arriving on the foreground
+  // method channel thread - volatile provides the happens-before guarantee needed for the reading
+  // thread to observe the writing thread's update.
+  private volatile String initializedConfig = null;
 
-  // Provides any prior initial comment supplied, or empty string if none was provided
-  private String initializedComment;
+  // Provides any prior initial comment supplied, or empty string if none was provided. Volatile
+  // for the same cross-thread visibility reason as initializedConfig above.
+  private volatile String initializedComment;
 
   // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
   // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
@@ -286,7 +291,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
 
       // An empty config after a valid config is already active must be ignored -
       // it must never silently drop back into bypass mode.
-      if (isApproovEnabled() && initialConfig.isEmpty()) {
+      if (isApproovEnabled() && ((initialConfig == null) || initialConfig.isEmpty())) {
         Log.i("ApproovService", "already initialized with a valid config; ignoring empty configuration");
         result.success(null);
         return;
@@ -301,7 +306,7 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
           // Bypass mode: an empty config skips the native SDK call entirely, but
           // the service layer still records itself as initialized below, so
           // isInitialized() is true and isApproovEnabled() is false.
-          if (!initialConfig.isEmpty()) {
+          if ((initialConfig != null) && !initialConfig.isEmpty()) {
             Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
           }
         } catch (IllegalStateException e) {
