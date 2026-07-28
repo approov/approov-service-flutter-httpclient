@@ -1480,6 +1480,20 @@ class ApproovService {
   static Future<_ApproovRequestPreparation> _prepareRequestForApproov(
       String method, Uri uri) async {
     await _requireInitialized();
+    if (!(_initialConfig?.isNotEmpty ?? false)) {
+      // Bypass mode (empty initial config): skip Approov entirely for this
+      // real request. The mutator is deliberately never consulted for either
+      // gate here - a custom ApproovServiceMutator must not be able to
+      // re-enable token processing or pinning while running without a real
+      // Approov config, so both flags are forced to false before any call
+      // into _invokeMutator.
+      return _ApproovRequestPreparation(
+        uri: uri,
+        shouldProcessApproov: false,
+        shouldApplyPinning: false,
+        requestMutations: ApproovRequestMutations(),
+      );
+    }
     final snapshot = _requestSnapshotFromUri(method, uri, const {});
     final shouldProcessApproov = await _invokeMutator(
         (mutator) => mutator.handleInterceptorShouldProcessRequest(snapshot));
@@ -1507,6 +1521,17 @@ class ApproovService {
       shouldApplyPinning: shouldApplyPinning,
       requestMutations: requestMutations,
     );
+  }
+
+  /// Test-only accessor for [_prepareRequestForApproov].
+  ///
+  /// Exposes the bypass-mode short-circuit (and the normal mutator-driven
+  /// path) so tests can assert on the resulting processing/pinning flags
+  /// without needing a real platform channel or a live HTTP request.
+  @visibleForTesting
+  static Future<_ApproovRequestPreparation> prepareRequestForApproovForTesting(
+      String method, Uri uri) {
+    return _prepareRequestForApproov(method, uri);
   }
 
   /// Adds Approov to the given request by adding the Approov token in a header. If a binding header has been specified
