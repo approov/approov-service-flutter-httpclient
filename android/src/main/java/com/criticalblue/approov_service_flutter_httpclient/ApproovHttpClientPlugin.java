@@ -231,8 +231,11 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   private volatile String initializedConfig = null;
 
   // Provides any prior initial comment supplied, or empty string if none was provided. Volatile
-  // for the same cross-thread visibility reason as initializedConfig above.
-  private volatile String initializedComment;
+  // for the same cross-thread visibility reason as initializedConfig above. Initialized to the
+  // empty string so the field always matches that contract: the re-initialization guard below
+  // dereferences it, and only the short-circuit on initializedConfig == null keeps that safe
+  // before the first initialize call.
+  private volatile String initializedComment = "";
 
   // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
   // track of dynamic configuration changes and the state is held in the platform layer as we want this to work

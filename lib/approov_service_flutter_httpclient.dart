@@ -837,7 +837,8 @@ class ApproovService {
     _exclusionURLRegexs.remove(urlRegex);
   }
 
-  /// Allows an Approov fetch operation to be performed as early as possible.
+  /// Does nothing. Formerly allowed an Approov fetch operation to be performed as
+  /// early as possible.
   ///
   /// @deprecated This method is obsolete and is now a no-op. The underlying Approov
   /// SDK manages prefetching automatically. Matches the rest of the Approov service
@@ -2205,11 +2206,17 @@ class ApproovService {
     return securityContext;
   }
 
+  /// Restores every piece of static initialization state to its pre-initialize
+  /// value, so one test cannot leak state into the next. [_isRootIsolate] is
+  /// included deliberately: it is written by a successful [initialize] and then
+  /// selects between the callback and blocking background-channel paths, so
+  /// leaving it set would make later tests order-dependent.
   @visibleForTesting
   static void resetInitStateForTesting() {
     _futureInitialization = null;
     _isInitialized = false;
     _initialConfig = null;
+    _isRootIsolate = false;
   }
 }
 
