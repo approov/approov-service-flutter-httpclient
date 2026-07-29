@@ -113,6 +113,33 @@ void main() {
     expect(await ApproovService.isApproovEnabled(), true);
   });
 
+  test('query methods consult native even when this isolate never initialized',
+      () async {
+    // Simulates a background isolate: the process-wide native SDK is already
+    // initialized (from another isolate), but this isolate never called
+    // initialize(), so _futureInitialization is null. The query methods must
+    // still report the native truth rather than short-circuiting to false.
+    final fgCalls = <String>[];
+    fgHandler = (call) async {
+      fgCalls.add(call.method);
+      switch (call.method) {
+        case 'isInitialized':
+          return true;
+        case 'isApproovEnabled':
+          return true;
+        default:
+          return null;
+      }
+    };
+
+    // Note: no ApproovService.initialize(...) call here.
+    expect(await ApproovService.isInitialized(), true);
+    expect(await ApproovService.isApproovEnabled(), true);
+    expect(fgCalls, containsAll(<String>['isInitialized', 'isApproovEnabled']),
+        reason: 'both queries must reach the native layer, not return false '
+            'early on a null local initialization future');
+  });
+
   test('bypass mode short-circuits before the mutator is ever consulted',
       () async {
     // This mutator always answers "true" for both gates. If the production

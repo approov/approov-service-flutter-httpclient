@@ -944,19 +944,25 @@ class ApproovService {
   /// Returns whether the Approov service layer has been initialized. This is true
   /// even when initialized in bypass mode with an empty configuration string - it
   /// does not indicate that Approov protection is actually active. Use
-  /// [isApproovEnabled] for that. Queries the native layer directly rather than a
-  /// local Dart flag, since Dart-level state is per-isolate and can be stale
-  /// relative to the process-wide native SDK state. Returns false, rather than
-  /// throwing, if [initialize] has never been called or its most recent attempt
-  /// failed.
+  /// [isApproovEnabled] for that. The answer is read from the native layer, which
+  /// holds the process-wide SDK state, rather than a local Dart flag: Dart-level
+  /// state is per-isolate and a background isolate that never itself called
+  /// [initialize] would otherwise report false even though the SDK is already
+  /// initialized from another isolate. Returns false, rather than throwing, only
+  /// when the native layer reports uninitialized or is unreachable.
   ///
   /// @return true if the service layer has been initialized
   static Future<bool> isInitialized() async {
-    if (_futureInitialization == null) return false;
-    try {
-      await _futureInitialization;
-    } catch (_) {
-      return false;
+    // Settle any in-flight initialize started by *this* isolate so a same-isolate
+    // caller gets a consistent answer. An absent or failed local attempt is not
+    // decisive - another isolate may have initialized the process-wide native SDK
+    // - so always fall through to the authoritative native query.
+    if (_futureInitialization != null) {
+      try {
+        await _futureInitialization;
+      } catch (_) {
+        // ignore - native is the source of truth, queried below
+      }
     }
     try {
       bool? result = await _invokeFgMethod('isInitialized');
@@ -968,16 +974,21 @@ class ApproovService {
 
   /// Returns whether Approov-backed protection (token injection, pinning, secure
   /// string substitution) is actually active. Returns false when the service
-  /// layer is initialized in bypass mode with an empty configuration string, or
-  /// if [initialize] has never been called or its most recent attempt failed.
+  /// layer is initialized in bypass mode with an empty configuration string. Like
+  /// [isInitialized], the answer is read from the process-wide native SDK state
+  /// rather than a per-isolate Dart flag, and returns false (rather than throwing)
+  /// only when the native layer reports protection inactive or is unreachable.
   ///
   /// @return true if Approov protection is active
   static Future<bool> isApproovEnabled() async {
-    if (_futureInitialization == null) return false;
-    try {
-      await _futureInitialization;
-    } catch (_) {
-      return false;
+    // See [isInitialized] - settle this isolate's own initialize if any, then
+    // defer to native as the authoritative, cross-isolate source of truth.
+    if (_futureInitialization != null) {
+      try {
+        await _futureInitialization;
+      } catch (_) {
+        // ignore - native is the source of truth, queried below
+      }
     }
     try {
       bool? result = await _invokeFgMethod('isApproovEnabled');

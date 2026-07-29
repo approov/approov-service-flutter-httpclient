@@ -14,11 +14,11 @@
 
 ## Context every task needs
 
-- Repo: `/Users/ivol/Approov/service-layers/approov-service-flutter-httpclient`.
-- Reference implementation to mirror (read, don't copy wholesale — this plugin's native layer is much thinner than RN's, most runtime state lives in Dart): `/Users/ivol/Approov/service-layers/approov-service-react-native`:
+- Repo: this plugin (`<plugin-repo-root>`).
+- Reference implementation to mirror (read, don't copy wholesale — this plugin's native layer is much thinner than RN's, most runtime state lives in Dart): the `approov-service-react-native` service layer (`<react-native-service-layer>`):
   - Android pattern: `android/src/main/java/io/approov/reactnative/ApproovService.java:750-896` (the `@ReactMethod initialize` method and `isInitialized()`/`isApproovEnabled()` below it).
   - iOS pattern: `ios/ApproovService.m:122-125` (`ApproovIsEnabled()` helper) and the `initialize` method-call branch.
-- Spec every behavior below is checked against: `/Users/ivol/Approov/core-service-layers-testing/TESTING_REQUIREMENTS.md` §1 "Initialization" (specifically: Empty Configuration (Valid/Empty Comment), Empty Then Valid Configuration, Empty Configuration after Valid Configuration, Service-Layer State Only Updated On Success) and §7 "Common Service Layer Interface" (`isInitialized()`, `isApproovEnabled()` are mandatory).
+- Spec every behavior below is checked against: `<core-service-layers-testing>/TESTING_REQUIREMENTS.md` §1 "Initialization" (specifically: Empty Configuration (Valid/Empty Comment), Empty Then Valid Configuration, Empty Configuration after Valid Configuration, Service-Layer State Only Updated On Success) and §7 "Common Service Layer Interface" (`isInitialized()`, `isApproovEnabled()` are mandatory).
 - **Out of scope, do not touch:** the existing "two different non-empty configs" throw behavior in Dart (`lib/approov_service_flutter_httpclient.dart:451-454`) is itself a pre-existing deviation from the spec (spec says forward to native and let native's `IllegalStateException` surface; this code throws its own `ApproovException` before ever reaching native) — that's a separate, pre-existing gap. This plan only touches the empty-string transitions.
 - Verified fact, do not re-derive: neither `isInitialized()` nor `isApproovEnabled()` exists anywhere in this plugin today (checked via grep across `lib/`, `android/`, `ios/`). Native Android/iOS `initialize` handlers currently call the native SDK unconditionally regardless of config emptiness — confirmed by reading both files directly.
 - **Why `isInitialized`/`isApproovEnabled` must go through the platform channel, not local Dart state:** Dart's own `_isInitialized`/`_initialConfig` are `static` fields scoped to a single Dart **isolate**. Flutter background isolates get their own copy — a background isolate that never itself called `initialize()` would see `_isInitialized == false` even though the native side (a process-wide singleton) is already initialized from the root isolate. This exact problem is why the existing `initialize()` code already re-derives its "am I already initialized" answer from *native* state (`initializedConfig`) rather than trusting Dart's own flag across isolates (see the comment at `android/src/main/java/com/criticalblue/approov_service_flutter_httpclient/ApproovHttpClientPlugin.java:225-226`). Query methods need the same treatment.
@@ -581,7 +581,7 @@ python3 - <<'PY'
 p = "pubspec.yaml"
 s = open(p).read()
 s = s.replace("dependencies:\n  flutter:\n    sdk: flutter\n",
-              "dependencies:\n  flutter:\n    sdk: flutter\n  approov_service_flutter_httpclient:\n    path: /Users/ivol/Approov/service-layers/approov-service-flutter-httpclient\n")
+              "dependencies:\n  flutter:\n    sdk: flutter\n  approov_service_flutter_httpclient:\n    path: <plugin-repo-root>\n")
 open(p, "w").write(s)
 PY
 flutter pub get
@@ -640,7 +640,7 @@ If instead you see a thrown `PlatformException` or the app crashes on the first 
 
 **Step 4 (optional, needs a real Approov account config + a connected device): verify the upgrade path**
 
-If you have a real config string (the one used earlier this session for the `approov-service-react-native` device test, `#cb-ivol#mAxOF0ekJUOC36J5XWmVmVipOcUoEdMjhPSp2FVtyTo=`, may or may not be valid for this specific plugin's account setup — confirm with the user first), extend the throwaway app to also call `await ApproovService.initialize('<config>');` after the empty-config calls and check `isApproovEnabled()` flips to `true`. This is the one part of this plan that benefits from the same physical-device-plus-Charles-Proxy verification style used earlier in this session for the React Native plugin — ask the user if they want to do that hands-on check before merging, rather than deciding it for them.
+If you have a real config string (`<REAL_CONFIG_STRING>` — a valid config for the plugin's account setup; confirm with the user first), extend the throwaway app to also call `await ApproovService.initialize('<config>');` after the empty-config calls and check `isApproovEnabled()` flips to `true`. This is the one part of this plan that benefits from the same physical-device-plus-Charles-Proxy verification style used earlier in this session for the React Native plugin — ask the user if they want to do that hands-on check before merging, rather than deciding it for them.
 
 **Step 5: Android — sanity build**
 
@@ -661,7 +661,7 @@ rm -rf /tmp/bypass_verify_app
 
 ```bash
 source /usr/local/share/chruby/chruby.sh && chruby ruby-3.3.1 && export LANG=en_US.UTF-8
-cd /Users/ivol/Approov/service-layers/approov-service-flutter-httpclient
+cd <plugin-repo-root>
 pod lib lint ios/approov_service_flutter_httpclient.podspec --configuration=Debug --skip-tests --use-modular-headers --allow-warnings
 ```
 
