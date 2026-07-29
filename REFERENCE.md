@@ -143,7 +143,7 @@ Fetches secure string value or sets a per-device definition when `newDef` is pro
 
 ### `prefetch()`
 
-Starts an early token fetch to reduce effective latency later.
+**OBSOLETE**: This method is obsolete and is now a no-op. The underlying Approov SDK manages prefetching automatically.
 
 ### `precheck()`
 

@@ -461,8 +461,13 @@ void main() {
       expect(bgCalls, isEmpty);
     });
 
-    test('prefetch() does not attempt a platform-channel call in bypass mode',
+    test('prefetch() is obsolete and never attempts a platform-channel call',
         () async {
+      // prefetch() is now unconditionally a no-op (matching the rest of the
+      // Approov service layer family, e.g. approov-service-retrofit and
+      // approov-service-urlsession) - this is no longer bypass-mode-specific
+      // behavior, so this test only needs to cover the empty-config case;
+      // the equivalent real-config case is covered below.
       final fgCalls = <MethodCall>[];
       final bgCalls = <MethodCall>[];
       fgHandler = (call) async {
@@ -478,17 +483,13 @@ void main() {
       fgCalls.clear();
       bgCalls.clear();
 
-      // prefetch() returns void (fire-and-forget), not a Future, so there is
-      // nothing to await directly. Its bypass-mode guard sits before any
-      // await point, so the skip happens synchronously - but yield to the
-      // event loop once anyway so this assertion does not depend on that
-      // implementation detail staying true.
+      // ignore: deprecated_member_use_from_same_package
       ApproovService.prefetch();
       await Future<void>.delayed(Duration.zero);
 
       expect(fgCalls, isEmpty,
-          reason: 'prefetch must skip proactively in bypass mode rather than '
-              'attempting (and then catching the failure of) a token fetch');
+          reason: 'prefetch() is obsolete and must never reach the '
+              'platform channel');
       expect(bgCalls, isEmpty);
     });
 
@@ -651,9 +652,8 @@ void main() {
       // channel rather than being rejected as if in bypass mode, so it is
       // fired and the event loop is pumped, matching the style of the
       // fire-and-forget prefetch() tests elsewhere in this file.
-      unawaited(
-          ApproovService.fetchToken('https://example.com/api').catchError(
-              (_) => ''));
+      unawaited(ApproovService.fetchToken('https://example.com/api')
+          .catchError((_) => ''));
       await Future<void>.delayed(Duration.zero);
 
       expect(
@@ -667,9 +667,12 @@ void main() {
       );
     });
 
-    test(
-        'prefetch() reaches the platform channel after a real config '
-        'initialization', () async {
+    test('prefetch() remains a no-op even with a real config initialization',
+        () async {
+      // Confirms prefetch()'s obsolescence is unconditional - not merely a
+      // bypass-mode guard that could regress into a C1-style "only checked
+      // in one mode" bug. A real, valid configuration must not cause it to
+      // start reaching for the platform channel again.
       final fgCalls = <MethodCall>[];
       final bgCalls = <MethodCall>[];
       fgHandler = (call) async {
@@ -683,22 +686,25 @@ void main() {
 
       await ApproovService.initialize(
           'real-config', 'reinit-prefetch-protected');
+      // initialize() does not await its own settling - it only awaits a
+      // PRIOR pending call - so its internal setUserProperty call (fired
+      // only for a non-empty config) can still be in flight here. Await
+      // isInitialized(), which does await _futureInitialization
+      // internally, so that call has genuinely landed before clearing -
+      // otherwise it could race past the clear() below and wrongly appear
+      // to come from prefetch() instead.
+      await ApproovService.isInitialized();
       fgCalls.clear();
       bgCalls.clear();
 
-      // prefetch() returns void (fire-and-forget), not a Future, so there is
-      // nothing to await directly - pump the event loop instead, matching
-      // the bypass-mode prefetch() test above.
+      // ignore: deprecated_member_use_from_same_package
       ApproovService.prefetch();
       await Future<void>.delayed(Duration.zero);
 
-      expect(
-        fgCalls.map((c) => c.method),
-        contains('fetchApproovToken'),
-        reason: 'a real configuration must still cause prefetch() to reach '
-            'the platform channel, not silently no-op as if bypass mode '
-            'were active (the C1 regression)',
-      );
+      expect(fgCalls, isEmpty,
+          reason: 'prefetch() is obsolete and must never reach the '
+              'platform channel, in bypass mode or protected mode');
+      expect(bgCalls, isEmpty);
     });
   });
 

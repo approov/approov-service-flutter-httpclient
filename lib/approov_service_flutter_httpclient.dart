@@ -837,35 +837,15 @@ class ApproovService {
     _exclusionURLRegexs.remove(urlRegex);
   }
 
-  /// Starts a prefetch to lower the effective latency of a subsequent token or secure string fetch by
-  /// starting the operation earlier so the subsequent fetch should be able to use cached data.
-  static void prefetch() async {
-    try {
-      // Ensure initialization has genuinely settled before consulting
-      // _initialConfig below. initialize() only awaits the PRIOR pending
-      // call's future - it never awaits its own newly-kicked-off async work
-      // - so reading _initialConfig without first awaiting
-      // _requireInitialized() here could race ahead of a real, valid
-      // initialization that is still in flight (Task 9 review, finding C1).
-      // _fetchApproovToken below already calls _requireInitialized() again
-      // internally, but it does not itself check bypass mode, so this guard
-      // cannot simply be removed; it is placed after the await instead so it
-      // reads a settled value. Any exception here (including "not
-      // initialized" if prefetch is called before initialize) is caught
-      // below rather than escaping this fire-and-forget (void) method
-      // uncaught.
-      await _requireInitialized();
-      if (!(_initialConfig?.isNotEmpty ?? false)) {
-        // Bypass mode (empty initial config): skip proactively rather than
-        // attempting (and then catching the failure of) a doomed token fetch.
-        Log.d("$TAG: prefetch skipped in bypass mode");
-        return;
-      }
-      ApproovService._fetchApproovToken("https://approov.io/");
-      Log.d("$TAG: prefetch started");
-    } on ApproovException catch (e) {
-      Log.e("$TAG: prefetch: exception ${e.cause}");
-    }
+  /// Allows an Approov fetch operation to be performed as early as possible.
+  ///
+  /// @deprecated This method is obsolete and is now a no-op. The underlying Approov
+  /// SDK manages prefetching automatically. Matches the rest of the Approov service
+  /// layer family (e.g. `approov-service-retrofit`, `approov-service-urlsession`).
+  @Deprecated(
+      'This method is obsolete and is now a no-op. The underlying Approov SDK manages prefetching automatically.')
+  static void prefetch() {
+    Log.w("$TAG: prefetch is no longer used and does nothing.");
   }
 
   /// Performs a precheck to determine if the app will pass attestation. This requires secure
