@@ -227,8 +227,21 @@ class SfDate {
   final int seconds;
 
   /// Converts the stored seconds back into a UTC `DateTime`.
-  DateTime toUtcDateTime() =>
-      DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+  ///
+  /// The RFC 9651 date range (±999,999,999,999,999 seconds) is wider than
+  /// Dart's `DateTime` range (±100,000,000 days, ~±8.64e12 seconds), so an
+  /// RFC-valid extreme value may not be representable; that case throws
+  /// [SfFormatException] rather than leaking `DateTime`'s internal error type.
+  /// Parsing and serialization use [seconds] directly and are unaffected.
+  DateTime toUtcDateTime() {
+    try {
+      return DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+    } catch (_) {
+      throw SfFormatException(
+          'Date value $seconds is valid per RFC 9651 but outside the range '
+          'representable by DateTime');
+    }
+  }
 
   /// Validates that the seconds value lies within the allowed range.
   static void _validateRange(int seconds) {

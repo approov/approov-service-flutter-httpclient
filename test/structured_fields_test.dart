@@ -58,6 +58,20 @@ void main() {
       expect(SfBareItem.date(SfDate.fromSeconds(1659578233)).serialize(), '@1659578233');
     });
 
+    test('RFC-valid extreme date serializes but converts with SfFormatException',
+        () {
+      // The RFC 9651 range is wider than Dart's DateTime range: such a value
+      // must construct and serialize fine, and toUtcDateTime() must throw the
+      // library's own SfFormatException, not DateTime's internal error type.
+      final extreme = SfDate.fromSeconds(999999999999999);
+      expect(SfBareItem.date(extreme).serialize(), '@999999999999999');
+      expect(extreme.toUtcDateTime, throwsA(isA<SfFormatException>()));
+
+      // A representable value still round-trips.
+      expect(SfDate.fromSeconds(1659578233).toUtcDateTime(),
+          DateTime.fromMillisecondsSinceEpoch(1659578233 * 1000, isUtc: true));
+    });
+
     test('display string percent encodes non-ascii', () {
       final display = SfBareItem.displayString(SfDisplayString('über % test'));
       expect(display.serialize(), '%"%c3%bcber %25 test"');
