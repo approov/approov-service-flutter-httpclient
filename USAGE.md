@@ -95,7 +95,7 @@ Behavior in interceptor request flow:
 
 Notes:
 
-- Header name and prefix come from `setApproovHeader(header, prefix)`.
+- Header name and prefix come from `setApproovHeader(header, prefix)`; pass `null` for no prefix.
 - Fallback is not injected by default for `NO_APPROOV_SERVICE`, `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses.
 - Trace ID behavior is unchanged (only standard token success path controls trace ID injection).
 

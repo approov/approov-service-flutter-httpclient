@@ -372,7 +372,8 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // a hot restart if the configuration is the same or nil if not initialized.
 @property NSString *initializedConfig;
 
-// Provides any prior initial comment supplied, or empty string if none was provided
+// Provides any prior initial comment supplied, preserving nil distinctly from
+// the empty string.
 @property NSString *initializedComment;
 
 // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
@@ -428,10 +429,8 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
         NSError* error = nil;
         NSString *initialConfig = call.arguments[@"initialConfig"];
         NSString *commentString = nil;
-        if (call.arguments[@"comment"] != [NSNull null])
+        if ((call.arguments[@"comment"] != nil) && (call.arguments[@"comment"] != [NSNull null]))
             commentString = call.arguments[@"comment"];
-        else
-            commentString = @"";
 
         // An empty config after a valid config is already active must be ignored -
         // it must never silently drop back into bypass mode.
@@ -441,42 +440,24 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
             return;
         }
 
-        // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
-        // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
-        // that the SDK is already initialized whereas this native layer holds its state
-        if ((self.initializedConfig == nil) || ![self.initializedConfig isEqualToString:initialConfig] || ![self.initializedComment isEqualToString:commentString]) {
-            // this is a new config or a reinitialization
-            NSString *updateConfig = nil;
-            if (call.arguments[@"updateConfig"] != [NSNull null])
-                updateConfig = call.arguments[@"updateConfig"];
-            // Bypass mode: an empty config skips the native SDK call entirely, but
-            // the service layer still records itself as initialized below, so
-            // isInitialized is true and isApproovEnabled is false.
-            if (initialConfig.length != 0) {
-                [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
-                if (error != nil) {
-                    // check if the error message contains "Approov SDK already initialized"
-                    if ([error.localizedDescription rangeOfString:@"Approov SDK already initialized" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                        // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
-                        // different isolates and the initialization was made by a different quickstart (note we don't currently check
-                        // for the compatibility of the SDK parameters but a future version of the SDK will do this to avoid needing to
-                        // catch this at all)
-                        NSLog(@"ApproovService: Ignoring initialization error in Approov SDK: %@", error.localizedDescription);
-                    } else {
-                        result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
-                                                message:error.domain
-                                                details:error.localizedDescription]);
-                        return;
-                    }
-                }
+        NSString *updateConfig = nil;
+        if ((call.arguments[@"updateConfig"] != nil) && (call.arguments[@"updateConfig"] != [NSNull null]))
+            updateConfig = call.arguments[@"updateConfig"];
+        // All non-empty configuration strings must be forwarded to the native
+        // Approov SDK. Empty configuration is service-layer bypass mode, so it is
+        // recorded as initialized but deliberately not forwarded.
+        if (initialConfig.length != 0) {
+            [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
+            if (error != nil) {
+                result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
+                                        message:error.domain
+                                        details:error.localizedDescription]);
+                return;
             }
-            self.initializedConfig = initialConfig;
-            self.initializedComment = commentString;
-            result(nil);
-        } else {
-            // the previous initialization is compatible
-            result(nil);
         }
+        self.initializedConfig = initialConfig;
+        self.initializedComment = commentString;
+        result(nil);
     } else if ([@"isInitialized" isEqualToString:call.method]) {
         result(@((BOOL)(self.initializedConfig != nil)));
     } else if ([@"isApproovEnabled" isEqualToString:call.method]) {

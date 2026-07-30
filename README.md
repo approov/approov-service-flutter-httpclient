@@ -4,6 +4,7 @@
 ![pub.dev](https://img.shields.io/pub/v/approov_service_flutter_httpclient.svg?label=pub.dev&logo=dart&logoColor=white)
 ![iOS](https://img.shields.io/badge/iOS-11%2B-000000?logo=apple&logoColor=white)
 ![Android](https://img.shields.io/badge/Android-minSdk%2021-3DDC84?logo=android&logoColor=white)
+![Approov SDK](https://img.shields.io/badge/Approov%20SDK-3.5.3%2B-0A66C2)
 ![Message Signing](https://img.shields.io/badge/Message%20Signing-RFC%209421-1f6feb)
 
 A wrapper for the iOS [Approov SDK](https://github.com/approov/approov-ios-sdk) and Android [Approov SDK](https://github.com/approov/approov-android-sdk) to enable easy integration when using [`Flutter`](https://flutter.dev) for making API calls you want to protect with Approov. In order to use this you will need a trial or paid [Approov](https://www.approov.io) account.
@@ -50,13 +51,16 @@ Future<void> initializeApproov() async {
   // have — it is NOT an Approov secret.
   final correlationId = const Uuid().v4();
 
-  await ApproovService.initialize('<enter-your-config-string-here>');
   try {
-    // getDeviceID() waits on the initialization result, so this is where an
-    // initialization failure actually surfaces.
-    final deviceID = await ApproovService.getDeviceID();
-    // Initialization succeeded — log identifiers for correlation / observability.
-    print('Approov initialized; deviceID=$deviceID session=$correlationId');
+    await ApproovService.initialize('<enter-your-config-string-here>');
+    final approovEnabled = await ApproovService.isApproovEnabled();
+    if (approovEnabled) {
+      final deviceID = await ApproovService.getDeviceID();
+      // Initialization succeeded — log identifiers for correlation / observability.
+      print('Approov initialized; deviceID=$deviceID session=$correlationId');
+    } else {
+      print('Approov initialized without protection; session=$correlationId');
+    }
   } catch (e) {
     // Initialization failed — log it and continue UNPROTECTED so the app still works.
     // Re-initializing with an empty config string enters bypass mode (initialized,

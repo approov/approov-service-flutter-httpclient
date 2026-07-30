@@ -89,7 +89,7 @@ final Logger Log = Logger(
     lineLength: 120,
     colors: false,
     printEmojis: false,
-    printTime: true,
+    dateTimeFormat: DateTimeFormat.onlyTimeAndSinceStart,
   ),
 );
 
@@ -416,6 +416,7 @@ class ApproovService {
   /// @param config is the configuration string
   /// @param comment is an optional comment used during initialization or null if not required
   static Future<void> initialize(String config, [String? comment]) async {
+    final previousInitialization = _futureInitialization;
     if (_futureInitialization != null) {
       // ensure we wait in case initialize has been called previously - a failure
       // in that previous attempt must not block this one: it is either a retry
@@ -428,7 +429,18 @@ class ApproovService {
         // ignored - see above
       }
     }
-    _futureInitialization = _initializeAsync(config, comment);
+    final hadSuccessfulInitialization = _isInitialized;
+    final attemptedInitialization = _initializeAsync(config, comment);
+    _futureInitialization = attemptedInitialization;
+    try {
+      await attemptedInitialization;
+    } catch (_) {
+      if (hadSuccessfulInitialization &&
+          identical(_futureInitialization, attemptedInitialization)) {
+        _futureInitialization = previousInitialization ?? Future<void>.value();
+      }
+      rethrow;
+    }
   }
 
   /// Internal method to ensure that the Approov SDK has been initialized before any other methods are called.
@@ -453,32 +465,23 @@ class ApproovService {
     await _initMutex.protect(() async {
       bool isRootIsolate = (RootIsolateToken.instance != null);
       String isolate = isRootIsolate ? "root" : "background";
-      if (_isInitialized && config.isEmpty) {
-        // Empty configuration after any prior initialization (valid or bypass)
-        // is ignored outright, regardless of any "reinit" comment - it must
-        // never silently drop an already-active configuration back into
-        // bypass mode, and must never let Dart's _initialConfig disagree with
-        // native (which independently applies this same guard and will not
-        // actually reinitialize for an empty config either way) (see
-        // TESTING_REQUIREMENTS.md §1, "Empty Configuration after Valid
+      if (_isInitialized &&
+          config.isEmpty &&
+          (_initialConfig?.isNotEmpty ?? false)) {
+        // Empty configuration after a valid/protected initialization is
+        // ignored outright, regardless of any "reinit" comment - it must never
+        // silently drop an already-active configuration back into bypass mode
+        // (see TESTING_REQUIREMENTS.md §1, "Empty Configuration after Valid
         // Configuration").
         Log.d(
             "$TAG: $isolate initialization ignoring empty configuration; already initialized");
-      } else if (_isInitialized &&
-          ((comment == null) || !comment.startsWith("reinit")) &&
-          (_initialConfig?.isNotEmpty ?? false)) {
-        // this is a reinitialization attempt and we need to check if the config is the same
-        if (_initialConfig != config) {
-          throw ApproovException(
-              "Attempt to reinitialize the Approov SDK with a different configuration $config");
-        }
-        Log.d(
-            "$TAG: $isolate initialization ignoring attempt with the same config");
       } else {
         // Reached when: never initialized, OR previously in bypass mode and now
         // given any config (the "Empty Then Valid Configuration" upgrade path -
-        // this must fall through to a real initialization below), OR the comment
-        // starts with "reinit".
+        // this must fall through to a real initialization below), OR any
+        // non-empty reinitialization. All non-empty initialization attempts must
+        // be forwarded to the native SDK; the native result is the source of
+        // truth for same-config success and different-config failure.
         // perform the actual initialization
         try {
           // initialize the Approov SDK
@@ -503,6 +506,8 @@ class ApproovService {
                 "$TAG: $isolate initialized without the Approov SDK (bypass mode)");
           }
 
+          _resetServiceStateAfterSuccessfulInitialization();
+
           // setup ready for callbacks from the platform layer if we are running
           // in the root isolate (this is not possible in background isolates)
           if (isRootIsolate) {
@@ -526,6 +531,23 @@ class ApproovService {
         }
       }
     });
+  }
+
+  static void _resetServiceStateAfterSuccessfulInitialization() {
+    _approovTokenHeader = APPROOV_HEADER;
+    _approovTraceIDHeader = APPROOV_TRACE_ID_HEADER;
+    _approovTokenPrefix = APPROOV_TOKEN_PREFIX;
+    _proceedOnNetworkFail = false;
+    _useApproovStatusIfNoToken = false;
+    _bindingHeader = null;
+    _substitutionHeaders = {};
+    _substitutionQueryParams = {};
+    _exclusionURLRegexs = {};
+    _serviceMutator = ApproovServiceMutator.DEFAULT;
+    _messageSigning = null;
+    _installMessageSigningAvailable = true;
+    _hostCertificates = Map<String, List<Uint8List>?>();
+    _configEpoch++;
   }
 
   /// Sets a flag indicating if the network interceptor should proceed anyway if it is
@@ -648,11 +670,11 @@ class ApproovService {
   /// "Approov-Token" with no prefix.
   ///
   /// @param header is the header to place the Approov token on
-  /// @param prefix is any prefix String for the Approov token header
-  static void setApproovHeader(String header, String prefix) {
+  /// @param prefix is any prefix String for the Approov token header, or null for no prefix
+  static void setApproovHeader(String header, String? prefix) {
     Log.d("$TAG: setApproovHeader $header $prefix");
     _approovTokenHeader = header;
-    _approovTokenPrefix = prefix;
+    _approovTokenPrefix = prefix ?? "";
   }
 
   /// Sets the header that receives any Approov TraceID value provided by the SDK. Passing null disables adding the header.
@@ -1125,12 +1147,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
     // Ensure initialization has genuinely settled before consulting
-    // _initialConfig below. initialize() only awaits the PRIOR pending
-    // call's future - it never awaits its own newly-kicked-off async work -
-    // so reading _initialConfig without first awaiting
-    // _requireInitialized() here could race ahead of a real, valid
-    // initialization that is still in flight (Task 9 review, finding C1).
-    // This is safe even though _fetchApproovToken below calls
+    // _initialConfig below. This is safe even though _fetchApproovToken calls
     // _requireInitialized() again internally: awaiting an already-completed
     // Future a second time is harmless, and it also gives the correct,
     // specific "not initialized" error for the genuinely-never-initialized
@@ -1658,7 +1675,7 @@ class ApproovService {
     String? bindingHeader = _bindingHeader;
     if (bindingHeader != null) {
       String? headerValue = request.headers.value(bindingHeader);
-      if (headerValue != null) setDataHashInToken(headerValue);
+      if (headerValue != null) await setDataHashInToken(headerValue);
     }
 
     // request an Approov token for the full request URL
@@ -1784,13 +1801,7 @@ class ApproovService {
 
     if (_messageSigning != null &&
         fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS) {
-      try {
-        await _applyMessageSigning(request, pendingBodyBytes);
-      } on ApproovException {
-        rethrow;
-      } catch (err) {
-        throw ApproovException("Message signing failed: $err");
-      }
+      await _applyMessageSigning(request, pendingBodyBytes);
     }
 
     await _invokeMutator((mutator) =>
@@ -1802,59 +1813,74 @@ class ApproovService {
     final messageSigning = _messageSigning;
     if (messageSigning == null) return;
 
-    final context = ApproovSigningContext(
-      requestMethod: request.method,
-      uri: request.uri,
-      headers: _snapshotHeaders(request.headers),
-      bodyBytes: pendingBodyBytes,
-      tokenHeaderName: _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
-      onSetHeader: (name, value) =>
-          request.headers.set(name, value, preserveHeaderCase: true),
-      onAddHeader: (name, value) =>
-          request.headers.add(name, value, preserveHeaderCase: true),
-    );
-
-    final params = messageSigning.buildParametersFor(request.uri, context);
-    if (params == null) {
-      Log.d("$TAG: no message signing parameters for ${request.uri}");
-      return;
-    }
-
-    final signatureBase =
-        SignatureBaseBuilder(params, context).createSignatureBase();
-    final alg = params.algorithmIdentifier;
-    if (alg == null) {
-      throw StateError('Signature parameters missing alg identifier');
-    }
-    String signature;
     try {
-      signature = await _signCanonicalMessage(signatureBase, alg);
-    } catch (err) {
-      if (alg == 'ecdsa-p256-sha256') {
-        Log.w("$TAG: skipping install message signing; $err");
+      final stagedHeaders = <String, String>{};
+      final context = ApproovSigningContext(
+        requestMethod: request.method,
+        uri: request.uri,
+        headers: _snapshotHeaders(request.headers),
+        bodyBytes: pendingBodyBytes,
+        tokenHeaderName:
+            _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
+        onSetHeader: (name, value) => stagedHeaders[name] = value,
+        onAddHeader: (name, value) => stagedHeaders[name] = value,
+      );
+
+      final params = messageSigning.buildParametersFor(request.uri, context);
+      if (params == null) {
+        Log.d("$TAG: no message signing parameters for ${request.uri}");
         return;
       }
-      rethrow;
-    }
-    if (signature.isEmpty) {
-      Log.d(
-          "$TAG: message signing returned empty signature for ${request.uri}");
-      return;
-    }
 
-    final signatureLabel = _signatureLabelForAlg(alg);
-    final signatureHeader = '$signatureLabel=:${signature}:';
-    context.setHeader('Signature', signatureHeader);
+      final alg = params.algorithmIdentifier;
+      if (alg == null) {
+        throw StateError('Signature parameters missing alg identifier');
+      }
+      if (!_isSupportedSignatureAlgorithm(alg)) {
+        throw StateError('Unsupported signature alg: $alg');
+      }
 
-    final signatureInput =
-        '$signatureLabel=${params.serializeComponentValue()}';
-    context.setHeader('Signature-Input', signatureInput);
+      final signatureBase =
+          SignatureBaseBuilder(params, context).createSignatureBase();
+      final signature = await _signCanonicalMessage(signatureBase, alg);
+      if (signature.isEmpty) {
+        throw StateError('message signing returned empty signature');
+      }
 
-    if (params.debugMode) {
-      final digest = sha256.convert(utf8.encode(signatureBase)).bytes;
-      final baseDigestHeader = 'sha-256=:${base64Encode(digest)}:';
-      context.setHeader('Signature-Base-Digest', baseDigestHeader);
+      final signatureLabel = _signatureLabelForAlg(alg);
+      stagedHeaders['Signature'] = '$signatureLabel=:${signature}:';
+      stagedHeaders['Signature-Input'] =
+          '$signatureLabel=${params.serializeComponentValue()}';
+
+      if (params.debugMode) {
+        final digest = sha256.convert(utf8.encode(signatureBase)).bytes;
+        stagedHeaders['Signature-Base-Digest'] =
+            'sha-256=:${base64Encode(digest)}:';
+      }
+
+      stagedHeaders.forEach((name, value) {
+        request.headers.set(name, value, preserveHeaderCase: true);
+      });
+    } catch (err) {
+      if (_isRequiredBodyDigestFailure(err) ||
+          _isUnsupportedSignatureAlgorithmFailure(err)) {
+        throw ApproovException("Message signing failed: $err");
+      }
+      Log.e("$TAG: skipping message signing for ${request.uri}: $err");
     }
+  }
+
+  static bool _isSupportedSignatureAlgorithm(String algorithmIdentifier) {
+    return algorithmIdentifier == 'ecdsa-p256-sha256' ||
+        algorithmIdentifier == 'hmac-sha256';
+  }
+
+  static bool _isRequiredBodyDigestFailure(Object err) {
+    return err.toString().contains('Body digest required');
+  }
+
+  static bool _isUnsupportedSignatureAlgorithmFailure(Object err) {
+    return err.toString().contains('Unsupported signature alg:');
   }
 
   static Future<String> _signCanonicalMessage(
@@ -1897,12 +1923,11 @@ class ApproovService {
       return base64Encode(rawSignature);
     } on MissingPluginException {
       _installMessageSigningAvailable = false;
-      Log.w("$TAG: getInstallMessageSignature not available on this platform");
+      Log.e("$TAG: getInstallMessageSignature not available on this platform");
       throw StateError('install message signing not supported');
     } catch (err) {
-      _installMessageSigningAvailable = false;
-      Log.w("$TAG: getInstallMessageSignature error: $err");
-      throw StateError('install message signing not supported');
+      Log.e("$TAG: getInstallMessageSignature error: $err");
+      throw StateError('install message signing failed: $err');
     }
   }
 
@@ -2206,17 +2231,20 @@ class ApproovService {
     return securityContext;
   }
 
-  /// Restores every piece of static initialization state to its pre-initialize
-  /// value, so one test cannot leak state into the next. [_isRootIsolate] is
-  /// included deliberately: it is written by a successful [initialize] and then
-  /// selects between the callback and blocking background-channel paths, so
-  /// leaving it set would make later tests order-dependent.
+  /// Restores static initialization and runtime configuration state, so one
+  /// test cannot leak state into the next. [_isRootIsolate] is included
+  /// deliberately: it is written by a successful [initialize] and then selects
+  /// between the callback and blocking background-channel paths, so leaving it
+  /// set would make later tests order-dependent.
   @visibleForTesting
   static void resetInitStateForTesting() {
     _futureInitialization = null;
     _isInitialized = false;
     _initialConfig = null;
     _isRootIsolate = false;
+    _resetServiceStateAfterSuccessfulInitialization();
+    _configEpoch = 0;
+    _platformTransactions.clear();
   }
 }
 

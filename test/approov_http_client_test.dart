@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:approov_service_flutter_httpclient/approov_service_flutter_httpclient.dart';
 import 'package:crypto/crypto.dart';
@@ -17,19 +17,26 @@ void main() {
   late Future<dynamic> Function(MethodCall call) bgChannelHandler;
 
   setUp(() {
+    ApproovService.resetInitStateForTesting();
     channelHandler = (MethodCall methodCall) async => '42';
     bgChannelHandler = (MethodCall methodCall) async => null;
-    fgChannel.setMockMethodCallHandler(
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      fgChannel,
       (MethodCall call) => channelHandler(call),
     );
-    bgChannel.setMockMethodCallHandler(
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      bgChannel,
       (MethodCall call) => bgChannelHandler(call),
     );
   });
 
   tearDown(() {
-    fgChannel.setMockMethodCallHandler(null);
-    bgChannel.setMockMethodCallHandler(null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(fgChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(bgChannel, null);
     ApproovService.disableMessageSigning();
     ApproovService.setServiceMutator(null);
     ApproovService.setApproovTraceIDHeader('Approov-TraceID');
@@ -285,6 +292,107 @@ void main() {
     expect(mutations.tokenHeaderKey, 'Approov-Token');
     expect(mutations.traceIDHeaderKey, isNull);
   });
+
+  test('null token prefix is treated as no prefix', () {
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('X-Approov-Token', null);
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _successfulFetchResult(traceID: ''),
+      mutations,
+    );
+
+    expect(headers['X-Approov-Token'], 'trace-test-token');
+    expect(headers['X-Approov-Token']!.startsWith('null'), false);
+    expect(mutations.tokenHeaderKey, 'X-Approov-Token');
+  });
+
+  test('message signing SDK failures proceed unsigned', () async {
+    final calls = <MethodCall>[];
+    final observedHeaders = <String, List<String>>{};
+
+    bgChannelHandler = (MethodCall call) async {
+      calls.add(call);
+      return null;
+    };
+    channelHandler = (MethodCall call) async {
+      calls.add(call);
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        case 'getAccountMessageSignature':
+          throw PlatformException(
+              code: 'Approov.sign', message: 'account key unavailable');
+        default:
+          fail('Unexpected method ${call.method}');
+      }
+    };
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-signing-fail-open');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseAccountMessageSigning(),
+    );
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    final response =
+        await client.get(Uri.parse('http://127.0.0.1:${server.port}/signed'));
+
+    expect(response.statusCode, 200);
+    expect(response.body, 'ok');
+    expect(observedHeaders['approov-token'], ['approov-token']);
+    expect(observedHeaders.containsKey('signature'), false);
+    expect(observedHeaders.containsKey('signature-input'), false);
+    expect(calls.map((call) => call.method),
+        containsAll(['fetchApproovToken', 'getAccountMessageSignature']));
+  });
 }
 
 ApproovSigningContext _buildSigningContext(Uri uri) {
@@ -319,4 +427,11 @@ ApproovTokenFetchResult _successfulFetchResult({required String traceID}) {
     proceedOnNetworkFail: false,
     useApproovStatusIfNoToken: false,
   );
+}
+
+class _SkipPinningMutator extends ApproovServiceMutator {
+  @override
+  bool handlePinningShouldProcessRequest(ApproovRequestSnapshot request) {
+    return false;
+  }
 }

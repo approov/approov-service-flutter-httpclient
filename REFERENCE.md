@@ -18,7 +18,9 @@ Most async methods may throw:
 
 ### `initialize(String config, [String? comment])`
 
-Initializes the Approov SDK. Must be called before any fetch operations.
+Initializes the service layer. A non-empty config initializes the native Approov SDK; an empty config enters bypass mode, where the service layer is initialized but Approov protection is disabled. `initialize()` completes only after the initialization attempt succeeds or fails.
+
+Every non-empty config is forwarded to the native SDK. Native failures are surfaced to the caller and leave the existing service-layer state unchanged. Successful initialization resets runtime request configuration such as header overrides, token binding, substitutions, exclusions, message signing, and custom mutators.
 
 ### `isInitialized()`
 
@@ -70,9 +72,10 @@ Returns the currently configured service-layer logging level.
 
 Controls whether interceptor flows can continue when Approov fetch fails due to networking conditions.
 
-### `setApproovHeader(String header, String prefix)`
+### `setApproovHeader(String header, String? prefix)`
 
 Sets token header name and optional prefix.
+Passing `null` for `prefix` is equivalent to no prefix.
 
 This applies to both:
 

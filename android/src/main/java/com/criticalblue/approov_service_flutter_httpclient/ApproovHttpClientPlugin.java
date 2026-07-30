@@ -230,12 +230,10 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // thread to observe the writing thread's update.
   private volatile String initializedConfig = null;
 
-  // Provides any prior initial comment supplied, or empty string if none was provided. Volatile
-  // for the same cross-thread visibility reason as initializedConfig above. Initialized to the
-  // empty string so the field always matches that contract: the re-initialization guard below
-  // dereferences it, and only the short-circuit on initializedConfig == null keeps that safe
-  // before the first initialize call.
-  private volatile String initializedComment = "";
+  // Provides any prior initial comment supplied, preserving null distinctly from
+  // the empty string. Volatile for the same cross-thread visibility reason as
+  // initializedConfig above.
+  private volatile String initializedComment = null;
 
   // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
   // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
@@ -288,9 +286,6 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       // get the initialization arguments
       String initialConfig = call.argument("initialConfig");
       String commentString = call.argument("comment");
-      if (commentString == null) {
-        commentString = "";
-      }
 
       // An empty config after a valid config is already active must be ignored -
       // it must never silently drop back into bypass mode.
@@ -300,35 +295,20 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
         return;
       }
 
-      // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
-      // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
-      // that the SDK is already initialized whereas this native layer holds its state
-      if ((initializedConfig == null) || !initializedConfig.equals(initialConfig) || !initializedComment.equals(commentString)) {
-        // this is a new config or a reinitialization
-        try {
-          // Bypass mode: an empty config skips the native SDK call entirely, but
-          // the service layer still records itself as initialized below, so
-          // isInitialized() is true and isApproovEnabled() is false.
-          if ((initialConfig != null) && !initialConfig.isEmpty()) {
-            Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
-          }
-        } catch (IllegalStateException e) {
-          // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
-          // different isolates and the initialization was made by a different quickstart (note we don't currently check
-          // for the compatibility of the SDK parameters but a future version of the SDK will do this to avoid needing to
-          // catch this at all)
-          Log.w("ApproovService", "Ignoring initialization error in Approov SDK: " + e.getLocalizedMessage());
-        } catch(Exception e) {
-            result.error("Approov.initialize", e.getLocalizedMessage(), null);
-            return;
+      // All non-empty configuration strings must be forwarded to the native
+      // Approov SDK. Empty configuration is service-layer bypass mode, so it is
+      // recorded as initialized but deliberately not forwarded.
+      try {
+        if ((initialConfig != null) && !initialConfig.isEmpty()) {
+          Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
         }
-        initializedConfig = initialConfig;
-        initializedComment = commentString;
-        result.success(null);
-      } else {
-        // the previous initialization is compatible
-        result.success(null);
+      } catch(Exception e) {
+        result.error("Approov.initialize", e.getLocalizedMessage(), null);
+        return;
       }
+      initializedConfig = initialConfig;
+      initializedComment = commentString;
+      result.success(null);
     } else if (call.method.equals("isInitialized")) {
       result.success(initializedConfig != null);
     } else if (call.method.equals("isApproovEnabled")) {

@@ -19,13 +19,17 @@ void main() {
     ApproovService.resetInitStateForTesting();
     fgHandler = (MethodCall call) async => null;
     bgHandler = (MethodCall call) async => null;
-    fgChannel.setMockMethodCallHandler((call) => fgHandler(call));
-    bgChannel.setMockMethodCallHandler((call) => bgHandler(call));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(fgChannel, (call) => fgHandler(call));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(bgChannel, (call) => bgHandler(call));
   });
 
   tearDown(() {
-    fgChannel.setMockMethodCallHandler(null);
-    bgChannel.setMockMethodCallHandler(null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(fgChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(bgChannel, null);
   });
 
   test('empty config after a valid config is ignored, not thrown', () async {
@@ -57,12 +61,6 @@ void main() {
     await ApproovService.initialize('', 'reinit-b');
     // No throw expected here either - this is the other half of the bug.
     await ApproovService.initialize('real-config-2');
-    // initialize() does not await its own internal work - it only awaits the
-    // PRIOR pending call's future (see _futureInitialization guard at the top
-    // of initialize()). A second call with the same config forces a full wait
-    // on the previous call's completion, including its setUserProperty call,
-    // before this test asserts on the calls it made.
-    await ApproovService.initialize('real-config-2');
 
     expect(
       bgCalls.where((c) => c.method == 'initialize').map((c) => c.arguments),
@@ -75,6 +73,165 @@ void main() {
         },
       ],
     );
+  });
+
+  test('initialize awaits and surfaces current native initialization failure',
+      () async {
+    final fgCalls = <MethodCall>[];
+    final bgCalls = <MethodCall>[];
+    fgHandler = (call) async {
+      fgCalls.add(call);
+      return null;
+    };
+    bgHandler = (call) async {
+      bgCalls.add(call);
+      if (call.method == 'initialize') {
+        throw PlatformException(
+            code: 'Approov.initialize', message: 'bad config');
+      }
+      return null;
+    };
+
+    await expectLater(
+      ApproovService.initialize('bad-config'),
+      throwsA(isA<ApproovException>()
+          .having((e) => e.cause ?? '', 'cause', contains('bad config'))),
+    );
+    expect(bgCalls.map((c) => c.method), ['initialize']);
+    expect(fgCalls, isEmpty,
+        reason: 'setUserProperty must not run after failed native init');
+  });
+
+  test('same non-empty config is forwarded to native on reinitialization',
+      () async {
+    final bgCalls = <MethodCall>[];
+    bgHandler = (call) async {
+      bgCalls.add(call);
+      return null;
+    };
+
+    await ApproovService.initialize('real-config', null);
+    bgCalls.clear();
+
+    await ApproovService.initialize('real-config', null);
+
+    expect(
+      bgCalls.where((c) => c.method == 'initialize').map((c) => c.arguments),
+      [
+        {
+          'initialConfig': 'real-config',
+          'updateConfig': 'auto',
+          'comment': null
+        }
+      ],
+      reason: 'same-config reinitialization must still reach native so the SDK '
+          'can return its already-initialized result',
+    );
+  });
+
+  test('different non-empty native failure preserves protected mode', () async {
+    final fgCalls = <MethodCall>[];
+    final bgCalls = <MethodCall>[];
+    fgHandler = (call) async {
+      fgCalls.add(call);
+      if (call.method == 'getDeviceID') return 'protected-device';
+      return null;
+    };
+    bgHandler = (call) async {
+      bgCalls.add(call);
+      if (call.method == 'initialize' &&
+          call.arguments['initialConfig'] == 'different-config') {
+        throw PlatformException(
+            code: 'Approov.initialize', message: 'different config');
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('real-config', 'reinit-protected');
+    await expectLater(
+      ApproovService.initialize('different-config', 'reinit-different'),
+      throwsA(isA<ApproovException>()
+          .having((e) => e.cause ?? '', 'cause', contains('different config'))),
+    );
+    fgCalls.clear();
+
+    expect(await ApproovService.getDeviceID(), 'protected-device');
+    expect(fgCalls.map((c) => c.method), contains('getDeviceID'),
+        reason: 'a failed different-config init must not poison the previous '
+            'successful protected initialization future');
+  });
+
+  test('failed protected upgrade after bypass leaves bypass mode usable',
+      () async {
+    bgHandler = (call) async {
+      if (call.method == 'initialize' &&
+          call.arguments['initialConfig'] == 'bad-real-config') {
+        throw PlatformException(
+            code: 'Approov.initialize', message: 'bad real config');
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('', 'reinit-empty-first');
+    await expectLater(
+      ApproovService.initialize('bad-real-config', 'reinit-upgrade'),
+      throwsA(isA<ApproovException>()
+          .having((e) => e.cause ?? '', 'cause', contains('bad real config'))),
+    );
+
+    final preparation = await ApproovService.prepareRequestForApproovForTesting(
+        'GET', Uri.parse('https://example.com/'));
+
+    expect(preparation.shouldProcessApproov, false);
+    expect(preparation.shouldApplyPinning, false,
+        reason: 'the service must remain initialized in bypass mode after a '
+            'failed upgrade attempt');
+  });
+
+  test('successful initialization resets runtime service-layer state',
+      () async {
+    final mutator = _AlwaysAllowMutator();
+    ApproovService.setServiceMutator(mutator);
+    ApproovService.setApproovHeader('Custom-Approov', 'Bearer ');
+    ApproovService.setApproovTraceIDHeader(null);
+    ApproovService.setUseApproovStatusIfNoToken(true);
+    ApproovService.setBindingHeader('Authorization');
+    ApproovService.addSubstitutionHeader('X-Secret', null);
+    ApproovService.addSubstitutionQueryParam('apiKey');
+    ApproovService.addExclusionURLRegex('.*excluded.*');
+    ApproovService.enableMessageSigning();
+
+    await ApproovService.initialize('real-config-reset', 'reinit-reset');
+
+    expect(ApproovService.getServiceMutator(),
+        same(ApproovServiceMutator.DEFAULT));
+    expect(ApproovService.getApproovTraceIDHeader(), 'Approov-TraceID');
+    expect(ApproovService.getUseApproovStatusIfNoToken(), false);
+    expect(ApproovService.messageSigningForTesting(), isNull);
+
+    final headers = <String, String>{};
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      ApproovTokenFetchResult(
+        tokenFetchStatus: ApproovTokenFetchStatus.SUCCESS,
+        token: 'token',
+        secureString: null,
+        arc: '',
+        rejectionReasons: '',
+        isConfigChanged: false,
+        isForceApplyPins: false,
+        measurementConfig: Uint8List(0),
+        loggableToken: '',
+        traceID: 'trace',
+        requestURL: 'https://example.com',
+        proceedOnNetworkFail: false,
+        useApproovStatusIfNoToken: false,
+      ),
+      ApproovRequestMutations(),
+    );
+    expect(headers['Approov-Token'], 'token',
+        reason: 'token header name and prefix should reset to defaults');
+    expect(headers.containsKey('Custom-Approov'), false);
   });
 
   test('isInitialized and isApproovEnabled reflect bypass mode', () async {
@@ -148,11 +305,10 @@ void main() {
     // so the flags alone cannot distinguish "never asked" from "asked, then
     // overridden". The *Consulted flags are what actually prove the mutator
     // was skipped entirely.
+    await ApproovService.initialize('', 'reinit-e');
     final mutator = _AlwaysAllowMutator();
     ApproovService.setServiceMutator(mutator);
     addTearDown(() => ApproovService.setServiceMutator(null));
-
-    await ApproovService.initialize('', 'reinit-e');
 
     final preparation = await ApproovService.prepareRequestForApproovForTesting(
         'GET', Uri.parse('https://example.com/'));
@@ -186,11 +342,10 @@ void main() {
     // still route through the mutator as before, so the bypass-mode check
     // is not accidentally short-circuiting (or inverted to always
     // short-circuit) regardless of configuration.
+    await ApproovService.initialize('real-config-4', 'reinit-f');
     final mutator = _AlwaysAllowMutator();
     ApproovService.setServiceMutator(mutator);
     addTearDown(() => ApproovService.setServiceMutator(null));
-
-    await ApproovService.initialize('real-config-4', 'reinit-f');
 
     final preparation = await ApproovService.prepareRequestForApproovForTesting(
         'GET', Uri.parse('https://example.com/'));
@@ -713,14 +868,6 @@ void main() {
 
       await ApproovService.initialize(
           'real-config', 'reinit-prefetch-protected');
-      // initialize() does not await its own settling - it only awaits a
-      // PRIOR pending call - so its internal setUserProperty call (fired
-      // only for a non-empty config) can still be in flight here. Await
-      // isInitialized(), which does await _futureInitialization
-      // internally, so that call has genuinely landed before clearing -
-      // otherwise it could race past the clear() below and wrongly appear
-      // to come from prefetch() instead.
-      await ApproovService.isInitialized();
       fgCalls.clear();
       bgCalls.clear();
 
