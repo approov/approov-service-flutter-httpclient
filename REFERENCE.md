@@ -178,6 +178,8 @@ Directly sets a data hash to be included in token payload.
 
 Enables automatic message signing.
 
+**Failure semantics (fail-open, matching `approov-service-okhttp`):** if signing fails for any reason — the SDK cannot provide an install or account signature, a serialization error, a custom factory error — the request **proceeds unsigned** (no `Signature`, `Signature-Input`, or `Content-Digest` headers are added) and the reason is logged at error level. The backend is the enforcement point for message signatures. Only two conditions abort the request with an `ApproovException` instead: a body digest configured as **required** that cannot be generated (`RequiredBodyDigestException`), and an **unsupported or missing** signing algorithm (`UnsupportedSignatureAlgorithmException`). Both exception types are exported so custom `SignatureParametersFactory` implementations can throw them to force an abort.
+
 ### `disableMessageSigning()`
 
 Disables message signing.

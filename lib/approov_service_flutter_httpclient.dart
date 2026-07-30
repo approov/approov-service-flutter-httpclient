@@ -39,10 +39,12 @@ export 'src/message_signing.dart'
     show
         ApproovMessageSigning,
         ApproovSigningContext,
+        RequiredBodyDigestException,
         SignatureBaseBuilder,
         SignatureDigest,
         SignatureParameters,
-        SignatureParametersFactory;
+        SignatureParametersFactory,
+        UnsupportedSignatureAlgorithmException;
 export 'src/request_mutator.dart'
     show
         ApproovException,
@@ -140,6 +142,12 @@ class ApproovService {
 
   // initial configuration string provided
   static String? _initialConfig = null;
+
+  // Sentinel recorded as _initialConfig when this isolate initialized with an
+  // empty config but the process-wide native layer was already protected: the
+  // isolate then behaves as protected (every guard here only tests emptiness)
+  // without knowing the real config string, which is held natively.
+  static const String _nativeProtectedConfig = "<native-protected>";
 
   // configuration epoch used to determine if the configuration has changed to allow caches at
   // higher levels to be invalidated. This is actually obtained from the platform layer since
@@ -416,7 +424,6 @@ class ApproovService {
   /// @param config is the configuration string
   /// @param comment is an optional comment used during initialization or null if not required
   static Future<void> initialize(String config, [String? comment]) async {
-    final previousInitialization = _futureInitialization;
     if (_futureInitialization != null) {
       // ensure we wait in case initialize has been called previously - a failure
       // in that previous attempt must not block this one: it is either a retry
@@ -429,16 +436,30 @@ class ApproovService {
         // ignored - see above
       }
     }
-    final hadSuccessfulInitialization = _isInitialized;
     final attemptedInitialization = _initializeAsync(config, comment);
     _futureInitialization = attemptedInitialization;
     try {
       await attemptedInitialization;
     } catch (_) {
-      if (hadSuccessfulInitialization &&
+      // This attempt failed. If a successful initialization is still in effect,
+      // restore a freshly resolved future so the still-valid state remains
+      // usable. _isInitialized is read here, at catch time, because a
+      // concurrently overlapping initialize may have committed a success after
+      // this attempt started; a flag captured at entry would be stale. A
+      // captured earlier future is deliberately never restored: with
+      // overlapping calls that future may itself be a failed attempt, and
+      // installing it would make every _requireInitialized() rethrow a stale
+      // error while the native layer is healthy. The identical() guard leaves
+      // _futureInitialization alone when a newer attempt already replaced it.
+      if (_isInitialized &&
           identical(_futureInitialization, attemptedInitialization)) {
-        _futureInitialization = previousInitialization ?? Future<void>.value();
+        _futureInitialization = Future<void>.value();
       }
+      // When no initialization has ever succeeded, the failed future is left in
+      // place intentionally: _requireInitialized() then rethrows this original
+      // initialization error - rather than the generic "has not been
+      // initialized" message of the never-called case - preserving the root
+      // cause for diagnosis while remaining fail-closed.
       rethrow;
     }
   }
@@ -492,18 +513,35 @@ class ApproovService {
           };
           await _invokeBgMethod('initialize', arguments);
 
-          if (config.isNotEmpty) {
-            // set the user property to represent the framework being used - this
-            // can only be done when the native Approov SDK was actually
-            // initialized, which is skipped for an empty (bypass mode) config;
-            // calling it when the SDK was never initialized throws on Android.
-            arguments = <String, dynamic>{
-              "property": "approov-service-flutter-httpclient",
-            };
-            await _invokeFgMethod('setUserProperty', arguments);
-          } else {
-            Log.d(
-                "$TAG: $isolate initialized without the Approov SDK (bypass mode)");
+          // Determine the effective protection mode. An empty config normally
+          // means bypass mode, but the native layer applies its own
+          // empty-after-valid guard: a fresh isolate (or hot restart) sending
+          // an empty config while the process-wide native layer is already
+          // protected gets a successful no-op, NOT a downgrade. Committing ''
+          // locally in that case would make only this isolate run unprotected
+          // while isApproovEnabled() (native-backed) still reports true, so
+          // query native and record protected mode instead
+          // (TESTING_REQUIREMENTS.md §1, "Empty Configuration after Valid
+          // Configuration": the empty call must not affect existing
+          // functionality).
+          String effectiveConfig = config;
+          if (config.isEmpty) {
+            bool nativeEnabled = false;
+            try {
+              nativeEnabled =
+                  (await _invokeFgMethod('isApproovEnabled')) ?? false;
+            } catch (_) {
+              // native query unavailable - fall through to bypass mode, the
+              // conservative reading of an empty config
+            }
+            if (nativeEnabled) {
+              effectiveConfig = _nativeProtectedConfig;
+              Log.d(
+                  "$TAG: $isolate empty configuration ignored; native layer already protected");
+            } else {
+              Log.d(
+                  "$TAG: $isolate initialized without the Approov SDK (bypass mode)");
+            }
           }
 
           _resetServiceStateAfterSuccessfulInitialization();
@@ -520,14 +558,32 @@ class ApproovService {
             });
           }
 
-          // initialization was successful
+          // initialization was successful - commit the Dart state now, before
+          // any best-effort follow-up, so a failure in telemetry cannot
+          // desynchronize Dart (bypass) from the already-committed native
+          // state (protected). This matches approov-service-okhttp, which
+          // commits service-layer state before setting the user property.
           _isInitialized = true;
-          _initialConfig = config;
+          _initialConfig = effectiveConfig;
           _isRootIsolate = isRootIsolate;
           Log.d("$TAG: $isolate initialization complete");
         } catch (err, stack) {
           Log.e("$TAG: $isolate initialization exception $err: $stack");
           throw ApproovException('$err');
+        }
+
+        if (config.isNotEmpty) {
+          // best-effort: record the framework in use for metrics. The native
+          // SDK is initialized at this point (this is skipped in bypass mode,
+          // where it is not); a failure here must not fail the
+          // already-committed initialization.
+          try {
+            await _invokeFgMethod('setUserProperty', <String, dynamic>{
+              "property": "approov-service-flutter-httpclient",
+            });
+          } catch (err) {
+            Log.e("$TAG: $isolate setUserProperty failed (ignored): $err");
+          }
         }
       }
     });
@@ -723,6 +779,24 @@ class ApproovService {
 
   @visibleForTesting
   static ApproovMessageSigning? messageSigningForTesting() => _messageSigning;
+
+  /// Snapshot of the mutable runtime configuration, so tests can assert that a
+  /// successful (re-)initialization resets every field
+  /// (TESTING_REQUIREMENTS.md §1, "Service-Layer State Only Updated On
+  /// Success") rather than the subset with individual getters.
+  @visibleForTesting
+  static Map<String, Object?> runtimeStateForTesting() => <String, Object?>{
+        'approovTokenHeader': _approovTokenHeader,
+        'approovTraceIDHeader': _approovTraceIDHeader,
+        'approovTokenPrefix': _approovTokenPrefix,
+        'proceedOnNetworkFail': _proceedOnNetworkFail,
+        'useApproovStatusIfNoToken': _useApproovStatusIfNoToken,
+        'bindingHeader': _bindingHeader,
+        'substitutionHeaders': Map<String, String>.of(_substitutionHeaders),
+        'substitutionQueryParams': _substitutionQueryParams.keys.toSet(),
+        'exclusionURLRegexs': _exclusionURLRegexs.keys.toSet(),
+        'hostCertificateHosts': _hostCertificates.keys.toSet(),
+      };
 
   /// Sets a binding header that must be present on all requests using the Approov service. A
   /// header should be chosen whose value is unchanging for most requests (such as an
@@ -1814,7 +1888,15 @@ class ApproovService {
     if (messageSigning == null) return;
 
     try {
-      final stagedHeaders = <String, String>{};
+      // Header mutations are staged and applied to the live request only after
+      // the whole signing flow succeeds, so a fail-open exit leaves the request
+      // untouched. Staging is list-valued and replayed with the same set/add
+      // semantics the signing context applies to its own snapshot (set replaces
+      // every value, add appends), so the wire headers always match the signed
+      // base - collapsing an added multi-value header would produce a signature
+      // the server can never verify.
+      final stagedHeaders = <String, List<String>>{};
+      final stagedReplacements = <String>{};
       final context = ApproovSigningContext(
         requestMethod: request.method,
         uri: request.uri,
@@ -1822,8 +1904,12 @@ class ApproovService {
         bodyBytes: pendingBodyBytes,
         tokenHeaderName:
             _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
-        onSetHeader: (name, value) => stagedHeaders[name] = value,
-        onAddHeader: (name, value) => stagedHeaders[name] = value,
+        onSetHeader: (name, value) {
+          stagedReplacements.add(name);
+          stagedHeaders[name] = <String>[value];
+        },
+        onAddHeader: (name, value) =>
+            stagedHeaders.putIfAbsent(name, () => <String>[]).add(value),
       );
 
       final params = messageSigning.buildParametersFor(request.uri, context);
@@ -1834,10 +1920,15 @@ class ApproovService {
 
       final alg = params.algorithmIdentifier;
       if (alg == null) {
-        throw StateError('Signature parameters missing alg identifier');
+        // A params object with no algorithm is the same misconfiguration class
+        // as an unsupported one - approov-service-okhttp fails closed for both
+        // via its unsupported-algorithm switch default.
+        throw UnsupportedSignatureAlgorithmException(
+            'Signature parameters missing alg identifier');
       }
       if (!_isSupportedSignatureAlgorithm(alg)) {
-        throw StateError('Unsupported signature alg: $alg');
+        throw UnsupportedSignatureAlgorithmException(
+            'Unsupported signature alg: $alg');
       }
 
       final signatureBase =
@@ -1848,22 +1939,39 @@ class ApproovService {
       }
 
       final signatureLabel = _signatureLabelForAlg(alg);
-      stagedHeaders['Signature'] = '$signatureLabel=:${signature}:';
-      stagedHeaders['Signature-Input'] =
-          '$signatureLabel=${params.serializeComponentValue()}';
+      stagedReplacements.add('Signature');
+      stagedHeaders['Signature'] = <String>['$signatureLabel=:${signature}:'];
+      stagedReplacements.add('Signature-Input');
+      stagedHeaders['Signature-Input'] = <String>[
+        '$signatureLabel=${params.serializeComponentValue()}'
+      ];
 
       if (params.debugMode) {
         final digest = sha256.convert(utf8.encode(signatureBase)).bytes;
-        stagedHeaders['Signature-Base-Digest'] =
-            'sha-256=:${base64Encode(digest)}:';
+        stagedReplacements.add('Signature-Base-Digest');
+        stagedHeaders['Signature-Base-Digest'] = <String>[
+          'sha-256=:${base64Encode(digest)}:'
+        ];
       }
 
-      stagedHeaders.forEach((name, value) {
-        request.headers.set(name, value, preserveHeaderCase: true);
+      stagedHeaders.forEach((name, values) {
+        if (stagedReplacements.contains(name)) {
+          request.headers.removeAll(name);
+        }
+        for (final value in values) {
+          request.headers.add(name, value, preserveHeaderCase: true);
+        }
       });
     } catch (err) {
-      if (_isRequiredBodyDigestFailure(err) ||
-          _isUnsupportedSignatureAlgorithmFailure(err)) {
+      // Typed classification (never string matching, which silently flips
+      // fail-closed to fail-open when a message is reworded): only the two
+      // deliberate fail-closed conditions from TESTING_REQUIREMENTS.md §5 -
+      // a required body digest that cannot be generated, and an unsupported
+      // or missing signing algorithm - abort the request, mirroring
+      // approov-service-okhttp. Everything else proceeds unsigned; the
+      // backend is the enforcement point.
+      if (err is RequiredBodyDigestException ||
+          err is UnsupportedSignatureAlgorithmException) {
         throw ApproovException("Message signing failed: $err");
       }
       Log.e("$TAG: skipping message signing for ${request.uri}: $err");
@@ -1875,14 +1983,6 @@ class ApproovService {
         algorithmIdentifier == 'hmac-sha256';
   }
 
-  static bool _isRequiredBodyDigestFailure(Object err) {
-    return err.toString().contains('Body digest required');
-  }
-
-  static bool _isUnsupportedSignatureAlgorithmFailure(Object err) {
-    return err.toString().contains('Unsupported signature alg:');
-  }
-
   static Future<String> _signCanonicalMessage(
       String message, String algorithmIdentifier) async {
     switch (algorithmIdentifier) {
@@ -1891,7 +1991,8 @@ class ApproovService {
       case 'hmac-sha256':
         return await getAccountMessageSignature(message);
       default:
-        throw StateError('Unsupported signature alg: $algorithmIdentifier');
+        throw UnsupportedSignatureAlgorithmException(
+            'Unsupported signature alg: $algorithmIdentifier');
     }
   }
 
@@ -1902,7 +2003,8 @@ class ApproovService {
       case 'hmac-sha256':
         return 'account';
       default:
-        throw StateError('Unsupported signature alg: $algorithmIdentifier');
+        throw UnsupportedSignatureAlgorithmException(
+            'Unsupported signature alg: $algorithmIdentifier');
     }
   }
 

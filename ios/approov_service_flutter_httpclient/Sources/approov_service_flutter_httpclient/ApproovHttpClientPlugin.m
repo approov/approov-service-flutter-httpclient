@@ -372,10 +372,6 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // a hot restart if the configuration is the same or nil if not initialized.
 @property NSString *initializedConfig;
 
-// Provides any prior initial comment supplied, preserving nil distinctly from
-// the empty string.
-@property NSString *initializedComment;
-
 // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
 // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
 // across multiple different isolates which have independent Dart level state.
@@ -447,16 +443,22 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
         // Approov SDK. Empty configuration is service-layer bypass mode, so it is
         // recorded as initialized but deliberately not forwarded.
         if (initialConfig.length != 0) {
-            [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
+            BOOL sdkInitialized = [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
             if (error != nil) {
                 result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
                                         message:error.domain
                                         details:error.localizedDescription]);
                 return;
             }
+            if (!sdkInitialized) {
+                // a matching-parameter re-initialization: the SDK reports it was
+                // already initialized (NO return with no error), which is treated
+                // as success (TESTING_REQUIREMENTS.md section 1, "Same Config
+                // Re-initialization"; matches approov-service-okhttp)
+                NSLog(@"ApproovService: Approov SDK already initialized");
+            }
         }
         self.initializedConfig = initialConfig;
-        self.initializedComment = commentString;
         result(nil);
     } else if ([@"isInitialized" isEqualToString:call.method]) {
         result(@((BOOL)(self.initializedConfig != nil)));

@@ -115,6 +115,8 @@ The mutator callback order is:
 4. message signing (if enabled and token fetch succeeded)
 5. `handleInterceptorProcessedRequest`
 
+**Signing failures are fail-open** (matching `approov-service-okhttp`): a request whose signature cannot be produced goes out **unsigned** with the reason logged at error level, and the backend decides whether to accept it. The only two conditions that abort the request instead are a body digest configured as required that cannot be generated (`RequiredBodyDigestException`) and an unsupported or missing signing algorithm (`UnsupportedSignatureAlgorithmException`). If your backend strictly enforces signatures, monitor error logs for `skipping message signing` lines.
+
 ## Secure string substitutions
 
 ### Header substitutions

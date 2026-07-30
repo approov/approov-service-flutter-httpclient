@@ -230,11 +230,6 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   // thread to observe the writing thread's update.
   private volatile String initializedConfig = null;
 
-  // Provides any prior initial comment supplied, preserving null distinctly from
-  // the empty string. Volatile for the same cross-thread visibility reason as
-  // initializedConfig above.
-  private volatile String initializedComment = null;
-
   // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
   // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
   // across multiple different isolates which have independent Dart level state.
@@ -300,14 +295,20 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       // recorded as initialized but deliberately not forwarded.
       try {
         if ((initialConfig != null) && !initialConfig.isEmpty()) {
-          Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
+          boolean sdkInitialized = Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
+          if (!sdkInitialized) {
+            // a matching-parameter re-initialization: the SDK reports it was
+            // already initialized, which is treated as success
+            // (TESTING_REQUIREMENTS.md section 1, "Same Config
+            // Re-initialization"; matches approov-service-okhttp)
+            Log.d("ApproovService", "Approov SDK already initialized");
+          }
         }
       } catch(Exception e) {
         result.error("Approov.initialize", e.getLocalizedMessage(), null);
         return;
       }
       initializedConfig = initialConfig;
-      initializedComment = commentString;
       result.success(null);
     } else if (call.method.equals("isInitialized")) {
       result.success(initializedConfig != null);

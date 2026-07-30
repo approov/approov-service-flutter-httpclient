@@ -188,6 +188,102 @@ void main() {
             'failed upgrade attempt');
   });
 
+  test(
+      'empty config in a fresh isolate adopts protected mode when native is '
+      'already protected', () async {
+    // Simulates a background isolate (fresh Dart statics via the setUp reset)
+    // whose process-wide native layer was already initialized with a valid
+    // config by the root isolate. Native ignores the empty config and stays
+    // protected; the Dart layer must NOT commit bypass mode for this isolate,
+    // otherwise its requests silently skip pinning and tokens while
+    // isApproovEnabled() reports true (TESTING_REQUIREMENTS.md section 1,
+    // "Empty Configuration after Valid Configuration").
+    fgHandler = (call) async {
+      if (call.method == 'isApproovEnabled') return true;
+      return null;
+    };
+
+    await ApproovService.initialize('');
+
+    final preparation = await ApproovService.prepareRequestForApproovForTesting(
+        'GET', Uri.parse('https://example.com/'));
+    expect(preparation.shouldProcessApproov, true,
+        reason: 'the isolate must follow the protected native state, not '
+            'downgrade itself to bypass mode');
+  });
+
+  test('empty config still enters bypass mode when native is unprotected',
+      () async {
+    fgHandler = (call) async {
+      if (call.method == 'isApproovEnabled') return false;
+      return null;
+    };
+
+    await ApproovService.initialize('');
+
+    final preparation = await ApproovService.prepareRequestForApproovForTesting(
+        'GET', Uri.parse('https://example.com/'));
+    expect(preparation.shouldProcessApproov, false);
+  });
+
+  test(
+      'overlapping failed re-initializations cannot poison a healthy '
+      'protected service', () async {
+    bgHandler = (call) async {
+      if (call.method == 'initialize' &&
+          call.arguments['initialConfig'] == 'bad-config') {
+        // keep the failing attempts in flight long enough to overlap
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        throw PlatformException(code: 'Approov.initialize', message: 'bad');
+      }
+      return null;
+    };
+    fgHandler = (call) async {
+      if (call.method == 'getDeviceID') return 'healthy-device';
+      return null;
+    };
+
+    await ApproovService.initialize('good-config');
+
+    // Two overlapping retries of a bad config: the second captures the first
+    // (doomed) attempt as its predecessor. The failure-restore logic must
+    // never reinstall a captured earlier future - only a freshly resolved one
+    // - or the service ends up with _isInitialized true but every
+    // _requireInitialized() rethrowing a stale error while native is healthy.
+    final first = ApproovService.initialize('bad-config');
+    final second = ApproovService.initialize('bad-config');
+    await expectLater(first, throwsA(isA<ApproovException>()));
+    await expectLater(second, throwsA(isA<ApproovException>()));
+
+    expect(await ApproovService.getDeviceID(), 'healthy-device',
+        reason: 'the surviving successful initialization must remain usable '
+            'after overlapping failed retries');
+  });
+
+  test('setUserProperty failure does not fail an initialized service',
+      () async {
+    // Native init succeeds and commits process-wide state; the follow-up
+    // telemetry call fails. Failing initialize() at that point would leave
+    // Dart in bypass while native is protected - requests would then skip
+    // pinning and tokens with isApproovEnabled() still true. The property
+    // call is best-effort (matches approov-service-okhttp, which commits
+    // service-layer state before setting the user property).
+    fgHandler = (call) async {
+      if (call.method == 'setUserProperty') {
+        throw PlatformException(code: 'setUserProperty', message: 'detached');
+      }
+      if (call.method == 'getDeviceID') return 'device-after-telemetry-fail';
+      return null;
+    };
+
+    await ApproovService.initialize('real-config-telemetry');
+
+    final preparation = await ApproovService.prepareRequestForApproovForTesting(
+        'GET', Uri.parse('https://example.com/'));
+    expect(preparation.shouldProcessApproov, true);
+    expect(await ApproovService.getDeviceID(), 'device-after-telemetry-fail');
+  });
+
   test('successful initialization resets runtime service-layer state',
       () async {
     final mutator = _AlwaysAllowMutator();
@@ -195,6 +291,7 @@ void main() {
     ApproovService.setApproovHeader('Custom-Approov', 'Bearer ');
     ApproovService.setApproovTraceIDHeader(null);
     ApproovService.setUseApproovStatusIfNoToken(true);
+    ApproovService.setProceedOnNetworkFail(true);
     ApproovService.setBindingHeader('Authorization');
     ApproovService.addSubstitutionHeader('X-Secret', null);
     ApproovService.addSubstitutionQueryParam('apiKey');
@@ -208,6 +305,22 @@ void main() {
     expect(ApproovService.getApproovTraceIDHeader(), 'Approov-TraceID');
     expect(ApproovService.getUseApproovStatusIfNoToken(), false);
     expect(ApproovService.messageSigningForTesting(), isNull);
+
+    // Every mutable runtime field must be back at its default - asserting the
+    // full snapshot (not just the fields with getters) so that dropping any
+    // line from _resetServiceStateAfterSuccessfulInitialization fails a test.
+    expect(ApproovService.runtimeStateForTesting(), <String, Object?>{
+      'approovTokenHeader': 'Approov-Token',
+      'approovTraceIDHeader': 'Approov-TraceID',
+      'approovTokenPrefix': '',
+      'proceedOnNetworkFail': false,
+      'useApproovStatusIfNoToken': false,
+      'bindingHeader': null,
+      'substitutionHeaders': <String, String>{},
+      'substitutionQueryParams': <String>{},
+      'exclusionURLRegexs': <String>{},
+      'hostCertificateHosts': <String>{},
+    });
 
     final headers = <String, String>{};
     ApproovService.applyTokenFetchResultHeadersForTesting(

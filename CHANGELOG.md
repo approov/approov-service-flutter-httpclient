@@ -1,4 +1,10 @@
-## [3.5.8] - (28-July-2026)
+## [3.5.8] - (30-July-2026)
+
+> **Upgrade notes:**
+> - `await ApproovService.initialize(config)` now completes only after the native initialization attempt finishes, and **throws `ApproovException` on failure** — previously it returned immediately and swallowed native failures. Wrap it in try/catch if you want to fall back to bypass mode (see README).
+> - Every successful `initialize()`/re-initialize now **resets the runtime configuration** (custom mutator, header overrides, token binding, substitutions, exclusions, message signing, cached pinning certificates). Apply configuration **after** `await initialize(...)` returns; configuration applied before it is discarded.
+> - Message signing failures now **proceed unsigned** instead of aborting the request, except for a required body digest that cannot be generated and an unsupported/missing signing algorithm, which still abort (`TESTING_REQUIREMENTS.md` §5; matches `approov-service-okhttp`). Backends enforcing signatures remain the enforcement point.
+
 - Add `isInitialized()` and `isApproovEnabled()` public API methods (Dart, Android, iOS).
 - Fix `initialize('')` (empty configuration string) to actually enter bypass mode — initializes the service layer without calling the native Approov SDK, instead of throwing. Previously this would fail with a native exception surfaced as a Dart `PlatformException`, contradicting documentation that claimed bypass-mode support.
 - Fix `initialize()` re-initialization guard to allow the "empty config → valid config" upgrade transition and to silently ignore a "valid config → empty config" downgrade attempt, per the cross-service-layer `TESTING_REQUIREMENTS.md` spec, instead of throwing in both directions.
@@ -9,6 +15,13 @@
 - Fix automatic token binding to await `setDataHashInToken(...)` before fetching the bound Approov token.
 - Fix message signing fallback behavior so signing and serialization failures fail open, while required body-digest failures and unsupported algorithms still fail closed.
 - Fix Structured Fields date serialization conformance for syntactic min/max date values.
+- Fix a race where overlapping failed re-initialization attempts could leave a healthy, successfully initialized service throwing a stale initialization error from every API call: a failed attempt now restores a freshly resolved initialization future (never a captured earlier one) whenever a successful initialization is in effect.
+- Fix a state desynchronization window where a failure in the post-initialization telemetry call (`setUserProperty`) failed the whole `initialize()` after the native SDK had already committed — leaving Dart in bypass while native was protected. The Dart state now commits immediately after native success and the telemetry call is best-effort (matches `approov-service-okhttp` ordering).
+- Fix a cross-isolate divergence where a fresh isolate (or hot restart) calling `initialize('')` while the process-wide native layer was already protected would commit bypass mode locally — silently skipping pinning and token injection for that isolate's requests while `isApproovEnabled()` reported `true`. The Dart layer now queries native and adopts protected mode.
+- Fail-closed message signing classification now uses typed exceptions (`RequiredBodyDigestException`, `UnsupportedSignatureAlgorithmException`, both exported) instead of error-message string matching; a params object with a *missing* algorithm identifier now also fails closed, matching `approov-service-okhttp`. Custom `SignatureParametersFactory` implementations can throw `RequiredBodyDigestException` to force an abort.
+- Fix staged message signing header application to preserve multi-value header adds from custom factories (previously collapsed to the last value, producing signatures the server could never verify). Note: as in `approov-service-okhttp`, when signing fails open the request goes out without `Content-Digest` (signing-related headers are staged and only applied on success).
+- Log (rather than silently discard) the native SDK's already-initialized result on a same-config re-initialization, on both platforms.
+- Raise the `logger` dependency lower bound to `^2.1.0` (`DateTimeFormat` is used and was added in 2.1.0).
 - Deprecate `prefetch()` — it is now a no-op, matching the rest of the Approov service layer family (`approov-service-retrofit`, `approov-service-urlsession`, and others). The Approov SDK manages prefetching automatically; the explicit prefetch call is redundant.
 
 ## [3.5.7] - (27-July-2026)

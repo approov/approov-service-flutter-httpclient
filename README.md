@@ -119,6 +119,8 @@ To actually protect your APIs and/or secrets there are some further steps. Appro
 
 Note that it is possible to use both approaches side-by-side in the same app.
 
+See [USAGE.md](USAGE.md) for day-to-day usage (mutators, message signing, secure strings, token binding) and [REFERENCE.md](REFERENCE.md) for the full API reference.
+
 ---
 
 ## Useful Links

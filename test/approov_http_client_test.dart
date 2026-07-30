@@ -37,9 +37,8 @@ void main() {
         .setMockMethodCallHandler(fgChannel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(bgChannel, null);
-    ApproovService.disableMessageSigning();
-    ApproovService.setServiceMutator(null);
-    ApproovService.setApproovTraceIDHeader('Approov-TraceID');
+    // state isolation is provided by resetInitStateForTesting() in setUp,
+    // which restores every mutable runtime field
   });
 
   test('signature base matches HTTP message signatures format', () {
@@ -393,6 +392,316 @@ void main() {
     expect(calls.map((call) => call.method),
         containsAll(['fetchApproovToken', 'getAccountMessageSignature']));
   });
+
+  test('install message signing SDK failures proceed unsigned', () async {
+    final observedHeaders = <String, List<String>>{};
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        case 'getInstallMessageSignature':
+          throw PlatformException(
+              code: 'Approov.sign', message: 'install key unavailable');
+        default:
+          fail('Unexpected method ${call.method}');
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-install-fail-open');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseInstallMessageSigning(),
+    );
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    final response =
+        await client.get(Uri.parse('http://127.0.0.1:${server.port}/signed'));
+
+    expect(response.statusCode, 200);
+    expect(observedHeaders['approov-token'], ['approov-token']);
+    expect(observedHeaders.containsKey('signature'), false,
+        reason: 'install signature failure must proceed unsigned, not abort');
+  });
+
+  test('required body digest failure aborts the request (fail-closed)',
+      () async {
+    var serverSawRequest = false;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      serverSawRequest = true;
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-digest-required');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    // A GET has no body, so a REQUIRED body digest cannot be generated. This
+    // is one of the two deliberate fail-closed signing conditions
+    // (TESTING_REQUIREMENTS.md section 5): the request must abort, not go out
+    // unsigned.
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseAccountMessageSigning()
+          .setBodyDigestConfig(SignatureDigest.sha256.identifier,
+              required: true),
+    );
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    await expectLater(
+      client.get(Uri.parse('http://127.0.0.1:${server.port}/signed')),
+      throwsA(anyOf(isA<ApproovException>(), isA<Exception>())),
+    );
+    expect(serverSawRequest, false,
+        reason: 'a fail-closed signing error must abort before the request '
+            'reaches the network');
+  });
+
+  test('unsupported signing algorithm aborts the request (fail-closed)',
+      () async {
+    var serverSawRequest = false;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      serverSawRequest = true;
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-bad-alg');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    // The second deliberate fail-closed signing condition: a misconfigured
+    // (unsupported) algorithm must abort rather than silently disable signing.
+    ApproovService.enableMessageSigning(
+        defaultFactory: _UnsupportedAlgFactory());
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    await expectLater(
+      client.get(Uri.parse('http://127.0.0.1:${server.port}/signed')),
+      throwsA(anyOf(isA<ApproovException>(), isA<Exception>())),
+    );
+    expect(serverSawRequest, false,
+        reason: 'an unsupported signing algorithm must abort before the '
+            'request reaches the network');
+  });
+
+  test('token binding hash is set (and awaited) before the token fetch',
+      () async {
+    final sequence = <String>[];
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'setDataHashInToken':
+          // delay so a fire-and-forget caller would demonstrably race ahead:
+          // only an awaited call keeps the fetch from starting first
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          sequence.add('setDataHashInToken-complete');
+          return null;
+        case 'fetchApproovToken':
+          sequence.add('fetchApproovToken-start');
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-binding');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.setBindingHeader('Authorization');
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    final response = await client.get(
+      Uri.parse('http://127.0.0.1:${server.port}/bound'),
+      headers: {'Authorization': 'Bearer user-token'},
+    );
+
+    expect(response.statusCode, 200);
+    expect(
+        sequence, ['setDataHashInToken-complete', 'fetchApproovToken-start'],
+        reason: 'the binding hash must reach native (awaited) before the '
+            'token fetch starts, or the pay claim can be missing from the '
+            'issued token (TESTING_REQUIREMENTS.md section 2, Token Binding)');
+  });
+}
+
+/// Factory producing parameters with an algorithm the service does not
+/// support - used to prove the fail-closed path for misconfigured algorithms.
+class _UnsupportedAlgFactory extends SignatureParametersFactory {
+  @override
+  SignatureParameters build(ApproovSigningContext context) {
+    return SignatureParameters()
+      ..addComponentIdentifier('@method')
+      ..setAlg('rsa-pss-sha512');
+  }
 }
 
 ApproovSigningContext _buildSigningContext(Uri uri) {
