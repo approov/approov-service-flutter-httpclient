@@ -149,6 +149,30 @@ class ApproovService {
   // without knowing the real config string, which is held natively.
   static const String _nativeProtectedConfig = "<native-protected>";
 
+  /// Reads a boolean state flag from the native layer, returning null when neither channel could
+  /// answer. The foreground channel is where these queries are served, but it is unreachable from a
+  /// background isolate, so the background channel - served by the same native handler - is tried
+  /// as a fallback rather than reporting a state this isolate never actually established.
+  static Future<bool?> _queryNativeFlag(String method) async {
+    for (final probe in <Future<bool?> Function()>[
+      () => _invokeFgMethod<bool>(method),
+      () => _invokeBgMethod<bool>(method),
+    ]) {
+      try {
+        final bool? reported = await probe();
+        if (reported != null) return reported;
+      } catch (_) {
+        // try the next channel
+      }
+    }
+    return null;
+  }
+
+  /// True when this isolate holds an active, non-empty configuration, i.e. Approov protection is
+  /// live here. Bypass mode (empty config) and the never-initialized state both read false. Named
+  /// rather than repeated inline so every guard tests protection the same way.
+  static bool get _isApproovActive => _initialConfig?.isNotEmpty ?? false;
+
   // configuration epoch used to determine if the configuration has changed to allow caches at
   // higher levels to be invalidated. This is actually obtained from the platform layer since
   // only it can provide common state between all isolates and we want a dynamic configuration
@@ -417,12 +441,26 @@ class ApproovService {
     }
   }
 
-  /// Initialize the Approov SDK. This must be called prior to any other methods on the ApproovService. This does not
-  /// actually initialize the SDK at this point, but sets up the intialization which can then be awaited on by other
-  /// methods which need it to be initialized.
+  /// Initialize the Approov SDK. This must be called prior to any other methods on the ApproovService.
+  /// The returned future completes once initialization has finished: a non-empty [config] is forwarded
+  /// to the native Approov SDK and awaited, so a failure (for instance a different configuration string
+  /// already in force in this process) surfaces here as an [ApproovException] and leaves the service
+  /// layer state unchanged. Other methods that require initialization await the same result.
   ///
-  /// @param config is the configuration string
+  /// An empty [config] enters bypass mode: the service layer reports itself initialized and forwards
+  /// requests untouched, with no token injection, trace headers, message signing, secure string
+  /// substitution or Approov dynamic pinning. Ordinary TLS certificate validation still applies. An
+  /// empty [config] supplied after a valid one is ignored, so protection cannot be dropped that way.
+  ///
+  /// The [comment] participates in the native SDK's already-initialized matching, so a repeat call with
+  /// the same [config] is only accepted when [comment] is identical to the one used at first
+  /// initialization (commonly null), or starts with `reinit`. Any other comment - including swapping
+  /// null for the empty string - is rejected by the SDK as an initialization with a different
+  /// configuration.
+  ///
+  /// @param config is the configuration string, or empty for bypass mode
   /// @param comment is an optional comment used during initialization or null if not required
+  /// @throws ApproovException if the initialization is rejected by the native SDK
   static Future<void> initialize(String config, [String? comment]) async {
     if (_futureInitialization != null) {
       // ensure we wait in case initialize has been called previously - a failure
@@ -488,7 +526,7 @@ class ApproovService {
       String isolate = isRootIsolate ? "root" : "background";
       if (_isInitialized &&
           config.isEmpty &&
-          (_initialConfig?.isNotEmpty ?? false)) {
+          _isApproovActive) {
         // Empty configuration after a valid/protected initialization is
         // ignored outright, regardless of any "reinit" comment - it must never
         // silently drop an already-active configuration back into bypass mode
@@ -526,13 +564,26 @@ class ApproovService {
           // functionality).
           String effectiveConfig = config;
           if (config.isEmpty) {
-            bool nativeEnabled = false;
-            try {
-              nativeEnabled =
-                  (await _invokeFgMethod('isApproovEnabled')) ?? false;
-            } catch (_) {
-              // native query unavailable - fall through to bypass mode, the
-              // conservative reading of an empty config
+            // Ask the native layer whether the process is already protected. The
+            // foreground channel is tried first because that is where the state
+            // queries are served; a background isolate cannot reach it, so the
+            // background channel - served by the same native handler - is used as
+            // a fallback rather than silently assuming bypass.
+            //
+            // If neither channel can answer, bypass is assumed, because
+            // TESTING_REQUIREMENTS.md section 1 requires an empty config with no
+            // prior initialization to enter bypass mode. Note that this is the
+            // permissive outcome: no token injection and no Approov pinning. It is
+            // therefore logged at error level rather than passed over quietly, so an
+            // isolate running unprotected because a probe failed is visible in the
+            // logs instead of looking like a deliberate bypass.
+            final bool? reported = await _queryNativeFlag('isApproovEnabled');
+            final bool nativeEnabled = reported ?? false;
+            if (reported == null) {
+              Log.e(
+                  "$TAG: $isolate could not determine native protection state; "
+                  "assuming bypass mode - requests from this isolate will carry no "
+                  "Approov token and will not be pinned");
             }
             if (nativeEnabled) {
               effectiveConfig = _nativeProtectedConfig;
@@ -705,7 +756,7 @@ class ApproovService {
   static Future<void> setDevKey(String devKey) async {
     Log.d("$TAG: setDevKey");
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to accept a development key, so reject rather than
       // forwarding a doomed call to the platform channel.
@@ -959,7 +1010,7 @@ class ApproovService {
     // try and fetch a non-existent secure string in order to check for a rejection
     // setup a Completer for the transaction ID we are going to use
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to attest, so reject rather than forwarding a doomed call
       // to the platform channel.
@@ -1023,7 +1074,7 @@ class ApproovService {
   /// @return String representation of the device ID
   static Future<String> getDeviceID() async {
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to provide a device ID, so reject rather than forwarding a
       // doomed call to the platform channel.
@@ -1042,7 +1093,9 @@ class ApproovService {
   /// even when initialized in bypass mode with an empty configuration string - it
   /// does not indicate that Approov protection is actually active. Use
   /// [isApproovEnabled] for that. The answer is read from the native layer, which
-  /// holds the process-wide SDK state, rather than a local Dart flag: Dart-level
+  /// holds the state process-wide - a static, so it is shared by every
+  /// FlutterEngine in the process, not just the one this isolate belongs to -
+  /// rather than a local Dart flag: Dart-level
   /// state is per-isolate and a background isolate that never itself called
   /// [initialize] would otherwise report false even though the SDK is already
   /// initialized from another isolate. Returns false, rather than throwing, only
@@ -1062,8 +1115,7 @@ class ApproovService {
       }
     }
     try {
-      bool? result = await _invokeFgMethod('isInitialized');
-      return result ?? false;
+      return await _queryNativeFlag('isInitialized') ?? false;
     } catch (_) {
       return false;
     }
@@ -1072,9 +1124,10 @@ class ApproovService {
   /// Returns whether Approov-backed protection (token injection, pinning, secure
   /// string substitution) is actually active. Returns false when the service
   /// layer is initialized in bypass mode with an empty configuration string. Like
-  /// [isInitialized], the answer is read from the process-wide native SDK state
-  /// rather than a per-isolate Dart flag, and returns false (rather than throwing)
-  /// only when the native layer reports protection inactive or is unreachable.
+  /// [isInitialized], the answer is read from process-wide native state (a static,
+  /// shared across FlutterEngines) rather than a per-isolate Dart flag, and returns
+  /// false (rather than throwing) only when the native layer reports protection
+  /// inactive or is unreachable.
   ///
   /// @return true if Approov protection is active
   static Future<bool> isApproovEnabled() async {
@@ -1088,8 +1141,7 @@ class ApproovService {
       }
     }
     try {
-      bool? result = await _invokeFgMethod('isApproovEnabled');
-      return result ?? false;
+      return await _queryNativeFlag('isApproovEnabled') ?? false;
     } catch (_) {
       return false;
     }
@@ -1182,7 +1234,7 @@ class ApproovService {
   static Future<void> setDataHashInToken(String data) async {
     Log.d("$TAG: setDataHashInToken");
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): this only stages data for a
       // future token fetch that will never happen in bypass mode, so
       // silently accept and do nothing rather than forwarding a doomed call
@@ -1227,7 +1279,7 @@ class ApproovService {
     // specific "not initialized" error for the genuinely-never-initialized
     // case rather than the misleading "Approov is not enabled".
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to fetch a token from, so reject rather than forwarding a
       // doomed call to the platform channel.
@@ -1256,7 +1308,7 @@ class ApproovService {
   static Future<String> getMessageSignature(String message) async {
     Log.d("$TAG: getMessageSignature");
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to provide a signing key, so reject rather than forwarding
       // a doomed call to the platform channel.
@@ -1280,7 +1332,7 @@ class ApproovService {
   static Future<String> getAccountMessageSignature(String message) async {
     Log.d("$TAG: getAccountMessageSignature");
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): reject here, before either
       // branch below is reached - this guard is independent of
       // getMessageSignature's own guard (it must fire before the
@@ -1316,7 +1368,7 @@ class ApproovService {
   static Future<String?> fetchSecureString(String key, String? newDef) async {
     // ensure the SDK is initialized
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to fetch secure strings from, so reject rather than
       // forwarding a doomed call to the platform channel.
@@ -1393,7 +1445,7 @@ class ApproovService {
   static Future<String> fetchCustomJWT(String payload) async {
     // wait on any pending initialization
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to fetch a custom JWT from, so reject rather than
       // forwarding a doomed call to the platform channel.
@@ -1488,7 +1540,7 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<Map> getPins(String pinType) async {
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active pinning
       // configuration, so an empty map ("no pinning info") is the
       // informationally correct answer rather than an error. This also
@@ -1575,7 +1627,7 @@ class ApproovService {
   static Future<Uri> substituteQueryParam(
       Uri uri, String queryParameter) async {
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): there is no active Approov SDK
       // instance to fetch secure strings from. Unlike the "reject" guards
       // elsewhere in this file, this is a pass-through no-op that returns
@@ -1673,7 +1725,7 @@ class ApproovService {
   static Future<_ApproovRequestPreparation> _prepareRequestForApproov(
       String method, Uri uri) async {
     await _requireInitialized();
-    if (!(_initialConfig?.isNotEmpty ?? false)) {
+    if (!_isApproovActive) {
       // Bypass mode (empty initial config): skip Approov entirely for this
       // real request. The mutator is deliberately never consulted for either
       // gate here - a custom ApproovServiceMutator must not be able to
@@ -1978,17 +2030,26 @@ class ApproovService {
     }
   }
 
+  // The supported signing algorithms, mapped to the signature label used for each. Single source
+  // of truth: the support check, the signing dispatch and the label lookup all read this map, so a
+  // new algorithm cannot be added to one and forgotten in the others.
+  static const String _installSignatureAlg = 'ecdsa-p256-sha256';
+  static const String _accountSignatureAlg = 'hmac-sha256';
+  static const Map<String, String> _signatureAlgorithmLabels = {
+    _installSignatureAlg: 'install',
+    _accountSignatureAlg: 'account',
+  };
+
   static bool _isSupportedSignatureAlgorithm(String algorithmIdentifier) {
-    return algorithmIdentifier == 'ecdsa-p256-sha256' ||
-        algorithmIdentifier == 'hmac-sha256';
+    return _signatureAlgorithmLabels.containsKey(algorithmIdentifier);
   }
 
   static Future<String> _signCanonicalMessage(
       String message, String algorithmIdentifier) async {
     switch (algorithmIdentifier) {
-      case 'ecdsa-p256-sha256':
+      case _installSignatureAlg:
         return await _getInstallMessageSignature(message);
-      case 'hmac-sha256':
+      case _accountSignatureAlg:
         return await getAccountMessageSignature(message);
       default:
         throw UnsupportedSignatureAlgorithmException(
@@ -1997,15 +2058,12 @@ class ApproovService {
   }
 
   static String _signatureLabelForAlg(String algorithmIdentifier) {
-    switch (algorithmIdentifier) {
-      case 'ecdsa-p256-sha256':
-        return 'install';
-      case 'hmac-sha256':
-        return 'account';
-      default:
-        throw UnsupportedSignatureAlgorithmException(
-            'Unsupported signature alg: $algorithmIdentifier');
+    final label = _signatureAlgorithmLabels[algorithmIdentifier];
+    if (label == null) {
+      throw UnsupportedSignatureAlgorithmException(
+          'Unsupported signature alg: $algorithmIdentifier');
     }
+    return label;
   }
 
   static Future<String> _getInstallMessageSignature(String message) async {

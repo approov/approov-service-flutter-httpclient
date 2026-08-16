@@ -369,8 +369,10 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 @property FlutterMethodChannel *bgChannel;
 
 // Provides any prior initial configuration supplied, to allow a reinitialization caused by
-// a hot restart if the configuration is the same or nil if not initialized.
-@property NSString *initializedConfig;
+// a hot restart if the configuration is the same or nil if not initialized. Held in a file scope
+// static (see ApproovHttpClientInitializedConfig below) rather than an instance property, because
+// the Approov SDK it mirrors is a process-wide singleton while a plugin instance is created per
+// FlutterEngine.
 
 // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
 // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
@@ -387,10 +389,38 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
 @end
 
+// The configuration the process was initialized with, or nil if it has not been initialized.
+//
+// Process-wide, not per plugin instance: registerWithRegistrar allocates a new plugin for every
+// FlutterEngine, so an app with a second engine (background fetch, geolocation, alarm plugins)
+// would otherwise see nil here while the SDK is initialized and protecting traffic. The Dart layer
+// reads that as "native not protected" and commits real bypass mode, silently dropping token
+// injection and pinning for every request from that engine. Matches approov-service-okhttp, which
+// holds its configString in a static.
+//
+// Written from "initialize" on the background task queue and read from "isInitialized" and
+// "isApproovEnabled" on the platform thread, so all access is serialised on the class object. The
+// synchronisation is load-bearing: do not replace it with a bare static read/write.
+static NSString *sApproovHttpClientInitializedConfig = nil;
+
+static NSString *ApproovHttpClientInitializedConfig(void) {
+    @synchronized ([ApproovHttpClientPlugin class]) {
+        return sApproovHttpClientInitializedConfig;
+    }
+}
+
+static void ApproovHttpClientSetInitializedConfig(NSString *config) {
+    @synchronized ([ApproovHttpClientPlugin class]) {
+        sApproovHttpClientInitializedConfig = config;
+    }
+}
+
 // Returns true when the service layer is initialized and Approov-backed request
 // protection is active (i.e. initialized with a non-empty config).
-static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
-    return (self.initializedConfig != nil) && (self.initializedConfig.length != 0);
+static BOOL ApproovHttpClientIsEnabled(void) {
+    // read once so the nil check and the emptiness check cannot disagree
+    NSString *config = ApproovHttpClientInitializedConfig();
+    return (config != nil) && (config.length != 0);
 }
 
 // ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
@@ -423,14 +453,18 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
     if ([@"initialize" isEqualToString:call.method]) {
         // get the initialization arguments
         NSError* error = nil;
-        NSString *initialConfig = call.arguments[@"initialConfig"];
+        // guard NSNull as the comment and updateConfig arguments below do: -[NSNull length] is an
+        // unrecognised selector, so an NSNull here would crash rather than being read as empty
+        NSString *initialConfig = nil;
+        if ((call.arguments[@"initialConfig"] != nil) && (call.arguments[@"initialConfig"] != [NSNull null]))
+            initialConfig = call.arguments[@"initialConfig"];
         NSString *commentString = nil;
         if ((call.arguments[@"comment"] != nil) && (call.arguments[@"comment"] != [NSNull null]))
             commentString = call.arguments[@"comment"];
 
         // An empty config after a valid config is already active must be ignored -
         // it must never silently drop back into bypass mode.
-        if (ApproovHttpClientIsEnabled(self) && initialConfig.length == 0) {
+        if (ApproovHttpClientIsEnabled() && initialConfig.length == 0) {
             NSLog(@"ApproovService: already initialized with a valid config; ignoring empty configuration");
             result(nil);
             return;
@@ -458,12 +492,12 @@ static BOOL ApproovHttpClientIsEnabled(ApproovHttpClientPlugin *self) {
                 NSLog(@"ApproovService: Approov SDK already initialized");
             }
         }
-        self.initializedConfig = initialConfig;
+        ApproovHttpClientSetInitializedConfig(initialConfig);
         result(nil);
     } else if ([@"isInitialized" isEqualToString:call.method]) {
-        result(@((BOOL)(self.initializedConfig != nil)));
+        result(@((BOOL)(ApproovHttpClientInitializedConfig() != nil)));
     } else if ([@"isApproovEnabled" isEqualToString:call.method]) {
-        result(@(ApproovHttpClientIsEnabled(self)));
+        result(@(ApproovHttpClientIsEnabled()));
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
         _configEpoch++;
         result([Approov fetchConfig]);

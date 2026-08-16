@@ -223,12 +223,21 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   private Context appContext;
 
   // Provides any prior initial configuration supplied, to allow a reinitialization caused by
-  // a hot restart if the configuration is the same, or null if not initialized. Marked volatile
-  // because it is written from the "initialize" call arriving on the background method channel
-  // thread and read from the "isInitialized"/"isApproovEnabled" calls arriving on the foreground
-  // method channel thread - volatile provides the happens-before guarantee needed for the reading
-  // thread to observe the writing thread's update.
-  private volatile String initializedConfig = null;
+  // a hot restart if the configuration is the same, or null if not initialized.
+  //
+  // Static because the Approov SDK it mirrors is a process-wide singleton, while a plugin
+  // instance is created per FlutterEngine. An app with a second engine (workmanager,
+  // android_alarm_manager_plus, background geolocation) would otherwise get a fresh instance
+  // reporting "not initialized" while the SDK is initialized and protecting traffic: the Dart
+  // layer reads that as "native not protected" and commits real bypass mode, so every request
+  // from that engine would silently lose token injection and pinning. Matches
+  // approov-service-okhttp, which holds its configString in a static.
+  //
+  // Marked volatile because it is written from the "initialize" call arriving on the background
+  // method channel thread and read from the "isInitialized"/"isApproovEnabled" calls arriving on
+  // the foreground method channel thread - volatile provides the happens-before guarantee needed
+  // for the reading thread to observe the writing thread's update.
+  private static volatile String initializedConfig = null;
 
   // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
   // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
@@ -239,8 +248,10 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
    * Returns true when the service layer is initialized and Approov-backed
    * request protection is active (i.e. initialized with a non-empty config).
    */
-  private boolean isApproovEnabled() {
-    return (initializedConfig != null) && !initializedConfig.isEmpty();
+  private static boolean isApproovEnabled() {
+    // read the volatile once so the null check and the emptiness check cannot disagree
+    String config = initializedConfig;
+    return (config != null) && !config.isEmpty();
   }
 
   // Handler for the main thread to allow call backs since they must be in the context of that thread
