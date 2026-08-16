@@ -347,6 +347,32 @@ void main() {
     expect(headers.containsKey('Custom-Approov'), false);
   });
 
+  test('state queries fall back to the background channel', () async {
+    // A background isolate cannot reach the foreground channel. Before the
+    // fallback existed, that surfaced as "not initialized" - and on the
+    // empty-config path the Dart layer read it as "native unprotected" and
+    // committed real bypass mode, dropping tokens and pinning for that
+    // isolate. Both queries must therefore be answerable over the background
+    // channel, which the same native handler serves.
+    fgHandler = (call) async => throw MissingPluginException(
+        'foreground channel unavailable in this isolate');
+    bgHandler = (call) async {
+      switch (call.method) {
+        case 'isInitialized':
+          return true;
+        case 'isApproovEnabled':
+          return true;
+        default:
+          return null;
+      }
+    };
+
+    expect(await ApproovService.isInitialized(), true,
+        reason: 'the background channel must answer when the foreground '
+            'channel cannot');
+    expect(await ApproovService.isApproovEnabled(), true);
+  });
+
   test('isInitialized and isApproovEnabled reflect bypass mode', () async {
     fgHandler = (call) async {
       switch (call.method) {

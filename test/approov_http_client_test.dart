@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:approov_service_flutter_httpclient/approov_service_flutter_httpclient.dart';
+// SfItem is internal to the package (not re-exported from the public library), so the signing
+// component identifier is built from the source library directly, as structured_fields_test does.
+import 'package:approov_service_flutter_httpclient/src/structured_fields.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -615,6 +618,91 @@ void main() {
             'request reaches the network');
   });
 
+  test('missing signing algorithm aborts the request (fail-closed)',
+      () async {
+    var serverSawRequest = false;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      serverSawRequest = true;
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-missing-alg');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    // Parameters carrying no algorithm identifier at all must fail closed too, not
+    // fall back to a default or silently proceed unsigned.
+    ApproovService.enableMessageSigning(
+        defaultFactory: _MissingAlgFactory());
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    await expectLater(
+      client.get(Uri.parse('http://127.0.0.1:${server.port}/signed')),
+      throwsA(anyOf(isA<ApproovException>(), isA<Exception>())),
+    );
+    expect(serverSawRequest, false,
+        reason: 'a missing signing algorithm must abort before the '
+            'request reaches the network');
+  });
+
+  test('multi-value header adds are preserved in the signed message', () async {
+    // Regression test for staged header application: a factory that calls
+    // onAddHeader twice for the same name previously collapsed to the last
+    // value, so the signature covered a message the server could never
+    // reconstruct. Both values must survive into the signing context.
+    final uri = Uri.parse('https://example.com/multi');
+    final context = _buildSigningContext(uri);
+
+    context.addHeader('X-Multi', 'first');
+    context.addHeader('X-Multi', 'second');
+
+    expect(context.getComponentValue(SfItem.string('x-multi')), 'first, second',
+        reason: 'both added values must appear in the signature base, in the '
+            'order the factory added them');
+  });
+
   test('token binding hash is set (and awaited) before the token fetch',
       () async {
     final sequence = <String>[];
@@ -695,6 +783,16 @@ void main() {
 
 /// Factory producing parameters with an algorithm the service does not
 /// support - used to prove the fail-closed path for misconfigured algorithms.
+/// Produces parameters with no algorithm identifier at all. Distinct from
+/// [_UnsupportedAlgFactory]: that one names an algorithm the layer does not
+/// implement, this one names none, and both must fail closed.
+class _MissingAlgFactory extends SignatureParametersFactory {
+  @override
+  SignatureParameters build(ApproovSigningContext context) {
+    return SignatureParameters()..addComponentIdentifier('@method');
+  }
+}
+
 class _UnsupportedAlgFactory extends SignatureParametersFactory {
   @override
   SignatureParameters build(ApproovSigningContext context) {
