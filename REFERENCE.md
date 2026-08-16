@@ -30,6 +30,35 @@ Returns `Future<bool>`, resolving to `true` once `initialize()` has been called 
 
 Returns `Future<bool>`, resolving to `true` only when Approov-backed protection (token injection, pinning, secure string substitution) is actually active — i.e. `initialize()` was called with a non-empty configuration string. Resolves to `false` in bypass mode, and also resolves to `false` (rather than throwing) if `initialize()` has never been called or its most recent attempt failed.
 
+### Behaviour in bypass mode
+
+When the service layer is initialized with an empty configuration string it is *initialized but not
+protected*. The methods below are guarded so nothing reaches the native Approov SDK, and they do not
+all behave the same way — check the column before relying on one:
+
+| Behaviour in bypass mode | Methods |
+|---|---|
+| Throws `ApproovException("Approov is not enabled")` | `precheck`, `getDeviceID`, `fetchToken`, `getMessageSignature`, `getAccountMessageSignature`, `fetchSecureString`, `fetchCustomJWT`, `setDevKey` |
+| Returns an empty map | `getPins` |
+| Returns an empty string | `getLastARC` |
+| Silent no-op | `setDataHashInToken` |
+| Returns the input unchanged | `substituteQueryParam` |
+
+Request processing is unaffected by these guards: requests are forwarded with no Approov token, no
+trace header, no message signing, no secure string substitution and no Approov dynamic pinning.
+Ordinary TLS certificate validation still applies, and a certificate that fails it is still
+rejected.
+
+### Re-initialization and the `comment` argument
+
+The `comment` participates in the native SDK's already-initialized matching, alongside the
+configuration string. A repeat call with the same config is accepted only when the comment is
+**identical to the one used at first initialization** (commonly `null`), or starts with `reinit`.
+Any other comment - including swapping `null` for `""` - is reported by the native SDK as an
+initialization with a different configuration and surfaced as an `ApproovException`, with the
+service layer state left unchanged. Applications that re-initialize at runtime should therefore keep
+the comment stable or use the `reinit...` form.
+
 ## Mutator APIs
 
 ### `setServiceMutator(ApproovServiceMutator? mutator)`
