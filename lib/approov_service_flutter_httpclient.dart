@@ -657,18 +657,29 @@ class ApproovService {
     _configEpoch++;
   }
 
-  /// Sets a flag indicating if the network interceptor should proceed anyway if it is
-  /// not possible to obtain an Approov token due to a networking failure. If this is set
-  /// then your backend API can receive calls without the expected Approov token header
-  /// being added, or without header/query parameter substitutions being made. Note that
-  /// this should be used with caution because it may allow a connection to be established
-  /// before any dynamic pins have been received via Approov, thus potentially opening the
-  /// channel to a MitM.
+  /// **Obsolete no-op.** Retained so existing code keeps compiling; the value is
+  /// ignored and network-failure behaviour is decided entirely by the service
+  /// mutator.
   ///
-  /// @param proceed is true if Approov networking fails should allow continuation
+  /// The flag was the wrong mechanism. It was a single global switch over every
+  /// status the SDK can report on a network failure, so it could not distinguish
+  /// "no network" from `MITM_DETECTED` - and proceeding on the latter means
+  /// continuing after the SDK has detected interception, and possibly before any
+  /// dynamic pins have been received. A mutator can express the intended policy
+  /// per status instead, which is now the supported route: override
+  /// [ApproovServiceMutator.handleInterceptorFetchTokenResult] (and the
+  /// substitution handlers) and install it with
+  /// [ApproovService.setServiceMutator].
+  ///
+  /// `approov-service-okhttp` obsoleted the same setter for the same reason; this
+  /// aligns the two layers.
+  ///
+  /// @param proceed ignored
+  @Deprecated('Obsolete no-op: install a custom ApproovServiceMutator instead. '
+      'Network-failure policy is decided per status by the mutator.')
   static void setProceedOnNetworkFail(bool proceed) {
-    Log.d("$TAG: setProceedOnNetworkFail $proceed");
-    _proceedOnNetworkFail = proceed;
+    Log.d("$TAG: setProceedOnNetworkFail $proceed ignored, this setter is an "
+        "obsolete no-op - install a custom ApproovServiceMutator instead");
   }
 
   /// Enables or disables status fallback in the configured token header when no token
@@ -707,6 +718,21 @@ class ApproovService {
         setHeader(traceIDHeader, traceID);
         requestMutations.setTraceIDHeaderKey(traceIDHeader);
       }
+    } else if (fetchResult.tokenFetchStatus ==
+        ApproovTokenFetchStatus.NO_APPROOV_SERVICE) {
+      // The Approov service is unavailable and there is no token, but the header
+      // is still emitted - empty, or carrying the status name when
+      // setUseApproovStatusIfNoToken(true) is active - so the backend has
+      // evidence that Approov processing ran (TESTING_REQUIREMENTS §2 "Missing
+      // Artifacts Fallback"). This is deliberately the one status that sends an
+      // empty-valued token header, matching approov-service-okhttp's
+      // buildTokenHeaderValue; every other artifact-less outcome still omits the
+      // header entirely.
+      final value = _useApproovStatusIfNoToken
+          ? fetchResult.tokenFetchStatus.name
+          : fetchResult.token;
+      setHeader(_approovTokenHeader, _approovTokenPrefix + value);
+      requestMutations.setTokenHeaderKey(_approovTokenHeader);
     } else if (statusFallbackValue != null) {
       setHeader(_approovTokenHeader, _approovTokenPrefix + statusFallbackValue);
       requestMutations.setTokenHeaderKey(_approovTokenHeader);
@@ -1748,9 +1774,20 @@ class ApproovService {
     final requestMutations = ApproovRequestMutations();
     var effectiveUri = uri;
     if (shouldProcessApproov && _substitutionQueryParams.isNotEmpty) {
+      // Query substitution has to happen before the request is opened, because
+      // dart:io fixes the URI at openUrl() time - so it runs ahead of the token
+      // fetch that would otherwise classify the URL. Classify it here instead:
+      // a URL the SDK does not protect must not have a secure string resolved
+      // into it (TESTING_REQUIREMENTS §2 "Unprotected Request Processing"), or
+      // the secret travels to a host Approov neither tokenizes nor pins. The
+      // fetch result is discarded; the SDK caches the token, so the later fetch
+      // in _updateRequest is served from that cache.
+      bool? isProtected; // classified lazily, and only once per request
       for (final entry in _substitutionQueryParams.entries) {
         final queryKey = entry.key;
         if (!effectiveUri.queryParameters.containsKey(queryKey)) continue;
+        isProtected ??= await _isUrlApproovProtected(effectiveUri.toString());
+        if (!isProtected) break;
         final originalUri = effectiveUri;
         effectiveUri = await substituteQueryParam(effectiveUri, queryKey);
         if (effectiveUri.toString() != originalUri.toString()) {
@@ -1766,6 +1803,33 @@ class ApproovService {
       shouldApplyPinning: shouldApplyPinning,
       requestMutations: requestMutations,
     );
+  }
+
+  /// Reports whether the Approov SDK has positively confirmed that it protects
+  /// [url], so pre-open query substitution can be suppressed otherwise.
+  ///
+  /// Only `SUCCESS` counts as confirmation. `UNPROTECTED_URL` and `UNKNOWN_URL`
+  /// are the statuses this exists to catch, and every other outcome - a network
+  /// failure, a rejection, an internal error, a thrown exception - is
+  /// inconclusive about whether the host is protected, so it is treated as "do
+  /// not substitute". That is fail-closed by design: a secure string must never
+  /// be resolved into a request bound for a host that may not be protected.
+  ///
+  /// Only the classification is used here. The request itself still proceeds and
+  /// is judged by the mutator in [_updateRequest], which fetches the token again
+  /// and gets it from the SDK's cache.
+  static Future<bool> _isUrlApproovProtected(String url) async {
+    try {
+      final status = (await _fetchApproovToken(url)).tokenFetchStatus;
+      if (status == ApproovTokenFetchStatus.SUCCESS) return true;
+      Log.d("$TAG: query substitution skipped, the URL is not confirmed "
+          "protected: ${status.name}");
+      return false;
+    } catch (err) {
+      Log.e(
+          "$TAG: query substitution skipped, could not classify the URL: $err");
+      return false;
+    }
   }
 
   /// Test-only accessor for [_prepareRequestForApproov].
@@ -3042,15 +3106,36 @@ class ApproovHttpClient implements HttpClient {
   // must have been previously initialized, else there will be exceptions when
   // the client is used.
   //
+  // PREFER `await ApproovService.initialize(config)` BEFORE CONSTRUCTING. A
+  // constructor cannot await, so an initialization started here cannot report
+  // its outcome to the caller: `initialize` throws asynchronously on a bad or
+  // conflicting configuration, and no try/catch around `ApproovHttpClient(...)`
+  // can observe that. The failure is not lost - it is retained by
+  // ApproovService and rethrown from the first request made through this client
+  // (see `_requireInitialized`), which is a point the caller can await and
+  // catch - but it surfaces later and further from its cause than the
+  // documented `try { await initialize(config); } catch (_) { ... }` pattern.
+  // The `.catchError` below exists only to stop that pending failure being
+  // reported as an unhandled asynchronous error; it deliberately does not
+  // swallow it for request processing.
+  //
   // @param initialConfig optionally provide the config string for account
   //     initialization. If provided, the config must be obtained using the
-  //     Approov CLI or from the original onboarding email.
+  //     Approov CLI or from the original onboarding email. Prefer awaiting
+  //     `ApproovService.initialize` instead, so failures are catchable.
   // @param initialComment optionally provide the comment string for account
   //     initialization. If no config is provided the comment string is
   //     ignored.
   ApproovHttpClient([String? initialConfig, String? initialComment]) : super() {
     if (initialConfig != null) {
-      ApproovService.initialize(initialConfig, initialComment);
+      ApproovService.initialize(initialConfig, initialComment)
+          .catchError((Object err) {
+        // Retained by ApproovService and rethrown from the first request; logged
+        // here so a construction-time failure is still visible immediately.
+        Log.e(
+            "$TAG: initialization from the ApproovHttpClient constructor failed, "
+            "the error will be rethrown from the first request: $err");
+      });
     }
   }
 
@@ -3337,6 +3422,10 @@ class ApproovClient extends http.BaseClient {
   // @param initialComment optionally provide the comment string for account
   //     initialization. If no config is provided the comment string is
   //     ignored.
+  // PREFER `await ApproovService.initialize(config)` BEFORE CONSTRUCTING: this
+  // forwards to the ApproovHttpClient constructor, so the same limitation
+  // applies - an initialization failure cannot be caught around construction
+  // and instead surfaces from the first request through this client.
   ApproovClient([String? initialConfig, String? initialComment])
       : _delegateClient =
             httpio.IOClient(ApproovHttpClient(initialConfig, initialComment)),

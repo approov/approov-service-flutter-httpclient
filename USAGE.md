@@ -21,11 +21,11 @@ By default, `ApproovServiceMutator.DEFAULT` preserves existing Flutter service b
 | Approov Fetch Status | Default Action |
 | --- | --- |
 | `SUCCESS` | Continue |
-| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | If `setUseApproovStatusIfNoToken(true)` is active, interceptor flow continues and status fallback can be injected in the token header. Otherwise throw `ApproovNetworkException` (unless `setProceedOnNetworkFail(true)` is active in interceptor flows). |
+| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | If `setUseApproovStatusIfNoToken(true)` is active, interceptor flow continues and status fallback can be injected in the token header. Otherwise throw `ApproovNetworkException`. Substitution paths always throw. `setProceedOnNetworkFail` is an obsolete no-op — install a custom mutator to proceed instead. |
 | `REJECTED` | Throw `ApproovRejectionException` |
-| `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: continue without token. |
+| `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: **continue**, and still emit the token header — empty, or carrying `NO_APPROOV_SERVICE` as the value when `setUseApproovStatusIfNoToken(true)` is active — as evidence that Approov processing ran. Matches `approov-service-okhttp`. This is the one status that sends an empty-valued token header. |
 | `UNKNOWN_URL` | Interceptor flow continues without token |
-| `UNPROTECTED_URL` | Interceptor flow continues (token omitted, substitutions can still run) |
+| `UNPROTECTED_URL` | Interceptor flow skips all mutation: no token, no trace header, no message signing, and **no secure-string substitution**. Automatic query substitution is suppressed too, by classifying the URL before the request is opened |
 
 ## Install a custom mutator
 
@@ -96,7 +96,7 @@ Behavior in interceptor request flow:
 Notes:
 
 - Header name and prefix come from `setApproovHeader(header, prefix)`; pass `null` for no prefix.
-- Fallback is not injected by default for `NO_APPROOV_SERVICE`, `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses.
+- Fallback is not injected by default for `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses. `NO_APPROOV_SERVICE` is the exception: the token header is always emitted for it, and carries the status name when the fallback is enabled.
 - Trace ID behavior is unchanged (only standard token success path controls trace ID injection).
 
 ## Message signing with a mutator

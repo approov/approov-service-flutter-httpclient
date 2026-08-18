@@ -97,9 +97,35 @@ Returns the currently configured service-layer logging level.
 
 ## Network behavior
 
-### `setProceedOnNetworkFail(bool proceed)`
+### `setProceedOnNetworkFail(bool proceed)` — **obsolete no-op**
 
-Controls whether interceptor flows can continue when Approov fetch fails due to networking conditions.
+Deprecated and ignored. Retained only so existing code keeps compiling; the argument is discarded and
+no default handler reads it.
+
+It was a single global switch over every network-related status the SDK can report, so it could not
+proceed on `NO_NETWORK` without also proceeding on `MITM_DETECTED` — continuing after the SDK has
+detected interception, possibly before any dynamic pins have been received. Network-failure policy is
+now expressed per status by a mutator: override
+`ApproovServiceMutator.handleInterceptorFetchTokenResult` (and the header/query substitution handlers)
+and install it with `setServiceMutator`. `approov-service-okhttp` obsoleted the same setter for the
+same reason.
+
+Current default behaviour on `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED`:
+
+| Path | Behaviour |
+|---|---|
+| token fetch | continues and injects the status in the token header if `setUseApproovStatusIfNoToken(true)`, otherwise throws `ApproovNetworkException` |
+| header substitution | throws `ApproovNetworkException` — sending the placeholder where a secret belongs is a silent downgrade |
+| query parameter substitution | throws `ApproovNetworkException` |
+
+### `NO_APPROOV_SERVICE` handling
+
+When the Approov service is unavailable the request **proceeds** and the token header is still emitted:
+empty by default, or carrying `NO_APPROOV_SERVICE` as the value when `setUseApproovStatusIfNoToken(true)`
+is active. The backend therefore has evidence that Approov processing ran rather than seeing a request
+indistinguishable from one that never went through the layer. This mirrors `approov-service-okhttp`, and
+it is the only status for which an empty-valued token header is sent — every other artifact-less outcome
+omits the header entirely.
 
 ### `setApproovHeader(String header, String? prefix)`
 

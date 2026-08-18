@@ -60,7 +60,9 @@ void main() {
       mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.UNPROTECTED_URL),
           'https://api.example.com'),
-      isTrue,
+      isFalse,
+      reason: 'a URL the SDK does not protect must not be mutated at all - no '
+          'token, and no secure-string substitution (TESTING_REQUIREMENTS §2)',
     );
     expect(
       () => mutator.handleInterceptorFetchTokenResult(
@@ -69,11 +71,15 @@ void main() {
       throwsA(isA<ApproovNetworkException>()),
     );
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      // proceedOnNetworkFail is an obsolete no-op: it no longer opens this path,
+      // so a network failure still fails closed regardless of the flag. A custom
+      // mutator overriding this handler is the supported way to proceed.
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.NO_NETWORK,
+              // ignore: deprecated_member_use_from_same_package
               proceedOnNetworkFail: true),
           'https://api.example.com'),
-      isFalse,
+      throwsA(isA<ApproovNetworkException>()),
     );
     expect(
       mutator.handleInterceptorFetchTokenResult(
@@ -97,11 +103,21 @@ void main() {
       isTrue,
     );
     expect(
+      // NO_APPROOV_SERVICE proceeds, matching approov-service-okhttp: the request
+      // goes out and the token header is still emitted as evidence that Approov
+      // processing ran (TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback").
       mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isFalse,
+      isTrue,
+    );
+    expect(
+      mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE),
+          'https://api.example.com'),
+      isTrue,
+      reason: 'the status alone decides this, not the fallback flag',
     );
   });
 
@@ -149,6 +165,29 @@ void main() {
     ApproovService.setUseApproovStatusIfNoToken(false);
     expect(ApproovService.getUseApproovStatusIfNoToken(), isFalse);
   });
+  test('setProceedOnNetworkFail is an obsolete no-op', () {
+    // The setter must not change any behaviour. Calling it with true and then
+    // exercising the default mutator on a network failure must still fail closed.
+    // ignore: deprecated_member_use_from_same_package
+    ApproovService.setProceedOnNetworkFail(true);
+    expect(
+      () => ApproovServiceMutator.DEFAULT.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.NO_NETWORK),
+          'https://api.example.com'),
+      throwsA(isA<ApproovNetworkException>()),
+    );
+    expect(
+      () => ApproovServiceMutator.DEFAULT
+          .handleInterceptorHeaderSubstitutionResult(
+              _result(ApproovTokenFetchStatus.NO_NETWORK), 'X-Api-Key'),
+      throwsA(isA<ApproovNetworkException>()),
+    );
+    expect(
+      ApproovService.runtimeStateForTesting()['proceedOnNetworkFail'],
+      isFalse,
+      reason: 'the setter must not record the value either',
+    );
+  });
 }
 
 class _RecordingMutator extends ApproovServiceMutator {
@@ -182,4 +221,5 @@ ApproovTokenFetchResult _result(
     proceedOnNetworkFail: proceedOnNetworkFail,
     useApproovStatusIfNoToken: useApproovStatusIfNoToken,
   );
+
 }

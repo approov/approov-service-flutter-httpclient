@@ -311,6 +311,41 @@ void main() {
     expect(mutations.tokenHeaderKey, 'X-Approov-Token');
   });
 
+  test('NO_APPROOV_SERVICE emits an empty token header', () async {
+    // okhttp parity: this is the one artifact-less status that still sends the token header, so the
+    // backend has evidence Approov processing ran (TESTING_REQUIREMENTS §2 "Missing Artifacts
+    // Fallback"). Every other artifact-less outcome omits the header entirely.
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', null);
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _noApproovServiceFetchResult(),
+      mutations,
+    );
+
+    expect(headers.containsKey('Approov-Token'), isTrue);
+    expect(headers['Approov-Token'], '');
+    expect(mutations.tokenHeaderKey, 'Approov-Token');
+  });
+
+  test('NO_APPROOV_SERVICE carries the status when the fallback is enabled', () async {
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', 'Bearer ');
+    ApproovService.setUseApproovStatusIfNoToken(true);
+    addTearDown(() => ApproovService.setUseApproovStatusIfNoToken(false));
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _noApproovServiceFetchResult(),
+      mutations,
+    );
+
+    expect(headers['Approov-Token'], 'Bearer NO_APPROOV_SERVICE');
+  });
+
   test('message signing SDK failures proceed unsigned', () async {
     final calls = <MethodCall>[];
     final observedHeaders = <String, List<String>>{};
@@ -831,6 +866,25 @@ ApproovTokenFetchResult _successfulFetchResult({required String traceID}) {
     loggableToken: 'trace-loggable',
     traceID: traceID,
     requestURL: 'https://api.example.com',
+    proceedOnNetworkFail: false,
+    useApproovStatusIfNoToken: false,
+  );
+}
+
+ApproovTokenFetchResult _noApproovServiceFetchResult() {
+  return ApproovTokenFetchResult(
+    tokenFetchStatus: ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
+    token: '',
+    secureString: null,
+    arc: '',
+    rejectionReasons: '',
+    isConfigChanged: false,
+    isForceApplyPins: false,
+    measurementConfig: Uint8List(0),
+    loggableToken: '',
+    traceID: '',
+    requestURL: 'https://api.example.com',
+    // ignore: deprecated_member_use_from_same_package
     proceedOnNetworkFail: false,
     useApproovStatusIfNoToken: false,
   );
