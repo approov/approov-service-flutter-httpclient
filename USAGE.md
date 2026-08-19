@@ -21,9 +21,9 @@ By default, `ApproovServiceMutator.DEFAULT` preserves existing Flutter service b
 | Approov Fetch Status | Default Action |
 | --- | --- |
 | `SUCCESS` | Continue |
-| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | If `setUseApproovStatusIfNoToken(true)` is active, interceptor flow continues and status fallback can be injected in the token header. Otherwise throw `ApproovNetworkException`. Substitution paths always throw. `setProceedOnNetworkFail` is an obsolete no-op — install a custom mutator to proceed instead. |
+| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | Throw `ApproovNetworkException` on the token fetch and on both substitution paths. Fail-closed unconditionally: `setUseApproovStatusIfNoToken(true)` is a backend-visibility feature and never lets a request continue, and `setProceedOnNetworkFail` is an obsolete no-op. Install a custom mutator to proceed instead — the status fallback is still injected into the token header when such a mutator returns `true` and the flag is on. |
 | `REJECTED` | Throw `ApproovRejectionException` |
-| `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: **continue**, and still emit the token header — empty, or carrying `NO_APPROOV_SERVICE` as the value when `setUseApproovStatusIfNoToken(true)` is active — as evidence that Approov processing ran. Matches `approov-service-okhttp`. This is the one status that sends an empty-valued token header. |
+| `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: **continue**, forwarding the request unmodified so an Approov outage does not take the app offline. No token is available, so the token header is **omitted** unless `setUseApproovStatusIfNoToken(true)` is active, in which case it carries `NO_APPROOV_SERVICE`. An empty-valued or prefix-only header is never sent. Secure-string substitution is skipped and the original placeholder is left in place, rather than failing the request. |
 | `UNKNOWN_URL` | Interceptor flow continues without token |
 | `UNPROTECTED_URL` | Interceptor flow skips all mutation: no token, no trace header, no message signing, and **no secure-string substitution**. Automatic query substitution is suppressed too, by classifying the URL before the request is opened |
 
@@ -82,7 +82,10 @@ ApproovService.setUseApproovStatusIfNoToken(true);
 Defaults:
 
 - `useApproovStatusIfNoToken = false`
-- fallback allowlist: `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`
+- fallback allowlist: `NO_APPROOV_SERVICE`, `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`
+
+Of these, only `NO_APPROOV_SERVICE` is reached with the default mutator — the three network statuses
+fail closed unless a custom mutator deliberately allows them to continue.
 
 Behavior in interceptor request flow:
 
@@ -96,7 +99,7 @@ Behavior in interceptor request flow:
 Notes:
 
 - Header name and prefix come from `setApproovHeader(header, prefix)`; pass `null` for no prefix.
-- Fallback is not injected by default for `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses. `NO_APPROOV_SERVICE` is the exception: the token header is always emitted for it, and carries the status name when the fallback is enabled.
+- Fallback is not injected for `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses. `NO_APPROOV_SERVICE` is on the allowlist, so the token header carries `NO_APPROOV_SERVICE` when the fallback is enabled — but with the fallback disabled the header is **omitted entirely** for it, exactly as for every other artifact-less outcome. An empty-valued or prefix-only token header is never sent.
 - Trace ID behavior is unchanged (only standard token success path controls trace ID injection).
 
 ## Message signing with a mutator

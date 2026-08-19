@@ -161,6 +161,160 @@ void main() {
             'successful protected initialization future');
   });
 
+  test(
+      'requests issued while a different-config re-initialization is rejected '
+      'still succeed under the original config', () async {
+    // TESTING_REQUIREMENTS.md section 1 "Different Config Failure State": if the
+    // layer was protecting traffic with the original config it continues to do
+    // so. A re-initialization attempt that is in flight - and about to be
+    // rejected - must not become the future that _requireInitialized() awaits,
+    // otherwise every concurrent request fails with that attempt's error even
+    // though the layer is still fully functional.
+    final nativeReached = Completer<void>();
+    final releaseNative = Completer<void>();
+    fgHandler = (call) async {
+      if (call.method == 'getDeviceID') return 'protected-device';
+      return null;
+    };
+    bgHandler = (call) async {
+      if (call.method == 'initialize' &&
+          call.arguments['initialConfig'] == 'different-config') {
+        nativeReached.complete();
+        await releaseNative.future;
+        throw PlatformException(
+            code: 'Approov.initialize', message: 'different config');
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('real-config', 'reinit-protected');
+
+    final reinitialization =
+        ApproovService.initialize('different-config', 'reinit-different');
+    // the attempt has reached native and has not returned yet, so anything
+    // started from here really is in flight across the rejected attempt
+    await nativeReached.future;
+
+    final inFlightDeviceID = ApproovService.getDeviceID();
+    final inFlightRequest = ApproovService.prepareRequestForApproovForTesting(
+        'GET', Uri.parse('https://example.com/'));
+
+    releaseNative.complete();
+    await expectLater(
+      reinitialization,
+      throwsA(isA<ApproovException>()
+          .having((e) => e.cause ?? '', 'cause', contains('different config'))),
+    );
+
+    expect(await inFlightDeviceID, 'protected-device');
+    final preparation = await inFlightRequest;
+    expect(preparation.shouldProcessApproov, true,
+        reason: 'the original protected config is still in force');
+
+    // and the layer keeps working for requests started after the rejection too
+    expect(await ApproovService.getDeviceID(), 'protected-device');
+  });
+
+  test(
+      'requests issued during a bypass to protected upgrade wait for it '
+      'instead of going out unprotected', () async {
+    // TESTING_REQUIREMENTS.md section 1 "Empty Then Valid Configuration". Bypass
+    // mode is "initialized but NOT protected", so _isInitialized is true there.
+    // If the publish decision keys off _isInitialized alone, the upgrade attempt
+    // is left unpublished, _requireInitialized() resolves instantly against the
+    // stale bypass future, and every request issued during `await
+    // initialize(realConfig)` is prepared with Approov still inactive - going out
+    // with no token and no Approov pinning. The upgrade must gate traffic until
+    // it resolves.
+    final nativeReached = Completer<void>();
+    final releaseNative = Completer<void>();
+    bgHandler = (call) async {
+      if (call.method == 'initialize' &&
+          call.arguments['initialConfig'] == 'upgrade-config') {
+        nativeReached.complete();
+        await releaseNative.future;
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('', 'reinit-bypass-first');
+    // sanity: bypass really is "initialized but not protected"
+    final bypassPreparation =
+        await ApproovService.prepareRequestForApproovForTesting(
+            'GET', Uri.parse('https://example.com/'));
+    expect(bypassPreparation.shouldProcessApproov, false);
+
+    final upgrade = ApproovService.initialize('upgrade-config', null);
+    // the upgrade has reached native and has not returned yet
+    await nativeReached.future;
+
+    final duringUpgrade = ApproovService.prepareRequestForApproovForTesting(
+        'GET', Uri.parse('https://example.com/'));
+
+    releaseNative.complete();
+    await upgrade;
+
+    final preparation = await duringUpgrade;
+    expect(preparation.shouldProcessApproov, true,
+        reason: 'a request issued during the upgrade must wait for it, not go '
+            'out with no Approov token');
+    expect(preparation.shouldApplyPinning, true,
+        reason: 'a request issued during the upgrade must wait for it, not go '
+            'out with no Approov pinning');
+  });
+
+  test('a rejected re-initialization does not reset runtime configuration',
+      () async {
+    // TESTING_REQUIREMENTS.md section 1 "Service-Layer State Only Updated On
+    // Success": no internal state change may survive a failed attempt. The
+    // state reset must not run before the commit, or a failure landing between
+    // the two would wipe the runtime configuration while _initialConfig still
+    // named the previous config.
+    bgHandler = (call) async {
+      if (call.method == 'initialize' &&
+          call.arguments['initialConfig'] == 'different-config') {
+        throw PlatformException(
+            code: 'Approov.initialize', message: 'different config');
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('real-config', 'reinit-protected');
+    ApproovService.setApproovHeader('X-Custom-Token', 'Bearer ');
+    ApproovService.setBindingHeader('Authorization');
+    ApproovService.addSubstitutionHeader('X-Api-Key', '');
+    ApproovService.setUseApproovStatusIfNoToken(true);
+    addTearDown(() => ApproovService.setUseApproovStatusIfNoToken(false));
+
+    await expectLater(
+      ApproovService.initialize('different-config', 'reinit-different'),
+      throwsA(isA<ApproovException>()),
+    );
+
+    final state = ApproovService.runtimeStateForTesting();
+    expect(state['approovTokenHeader'], 'X-Custom-Token');
+    expect(state['approovTokenPrefix'], 'Bearer ');
+    expect(state['bindingHeader'], 'Authorization');
+    expect((state['substitutionHeaders'] as Map).containsKey('X-Api-Key'),
+        isTrue);
+    expect(state['useApproovStatusIfNoToken'], isTrue);
+  });
+
+  test('a successful re-initialization does reset runtime configuration',
+      () async {
+    bgHandler = (call) async => null;
+
+    await ApproovService.initialize('real-config', null);
+    ApproovService.setApproovHeader('X-Custom-Token', 'Bearer ');
+    ApproovService.setBindingHeader('Authorization');
+
+    await ApproovService.initialize('real-config', null);
+
+    final state = ApproovService.runtimeStateForTesting();
+    expect(state['approovTokenHeader'], 'Approov-Token');
+    expect(state['bindingHeader'], isNull);
+  });
+
   test('failed protected upgrade after bypass leaves bypass mode usable',
       () async {
     bgHandler = (call) async {

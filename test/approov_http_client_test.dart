@@ -311,13 +311,15 @@ void main() {
     expect(mutations.tokenHeaderKey, 'X-Approov-Token');
   });
 
-  test('NO_APPROOV_SERVICE emits an empty token header', () async {
-    // okhttp parity: this is the one artifact-less status that still sends the token header, so the
-    // backend has evidence Approov processing ran (TESTING_REQUIREMENTS §2 "Missing Artifacts
-    // Fallback"). Every other artifact-less outcome omits the header entirely.
+  test('NO_APPROOV_SERVICE omits the token header when the fallback is off',
+      () async {
+    // TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback": empty token values must be omitted,
+    // never sent as an empty-valued header. Status evidence belongs behind
+    // setUseApproovStatusIfNoToken(true) instead.
     final headers = <String, String>{};
     final mutations = ApproovRequestMutations();
     ApproovService.setApproovHeader('Approov-Token', null);
+    expect(ApproovService.getUseApproovStatusIfNoToken(), isFalse);
 
     ApproovService.applyTokenFetchResultHeadersForTesting(
       headers,
@@ -325,9 +327,25 @@ void main() {
       mutations,
     );
 
-    expect(headers.containsKey('Approov-Token'), isTrue);
-    expect(headers['Approov-Token'], '');
-    expect(mutations.tokenHeaderKey, 'Approov-Token');
+    expect(headers.containsKey('Approov-Token'), isFalse);
+    expect(mutations.tokenHeaderKey, isNull);
+  });
+
+  test('NO_APPROOV_SERVICE never emits a prefix-only token header', () async {
+    // with a prefix configured and the fallback off, the header must still be absent rather than
+    // carrying a bare "Bearer " value.
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', 'Bearer ');
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _noApproovServiceFetchResult(),
+      mutations,
+    );
+
+    expect(headers.containsKey('Approov-Token'), isFalse);
+    expect(mutations.tokenHeaderKey, isNull);
   });
 
   test('NO_APPROOV_SERVICE carries the status when the fallback is enabled', () async {
@@ -344,6 +362,38 @@ void main() {
     );
 
     expect(headers['Approov-Token'], 'Bearer NO_APPROOV_SERVICE');
+    expect(mutations.tokenHeaderKey, 'Approov-Token');
+    // the trace ID is an artifact in its own right: there is none for this
+    // status, so its header stays absent whatever the fallback setting
+    expect(headers.containsKey('Approov-TraceID'), isFalse);
+    expect(mutations.traceIDHeaderKey, isNull);
+  });
+
+  test('MITM_DETECTED injects the status only when a mutator allows it',
+      () async {
+    // The default mutator throws for MITM_DETECTED, so this header value is only
+    // ever reachable through a custom mutator that deliberately returns true.
+    // The injection path itself must remain intact for that case.
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', null);
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _mitmDetectedFetchResult(),
+      mutations,
+    );
+    expect(headers.containsKey('Approov-Token'), isFalse,
+        reason: 'with the fallback off no header is emitted at all');
+
+    ApproovService.setUseApproovStatusIfNoToken(true);
+    addTearDown(() => ApproovService.setUseApproovStatusIfNoToken(false));
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _mitmDetectedFetchResult(),
+      mutations,
+    );
+    expect(headers['Approov-Token'], 'MITM_DETECTED');
   });
 
   test('message signing SDK failures proceed unsigned', () async {
@@ -866,6 +916,25 @@ ApproovTokenFetchResult _successfulFetchResult({required String traceID}) {
     loggableToken: 'trace-loggable',
     traceID: traceID,
     requestURL: 'https://api.example.com',
+    proceedOnNetworkFail: false,
+    useApproovStatusIfNoToken: false,
+  );
+}
+
+ApproovTokenFetchResult _mitmDetectedFetchResult() {
+  return ApproovTokenFetchResult(
+    tokenFetchStatus: ApproovTokenFetchStatus.MITM_DETECTED,
+    token: '',
+    secureString: null,
+    arc: '',
+    rejectionReasons: '',
+    isConfigChanged: false,
+    isForceApplyPins: false,
+    measurementConfig: Uint8List(0),
+    loggableToken: '',
+    traceID: '',
+    requestURL: 'https://api.example.com',
+    // ignore: deprecated_member_use_from_same_package
     proceedOnNetworkFail: false,
     useApproovStatusIfNoToken: false,
   );

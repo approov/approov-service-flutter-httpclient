@@ -114,18 +114,38 @@ Current default behaviour on `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED`:
 
 | Path | Behaviour |
 |---|---|
-| token fetch | continues and injects the status in the token header if `setUseApproovStatusIfNoToken(true)`, otherwise throws `ApproovNetworkException` |
+| token fetch | throws `ApproovNetworkException`, unconditionally — `setUseApproovStatusIfNoToken(true)` does **not** open this path |
 | header substitution | throws `ApproovNetworkException` — sending the placeholder where a secret belongs is a silent downgrade |
 | query parameter substitution | throws `ApproovNetworkException` |
 
+The default mutator is fail-closed for every status except `SUCCESS` and `NO_APPROOV_SERVICE`.
+`setUseApproovStatusIfNoToken` is a backend-visibility feature only: it never decides whether a request
+is allowed to continue, so enabling it can never let a request go out after the SDK reported
+`MITM_DETECTED`. A custom mutator that overrides `handleInterceptorFetchTokenResult` and returns `true`
+for one of these statuses still gets the status injected into the token header when the flag is on.
+
+> `approov-service-okhttp` still carries the `useApproovStatusIfNoToken` escape hatch on this path, so
+> this layer deliberately diverges from it until that layer receives the matching fix.
+
 ### `NO_APPROOV_SERVICE` handling
 
-When the Approov service is unavailable the request **proceeds** and the token header is still emitted:
-empty by default, or carrying `NO_APPROOV_SERVICE` as the value when `setUseApproovStatusIfNoToken(true)`
-is active. The backend therefore has evidence that Approov processing ran rather than seeing a request
-indistinguishable from one that never went through the layer. This mirrors `approov-service-okhttp`, and
-it is the only status for which an empty-valued token header is sent — every other artifact-less outcome
-omits the header entirely.
+When the Approov service is unavailable the request **proceeds unmodified** rather than failing, so an
+Approov outage does not take the app offline. No token is available, so:
+
+| Path | Behaviour |
+|---|---|
+| token header | omitted entirely by default; carries `NO_APPROOV_SERVICE` as the value when `setUseApproovStatusIfNoToken(true)` is active |
+| trace ID header | omitted — there is no trace ID for this status |
+| header substitution | skipped; the original placeholder value is left in place |
+| query parameter substitution | skipped; the original placeholder value is left in place |
+
+An empty-valued or prefix-only token header (`Approov-Token:` / `Approov-Token: Bearer `) is never sent.
+Backend evidence that Approov processing ran is available through `setUseApproovStatusIfNoToken(true)`,
+which is the mechanism intended for it.
+
+> This layer deliberately diverges from `approov-service-okhttp` on two points here, until that layer
+> receives the matching fixes: okhttp's `buildTokenHeaderValue` returns `prefix + token`, so it still
+> emits the empty/prefix-only header for this status, and its substitution handlers still throw for it.
 
 ### `setApproovHeader(String header, String? prefix)`
 
@@ -155,9 +175,17 @@ Enables/disables status fallback in the configured token header when no token is
 
 When enabled, and interceptor mutator processing allows continuation, allowlisted token-fetch failure statuses can be sent in the token header:
 
+- `NO_APPROOV_SERVICE`
 - `NO_NETWORK`
 - `POOR_NETWORK`
 - `MITM_DETECTED`
+
+Only `NO_APPROOV_SERVICE` is reachable with the default mutator; the three network statuses fail closed
+unless a custom mutator overrides `handleInterceptorFetchTokenResult` and returns `true` for them. This
+flag never decides whether a request proceeds — it only controls the token header value.
+
+When disabled, no token header is set at all if no token is available: an empty-valued or prefix-only
+header is never sent.
 
 ### `getUseApproovStatusIfNoToken()`
 

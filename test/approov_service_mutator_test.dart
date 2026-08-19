@@ -81,31 +81,50 @@ void main() {
           'https://api.example.com'),
       throwsA(isA<ApproovNetworkException>()),
     );
+    // setUseApproovStatusIfNoToken(true) is a backend-visibility feature and must
+    // never decide whether a request is allowed to continue. The default mutator
+    // is fail-closed for every status except SUCCESS and NO_APPROOV_SERVICE
+    // (TESTING_REQUIREMENTS §3 "Default Mutator Behavior"). This deliberately
+    // diverges from approov-service-okhttp, which still has the escape hatch.
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.NO_NETWORK,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isTrue,
+      throwsA(isA<ApproovNetworkException>()),
     );
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.POOR_NETWORK,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isTrue,
+      throwsA(isA<ApproovNetworkException>()),
     );
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.MITM_DETECTED,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isTrue,
+      throwsA(isA<ApproovNetworkException>()),
+      reason: 'enabling the status fallback must never let a request continue '
+          'after the SDK reported MITM_DETECTED',
+    );
+    expect(
+      () => mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.MITM_DETECTED),
+          'https://api.example.com'),
+      throwsA(isA<ApproovNetworkException>()),
+    );
+    expect(
+      () => mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.POOR_NETWORK),
+          'https://api.example.com'),
+      throwsA(isA<ApproovNetworkException>()),
     );
     expect(
       // NO_APPROOV_SERVICE proceeds, matching approov-service-okhttp: the request
-      // goes out and the token header is still emitted as evidence that Approov
-      // processing ran (TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback").
+      // goes out unmodified rather than failing during an Approov outage
+      // (TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback").
       mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
               useApproovStatusIfNoToken: true),
@@ -136,6 +155,31 @@ void main() {
     expect(
       mutator.handleInterceptorQueryParamSubstitutionResult(
           _result(ApproovTokenFetchStatus.UNKNOWN_KEY), 'api_key'),
+      isFalse,
+    );
+    // NO_APPROOV_SERVICE skips the substitution and leaves the placeholder in
+    // place rather than throwing. handleInterceptorFetchTokenResult already let
+    // the request continue for this status, so throwing here would turn an
+    // Approov outage into a hard request failure for every app with a
+    // substitution header configured (TESTING_REQUIREMENTS §2 "Missing
+    // Artifacts Fallback"). This deliberately diverges from
+    // approov-service-okhttp, which still throws.
+    expect(
+      mutator.handleInterceptorHeaderSubstitutionResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE), 'Authorization'),
+      isFalse,
+    );
+    expect(
+      mutator.handleInterceptorQueryParamSubstitutionResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE), 'api_key'),
+      isFalse,
+    );
+    // the fallback flag does not change the substitution decision either
+    expect(
+      mutator.handleInterceptorHeaderSubstitutionResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
+              useApproovStatusIfNoToken: true),
+          'Authorization'),
       isFalse,
     );
   });

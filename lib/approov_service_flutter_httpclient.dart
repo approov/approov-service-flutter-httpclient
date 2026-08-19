@@ -371,6 +371,10 @@ class ApproovService {
 
   /// Indicates if status fallback is allowed for token-header injection.
   ///
+  /// The network-related statuses are only reachable here through a custom
+  /// mutator that deliberately returns true for them; the default mutator
+  /// fails closed on all three (TESTING_REQUIREMENTS §3).
+  ///
   /// @param status is the token fetch status to evaluate
   /// @return true if this status is allowed to be injected as fallback
   static bool _isAllowedStatusFallback(ApproovTokenFetchStatus status) {
@@ -378,6 +382,7 @@ class ApproovService {
       case ApproovTokenFetchStatus.NO_NETWORK:
       case ApproovTokenFetchStatus.POOR_NETWORK:
       case ApproovTokenFetchStatus.MITM_DETECTED:
+      case ApproovTokenFetchStatus.NO_APPROOV_SERVICE:
         return true;
       default:
         return false;
@@ -474,8 +479,39 @@ class ApproovService {
         // ignored - see above
       }
     }
+    // Whether Approov protection is ALREADY ACTIVE decides if this attempt is
+    // allowed to become the future that _requireInitialized() awaits.
+    //
+    // Note this is deliberately narrower than _isInitialized alone. Bypass mode
+    // is "initialized but not protected", so _isInitialized is true there: using
+    // it on its own would leave an initialize(realConfig) upgrade out of bypass
+    // unpublished, _requireInitialized() would resolve instantly against the
+    // stale bypass future, and every request issued during the upgrade would go
+    // out with no token and no Approov pinning because _isApproovActive is still
+    // false. The "Empty Then Valid Configuration" upgrade the spec supports
+    // (TESTING_REQUIREMENTS §1) must gate traffic until it resolves.
+    final bool alreadyProtected = _isInitialized && _isApproovActive;
     final attemptedInitialization = _initializeAsync(config, comment);
-    _futureInitialization = attemptedInitialization;
+    if (!alreadyProtected) {
+      // No traffic is being protected yet - either nothing has ever initialized
+      // successfully, or the layer is in bypass mode - so there is no protected
+      // state worth shielding and requests must not race ahead of this attempt.
+      // Publishing it means concurrent callers of _requireInitialized() wait for
+      // it and, if it fails, rethrow this original initialization error rather
+      // than the generic "has not been initialized" message of the never-called
+      // case, preserving the root cause for diagnosis while remaining
+      // fail-closed.
+      _futureInitialization = attemptedInitialization;
+    }
+    // When protection IS already active, the attempt is deliberately NOT
+    // published while it is in flight. _futureInitialization keeps pointing at
+    // the already-resolved successful future, so requests issued during a
+    // re-initialization continue to be served under the config that is actually
+    // still in force. Publishing the in-flight attempt would fail every
+    // concurrent request with that attempt's error even though the layer remains
+    // fully functional under the original config (TESTING_REQUIREMENTS §1
+    // "Different Config Failure State": if the layer was protecting traffic with
+    // the original config it continues to do so).
     try {
       await attemptedInitialization;
     } catch (_) {
@@ -488,17 +524,20 @@ class ApproovService {
       // overlapping calls that future may itself be a failed attempt, and
       // installing it would make every _requireInitialized() rethrow a stale
       // error while the native layer is healthy. The identical() guard leaves
-      // _futureInitialization alone when a newer attempt already replaced it.
+      // _futureInitialization alone when a newer attempt already replaced it,
+      // and also makes this a no-op when the attempt was never published.
       if (_isInitialized &&
           identical(_futureInitialization, attemptedInitialization)) {
         _futureInitialization = Future<void>.value();
       }
-      // When no initialization has ever succeeded, the failed future is left in
-      // place intentionally: _requireInitialized() then rethrows this original
-      // initialization error - rather than the generic "has not been
-      // initialized" message of the never-called case - preserving the root
-      // cause for diagnosis while remaining fail-closed.
       rethrow;
+    }
+    if (alreadyProtected) {
+      // The attempt succeeded but was never published (nothing else assigns
+      // _futureInitialization, so on this branch it is never the attempt).
+      // Install a freshly resolved future so _requireInitialized() can never
+      // observe a stale failed future left behind by an earlier attempt.
+      _futureInitialization = Future<void>.value();
     }
   }
 
@@ -595,8 +634,6 @@ class ApproovService {
             }
           }
 
-          _resetServiceStateAfterSuccessfulInitialization();
-
           // setup ready for callbacks from the platform layer if we are running
           // in the root isolate (this is not possible in background isolates)
           if (isRootIsolate) {
@@ -609,11 +646,21 @@ class ApproovService {
             });
           }
 
-          // initialization was successful - commit the Dart state now, before
-          // any best-effort follow-up, so a failure in telemetry cannot
-          // desynchronize Dart (bypass) from the already-committed native
-          // state (protected). This matches approov-service-okhttp, which
-          // commits service-layer state before setting the user property.
+          // initialization was successful - reset the runtime configuration and
+          // commit the Dart state now, before any best-effort follow-up, so a
+          // failure in telemetry cannot desynchronize Dart (bypass) from the
+          // already-committed native state (protected). This matches
+          // approov-service-okhttp, which commits service-layer state before
+          // setting the user property.
+          //
+          // The reset sits immediately before the commit and nothing that can
+          // throw is allowed between the two: a failure landing in that window
+          // would wipe the runtime configuration (token headers, substitution
+          // maps, exclusion regexes, mutator) while _initialConfig still named
+          // the previous config, leaving a half-applied state behind a failed
+          // attempt. TESTING_REQUIREMENTS §1 "Service-Layer State Only Updated
+          // On Success" forbids exactly that.
+          _resetServiceStateAfterSuccessfulInitialization();
           _isInitialized = true;
           _initialConfig = effectiveConfig;
           _isRootIsolate = isRootIsolate;
@@ -687,7 +734,15 @@ class ApproovService {
   ///
   /// When enabled, and a mutator allows interceptor token processing to continue, the
   /// configured token header receives status enum values for allowlisted statuses:
-  /// `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`.
+  /// `NO_APPROOV_SERVICE`, `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`.
+  ///
+  /// The default mutator only continues for `NO_APPROOV_SERVICE`; the three
+  /// network-related statuses fail closed unless a custom mutator overrides
+  /// [ApproovServiceMutator.handleInterceptorFetchTokenResult]. This flag never
+  /// decides whether a request proceeds - it only controls backend visibility.
+  ///
+  /// When disabled, no token header is set at all if no token is available: an
+  /// empty-valued or prefix-only header is never sent.
   ///
   /// @param shouldUse is true to enable status fallback, false to disable
   static void setUseApproovStatusIfNoToken(bool shouldUse) {
@@ -718,22 +773,13 @@ class ApproovService {
         setHeader(traceIDHeader, traceID);
         requestMutations.setTraceIDHeaderKey(traceIDHeader);
       }
-    } else if (fetchResult.tokenFetchStatus ==
-        ApproovTokenFetchStatus.NO_APPROOV_SERVICE) {
-      // The Approov service is unavailable and there is no token, but the header
-      // is still emitted - empty, or carrying the status name when
-      // setUseApproovStatusIfNoToken(true) is active - so the backend has
-      // evidence that Approov processing ran (TESTING_REQUIREMENTS §2 "Missing
-      // Artifacts Fallback"). This is deliberately the one status that sends an
-      // empty-valued token header, matching approov-service-okhttp's
-      // buildTokenHeaderValue; every other artifact-less outcome still omits the
-      // header entirely.
-      final value = _useApproovStatusIfNoToken
-          ? fetchResult.tokenFetchStatus.name
-          : fetchResult.token;
-      setHeader(_approovTokenHeader, _approovTokenPrefix + value);
-      requestMutations.setTokenHeaderKey(_approovTokenHeader);
     } else if (statusFallbackValue != null) {
+      // No token is available. The header is emitted only when
+      // setUseApproovStatusIfNoToken(true) is active, carrying the fetch status
+      // name so the backend has evidence that Approov processing ran
+      // (TESTING_REQUIREMENTS §2 "Token Fallback Status"). With the fallback
+      // disabled the header is omitted entirely rather than sent empty or
+      // prefix-only, as §2 "Missing Artifacts Fallback" requires.
       setHeader(_approovTokenHeader, _approovTokenPrefix + statusFallbackValue);
       requestMutations.setTokenHeaderKey(_approovTokenHeader);
     }
@@ -1906,10 +1952,11 @@ class ApproovService {
       fetchResult,
       requestMutations,
     );
-    if (requestMutations.tokenHeaderKey != null &&
-        fetchResult.tokenFetchStatus != ApproovTokenFetchStatus.SUCCESS) {
+    if (statusFallbackValue != null &&
+        requestMutations.tokenHeaderKey != null) {
       Log.d(
-          "$TAG: $isolate updateRequest fallback token header injected for $host: $statusFallbackValue");
+          "$TAG: $isolate updateRequest no Approov token for $host, "
+          "${requestMutations.tokenHeaderKey} set to fetch status $statusFallbackValue");
     }
 
     // we now deal with any header substitutions, which may require further fetches but these
