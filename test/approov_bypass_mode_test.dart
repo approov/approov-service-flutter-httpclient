@@ -1618,6 +1618,33 @@ void main() {
               'incorrectly took the no-pinning-information short-circuit');
     });
   });
+  test('the user property reports the service layer name and version', () async {
+    // The attester matches the prefix against the account's permitted service-layer prefixes and the
+    // version suffix travels in the attestation request body, so a released build is identifiable in
+    // Elasticsearch. approov-service-okhttp reports the same way.
+    final properties = <String>[];
+    fgHandler = (call) async {
+      if (call.method == 'setUserProperty') {
+        properties.add('${(call.arguments as Map)['property']}');
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('real-config');
+
+    expect(properties, [
+      'approov-service-flutter-httpclient/${ApproovService.serviceLayerVersion}'
+    ]);
+
+    // Guard against the classic drift: the constant must match the published package version, since
+    // nothing else keeps them together.
+    final pubspec = File('pubspec.yaml').readAsLinesSync();
+    final versionLine = pubspec.firstWhere((l) => l.startsWith('version:'));
+    final pubspecVersion = versionLine.split(':')[1].trim();
+    expect(ApproovService.serviceLayerVersion, pubspecVersion,
+        reason: 'ApproovService.serviceLayerVersion must be bumped with pubspec.yaml, '
+            'the podspec and the CHANGELOG');
+  });
 }
 
 /// Standard assertion for the reject-style bypass guards added in Task 9:
@@ -1671,4 +1698,5 @@ class _AlwaysAllowMutator extends ApproovServiceMutator {
     pinningConsulted = true;
     return true;
   }
+
 }

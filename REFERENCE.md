@@ -232,6 +232,18 @@ that sending the secret to that host is acceptable.
 
 Fetches secure string value or sets a per-device definition when `newDef` is provided.
 
+### Service layer identification
+
+At initialization with a non-empty config the layer reports itself to the SDK through
+`Approov.setUserProperty` as `approov-service-flutter-httpclient/<version>`, for example
+`approov-service-flutter-httpclient/3.5.8`. The prefix is what the attester matches against the
+account's permitted service-layer prefixes; the version suffix travels in the attestation request body,
+so a specific release is identifiable in the attestation records. Nothing is reported in bypass mode,
+where the platform SDK is never initialized.
+
+`ApproovService.serviceLayerVersion` exposes the same string, and must be bumped together with
+`pubspec.yaml`, the podspec and the CHANGELOG. A unit test fails if it drifts from `pubspec.yaml`.
+
 ## Tokens, attestation and JWT
 
 ### `prefetch()`

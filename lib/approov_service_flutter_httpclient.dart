@@ -101,6 +101,22 @@ class ApproovService {
   // logging tag
   static const String TAG = "ApproovService";
 
+  /// Version of this service layer, reported to the Approov SDK as a user
+  /// property at initialization so the attestation record shows which layer and
+  /// which release produced it. `approov-service-okhttp` reports the same way.
+  ///
+  /// Keep this in lock-step with `pubspec.yaml` `version`, the podspec
+  /// `s.version` and the top CHANGELOG entry: a release bumps all four.
+  /// `test/approov_bypass_mode_test.dart` fails if this drifts from
+  /// `pubspec.yaml`.
+  static const String serviceLayerVersion = "3.5.8";
+
+  /// Identifier reported through `Approov.setUserProperty`. The prefix is what
+  /// the attester matches against the account's permitted service-layer
+  /// prefixes; the version suffix rides along in the attestation request body.
+  static const String _userPropertyPrefix =
+      "approov-service-flutter-httpclient";
+
   // foreground channel for communicating with the platform specific layers (used by the root isolate) - this is
   // used in all cases where the operation is not expected to block for an extended period and also from the root
   // isolate where a callback may be received
@@ -676,9 +692,14 @@ class ApproovService {
           // where it is not); a failure here must not fail the
           // already-committed initialization.
           try {
+            final userProperty = "$_userPropertyPrefix/$serviceLayerVersion";
             await _invokeFgMethod('setUserProperty', <String, dynamic>{
-              "property": "approov-service-flutter-httpclient",
+              "property": userProperty,
             });
+            // Debug level, so it appears only with
+            // setLoggingLevel(ApproovLogLevel.TRACE): enough to confirm on a device
+            // which version reported itself, without adding noise to normal runs.
+            Log.d("$TAG: $isolate reported user property $userProperty");
           } catch (err) {
             Log.e("$TAG: $isolate setUserProperty failed (ignored): $err");
           }
