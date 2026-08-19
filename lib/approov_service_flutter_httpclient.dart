@@ -2052,9 +2052,21 @@ class ApproovService {
       }
     }
 
+    // Message signing needs the artifacts the token fetch delivers, and both of them
+    // come from the token itself: install signing is verified against the public key
+    // carried in the Approov token, and account signing uses the `mskid` claim inside
+    // it. A SUCCESS with an empty token therefore has neither, so signing headers
+    // would be unverifiable by any backend (TESTING_REQUIREMENTS §2 "Missing
+    // Artifacts Fallback": sign only when the required artifacts exist). Skipping is
+    // the fail-open outcome the layer already applies elsewhere in the signing flow.
     if (_messageSigning != null &&
         fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS) {
-      await _applyMessageSigning(request, pendingBodyBytes);
+      if (fetchResult.token.isEmpty) {
+        Log.d("$TAG: message signing skipped, the token fetch succeeded without a "
+            "token so neither the install public key nor the account mskid is available");
+      } else {
+        await _applyMessageSigning(request, pendingBodyBytes);
+      }
     }
 
     await _invokeMutator((mutator) =>

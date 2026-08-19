@@ -151,9 +151,17 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
     completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler
 {
-    // ignore any requests that are not related to server trust
-    if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust])
+    // Any challenge that is not server trust is not ours to answer, but the completion
+    // handler must still be called: returning without invoking it leaves URLSession
+    // waiting for a disposition and the certificate fetch stalls until it times out.
+    // Default handling hands the challenge back to the system, which is the valid
+    // fallback disposition (TESTING_REQUIREMENTS §4 "Authentication Challenge
+    // Dispositions Must Be Valid"). Never NSURLSessionAuthChallengeUseCredential with a
+    // nil credential, which is undefined behaviour per Apple's documentation.
+    if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
         return;
+    }
 
     // check we have a server trust
     SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;

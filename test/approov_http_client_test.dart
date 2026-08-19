@@ -471,6 +471,82 @@ void main() {
         reason: 'the placeholder must survive an empty secure string, not become "Bearer "');
   });
 
+  test('a SUCCESS fetch with no token does not add signing headers', () async {
+    // Both signing artifacts come from the token: install signing is verified against the public key
+    // inside it, account signing uses its `mskid` claim. A SUCCESS with an empty token has neither, so
+    // signature headers would be unverifiable by any backend (TESTING_REQUIREMENTS §2 "Missing
+    // Artifacts Fallback").
+    final observedHeaders = <String, List<String>>{};
+    final calls = <String>[];
+
+    bgChannelHandler = (MethodCall call) async => null;
+    channelHandler = (MethodCall call) async {
+      calls.add(call.method);
+      final args = call.arguments as Map?;
+      if (call.method == 'fetchApproovToken') {
+        await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .handlePlatformMessage(
+          fgChannel.name,
+          fgChannel.codec.encodeMethodCall(MethodCall('response', {
+            'TransactionID': args!['transactionID'],
+            'TokenFetchStatus': 'SUCCESS',
+            'Token': '', // succeeded, but delivered nothing
+            'ARC': '',
+            'RejectionReasons': '',
+            'IsConfigChanged': false,
+            'IsForceApplyPins': false,
+            'MeasurementConfig': Uint8List(0),
+            'LoggableToken': 'loggable-token',
+            'TraceID': '',
+            'ConfigEpoch': 0,
+          })),
+          null,
+        );
+      }
+      return null;
+    };
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-empty-token-signing');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseAccountMessageSigning(),
+    );
+    addTearDown(ApproovService.disableMessageSigning);
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+    final response = await client
+        .get(Uri.parse('http://${server.address.host}:${server.port}/'));
+
+    expect(response.statusCode, 200);
+    expect(observedHeaders.containsKey('signature'), isFalse,
+        reason: 'no signature may be added when the token carries no artifacts');
+    expect(observedHeaders.containsKey('signature-input'), isFalse);
+    expect(calls, isNot(contains('getAccountMessageSignature')),
+        reason: 'the signing SDK must not even be asked');
+  });
+
   test('message signing SDK failures proceed unsigned', () async {
     final calls = <MethodCall>[];
     final observedHeaders = <String, List<String>>{};
