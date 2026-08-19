@@ -38,7 +38,7 @@ all behave the same way — check the column before relying on one:
 
 | Behaviour in bypass mode | Methods |
 |---|---|
-| Throws `ApproovException("Approov is not enabled")` | `precheck`, `getDeviceID`, `fetchToken`, `getMessageSignature`, `getAccountMessageSignature`, `fetchSecureString`, `fetchCustomJWT`, `setDevKey` |
+| Throws `ApproovException("Approov is not enabled")` | `precheck`, `getDeviceID`, `fetchToken`, `getMessageSignature`, `getAccountMessageSignature`, `getInstallMessageSignature`, `fetchSecureString`, `fetchCustomJWT`, `setDevKey` |
 | Returns an empty map | `getPins` |
 | Returns an empty string | `getLastARC` |
 | Silent no-op | `setDataHashInToken` |
@@ -292,7 +292,21 @@ Legacy account signature API.
 
 ### `getAccountMessageSignature(String message)`
 
-Preferred account message signature API.
+Preferred account message signature API. Uses the account signing key, which the SDK receives with a
+token fetch (the token's `mskid` claim), so it is unavailable until a fetch has happened in the process.
+
+### `getInstallMessageSignature(String message)`
+
+Signs with the **install** key, the per-installation ECDSA P-256 key whose public half travels in the
+Approov token as the `ipk` claim. Send the token alongside the signature so the backend can verify it.
+
+Returns base64 of the **raw** 64-byte `r||s` form, converted from the DER encoding the platform SDK
+produces, which is what an RFC 9421 `ecdsa-p256-sha256` verifier expects. Throws `ApproovException` in
+bypass mode, when the platform does not support install message signing, or when no signature could be
+produced.
+
+This is the manual counterpart to the install signing that `enableMessageSigning` applies automatically;
+use it for payloads that are not HTTP requests, or where the interceptor path cannot be used.
 
 ## HTTP client wrappers
 

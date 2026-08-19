@@ -1444,6 +1444,45 @@ class ApproovService {
     }
   }
 
+  /// Gets the signature for the given message using the **install** message signing
+  /// key, the per-installation ECDSA P-256 key whose public half is carried in the
+  /// Approov token as the `ipk` claim. A backend verifies the signature with that
+  /// public key, so the token must be sent alongside the signature.
+  ///
+  /// This is the manual counterpart to install message signing applied
+  /// automatically by [enableMessageSigning]; use it when the automatic
+  /// interceptor path cannot be used, for example when signing a payload that is
+  /// not an HTTP request.
+  ///
+  /// The returned signature is base64 of the **raw** 64-byte r||s form, converted
+  /// from the DER encoding the platform SDK produces, which is what RFC 9421
+  /// `ecdsa-p256-sha256` verifiers expect.
+  ///
+  /// @param message is the message whose signature is to be computed
+  /// @return base64 encoded raw ECDSA signature of the message
+  /// @throws ApproovException if the service layer is in bypass mode, the platform
+  ///     does not support install message signing, or no signature could be produced
+  static Future<String> getInstallMessageSignature(String message) async {
+    Log.d("$TAG: getInstallMessageSignature");
+    await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance holding an install key, so reject rather than forwarding a
+      // doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
+    try {
+      return await _getInstallMessageSignature(message);
+    } on ApproovException {
+      rethrow;
+    } catch (err) {
+      // The internal helper signals every failure as StateError, including
+      // "not supported on this platform"; surface it in this API's own currency
+      // so callers catch one exception type across the whole service layer.
+      throw ApproovException('getInstallMessageSignature: $err');
+    }
+  }
+
   /// Fetches a secure string with the given key. If newDef is not null then a
   /// secure string for the particular app instance may be defined. In this case the
   /// new value is returned as the secure string. Use of an empty string for newDef removes
