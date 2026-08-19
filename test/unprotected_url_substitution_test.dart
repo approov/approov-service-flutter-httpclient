@@ -168,4 +168,57 @@ void main() {
 
     expect(preparation.uri.queryParameters['api_key'], 'secret-id');
   });
+  test('an empty secure string leaves the query placeholder in place', () async {
+    // TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback": an empty value is not a value. Rewriting
+    // the parameter to `api_key=` would destroy the placeholder the backend needs to see, and the
+    // header equivalent would send an empty or prefix-only header.
+    fgHandler = (MethodCall call) async {
+      final args = call.arguments as Map;
+      if (call.method == 'fetchApproovToken') {
+        await deliver('${args['transactionID']}', {
+          'TokenFetchStatus': 'SUCCESS',
+          'Token': 'approov-token',
+        });
+      } else if (call.method == 'fetchSecureString') {
+        await deliver('${args['transactionID']}', {
+          'TokenFetchStatus': 'SUCCESS',
+          'Token': '',
+          'SecureString': '',
+        });
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('real-config');
+    ApproovService.addSubstitutionQueryParam('api_key');
+
+    final preparation = await ApproovService.prepareRequestForApproovForTesting(
+        'GET', Uri.parse('https://protected.example.com/?api_key=secret-id'));
+
+    expect(preparation.uri.queryParameters['api_key'], 'secret-id',
+        reason: 'an empty secure string must not overwrite the placeholder');
+    expect(preparation.requestMutations.substitutionQueryParamKeys, isEmpty,
+        reason: 'no substitution was applied, so none may be recorded');
+  });
+
+  test('substituteQueryParam leaves the placeholder for an empty secure string', () async {
+    // Same rule through the public API, which apps call directly when they build URLs themselves.
+    fgHandler = (MethodCall call) async {
+      final args = call.arguments as Map;
+      if (call.method == 'fetchSecureString') {
+        await deliver('${args['transactionID']}', {
+          'TokenFetchStatus': 'SUCCESS',
+          'Token': '',
+          'SecureString': '',
+        });
+      }
+      return null;
+    };
+
+    await ApproovService.initialize('real-config');
+    final original = Uri.parse('https://protected.example.com/?api_key=secret-id');
+    final result = await ApproovService.substituteQueryParam(original, 'api_key');
+    expect(result, original);
+  });
+
 }

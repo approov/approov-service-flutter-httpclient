@@ -219,7 +219,14 @@ Removes automatic query substitution for a key.
 
 ### `substituteQueryParam(Uri uri, String queryParameter)`
 
-Performs explicit one-off query substitution and returns the resulting URI.
+Performs explicit one-off query substitution and returns the resulting URI. Returns the URI unchanged
+when the secure string is unavailable or empty — the placeholder is never replaced by an empty value
+(`TESTING_REQUIREMENTS.md` §2 "Missing Artifacts Fallback"), and in bypass mode this is a pass-through
+no-op.
+
+Unlike the automatic paths, this is not gated by the pre-open URL classification, so it is the escape
+hatch for substituting a parameter on a URL the SDK does not protect. Only use it when you have decided
+that sending the secret to that host is acceptable.
 
 ### `fetchSecureString(String key, String? newDef)`
 

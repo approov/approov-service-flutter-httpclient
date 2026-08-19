@@ -25,7 +25,7 @@ By default, `ApproovServiceMutator.DEFAULT` preserves existing Flutter service b
 | `REJECTED` | Throw `ApproovRejectionException` |
 | `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: **continue**, forwarding the request unmodified so an Approov outage does not take the app offline. No token is available, so the token header is **omitted** unless `setUseApproovStatusIfNoToken(true)` is active, in which case it carries `NO_APPROOV_SERVICE`. An empty-valued or prefix-only header is never sent. Secure-string substitution is skipped and the original placeholder is left in place, rather than failing the request. |
 | `UNKNOWN_URL` | Interceptor flow continues without token |
-| `UNPROTECTED_URL` | Interceptor flow skips all mutation: no token, no trace header, no message signing, and **no secure-string substitution**. Automatic query substitution is suppressed too, by classifying the URL before the request is opened |
+| `UNPROTECTED_URL` | Interceptor flow skips all mutation: no token, no trace header, no message signing, and **no secure-string substitution**. Automatic query substitution is suppressed too, by classifying the URL before the request is opened — that classification runs ahead of the mutator, so overriding `handleInterceptorFetchTokenResult` re-enables header substitution but not query substitution. Call `substituteQueryParam()` directly if you need one regardless |
 
 ## Install a custom mutator
 

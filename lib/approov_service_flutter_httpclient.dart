@@ -1772,14 +1772,22 @@ class ApproovService {
       final shouldSubstitute = await _invokeMutator((mutator) =>
           mutator.handleInterceptorQueryParamSubstitutionResult(
               fetchResult, queryParameter));
+      final secureString = fetchResult.secureString;
       if (shouldSubstitute &&
           fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS &&
-          fetchResult.secureString != null) {
+          secureString != null &&
+          secureString.isNotEmpty) {
         // perform a query substitution
         Map<String, String> updatedParams =
             Map<String, String>.from(uri.queryParameters);
-        updatedParams[queryParameter] = fetchResult.secureString!;
+        updatedParams[queryParameter] = secureString;
         return uri.replace(queryParameters: updatedParams);
+      } else if (shouldSubstitute && secureString != null) {
+        // An empty secure string would rewrite the parameter to `key=`, losing the
+        // placeholder the backend needs to see. TESTING_REQUIREMENTS §2 "Missing
+        // Artifacts Fallback": leave it untouched.
+        Log.d("$TAG: query substitution for $queryParameter skipped, the secure "
+            "string is empty - the placeholder is left in place");
       }
     }
     return uri;
@@ -2022,16 +2030,24 @@ class ApproovService {
         final shouldSubstitute = await _invokeMutator((mutator) =>
             mutator.handleInterceptorHeaderSubstitutionResult(
                 secureStringFetchResult, header));
+        final secureString = secureStringFetchResult.secureString;
         if (shouldSubstitute &&
             secureStringFetchResult.tokenFetchStatus ==
                 ApproovTokenFetchStatus.SUCCESS &&
-            secureStringFetchResult.secureString != null) {
+            secureString != null &&
+            secureString.isNotEmpty) {
           // substitute the header value
-          final substitutedValue =
-              prefix + secureStringFetchResult.secureString!;
+          final substitutedValue = prefix + secureString;
           request.headers
               .set(header, substitutedValue, preserveHeaderCase: true);
           requestMutations.addSubstitutionHeaderKey(header);
+        } else if (shouldSubstitute && secureString != null) {
+          // An empty secure string is not a value: overwriting here would leave an
+          // empty or prefix-only header, which TESTING_REQUIREMENTS §2 "Missing
+          // Artifacts Fallback" forbids. The placeholder stays in place, matching
+          // approov-service-retrofit.
+          Log.d("$TAG: header substitution for $header skipped, the secure "
+              "string is empty - the placeholder is left in place");
         }
       }
     }

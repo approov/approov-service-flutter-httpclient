@@ -396,6 +396,81 @@ void main() {
     expect(headers['Approov-Token'], 'MITM_DETECTED');
   });
 
+  test('an empty secure string leaves the header placeholder in place', () async {
+    // TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback": an empty secure string is not a value.
+    // Substituting it would leave an empty (or prefix-only) header where the app put a placeholder, so
+    // the backend loses both the secret and the evidence of what was meant to be there.
+    final observedHeaders = <String, List<String>>{};
+
+    bgChannelHandler = (MethodCall call) async => null;
+    channelHandler = (MethodCall call) async {
+      final args = call.arguments as Map?;
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+        case 'fetchSecureString':
+          await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args!['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': call.method == 'fetchApproovToken' ? 'approov-token' : '',
+              // The fetch succeeds but yields nothing - a defined-then-deleted secure string.
+              'SecureString': call.method == 'fetchSecureString' ? '' : null,
+              'ARC': '',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': '',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-empty-secure-string');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.addSubstitutionHeader('X-Api-Key', 'Bearer ');
+    addTearDown(() => ApproovService.removeSubstitutionHeader('X-Api-Key'));
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+    final response = await client.get(
+      Uri.parse('http://${server.address.host}:${server.port}/'),
+      headers: {'X-Api-Key': 'Bearer placeholder-key'},
+    );
+
+    expect(response.statusCode, 200);
+    expect(observedHeaders['x-api-key'], ['Bearer placeholder-key'],
+        reason: 'the placeholder must survive an empty secure string, not become "Bearer "');
+  });
+
   test('message signing SDK failures proceed unsigned', () async {
     final calls = <MethodCall>[];
     final observedHeaders = <String, List<String>>{};
