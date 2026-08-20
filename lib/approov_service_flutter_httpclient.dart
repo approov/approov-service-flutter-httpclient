@@ -166,9 +166,15 @@ class ApproovService {
   static const String _nativeProtectedConfig = "<native-protected>";
 
   /// Reads a boolean state flag from the native layer, returning null when neither channel could
-  /// answer. The foreground channel is where these queries are served, but it is unreachable from a
-  /// background isolate, so the background channel - served by the same native handler - is tried
-  /// as a fallback rather than reporting a state this isolate never actually established.
+  /// answer. The foreground channel is tried first because that is where these queries are
+  /// registered; the background channel - served by the same native handler - is tried as a
+  /// fallback so a transient failure on one channel does not get reported as an established state.
+  ///
+  /// This is belt-and-braces, not a fix for a known defect: every other native call in this file
+  /// (token fetch, secure-string substitution, `getDeviceID`, message signatures) goes over the
+  /// foreground channel unconditionally and works from background isolates, so "the foreground
+  /// channel is unreachable from a background isolate" - the reason an earlier version of this
+  /// comment gave - cannot be true. If it were, request processing itself would be broken there.
   static Future<bool?> _queryNativeFlag(String method) async {
     for (final probe in <Future<bool?> Function()>[
       () => _invokeFgMethod<bool>(method),
@@ -621,9 +627,9 @@ class ApproovService {
           if (config.isEmpty) {
             // Ask the native layer whether the process is already protected. The
             // foreground channel is tried first because that is where the state
-            // queries are served; a background isolate cannot reach it, so the
-            // background channel - served by the same native handler - is used as
-            // a fallback rather than silently assuming bypass.
+            // queries are registered, with the background channel - served by the
+            // same native handler - as a fallback, so a transient failure on one
+            // channel does not silently become an assumption of bypass.
             //
             // If neither channel can answer, bypass is assumed, because
             // TESTING_REQUIREMENTS.md section 1 requires an empty config with no

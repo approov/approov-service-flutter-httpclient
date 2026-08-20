@@ -2,6 +2,31 @@
 
 This document describes how to use the Approov Flutter HttpClient wrapper and how to customize request behavior with `ApproovServiceMutator`.
 
+## Handling an initialization failure
+
+`await ApproovService.initialize(config)` completes only after the native initialization attempt
+finishes, and throws `ApproovException` if the SDK rejects the configuration. What to do next is a
+policy decision rather than a technical one, so the package does not choose for you.
+
+The strictest option is to let the exception propagate: the app does not start, and the failure is
+impossible to miss. The permissive option is to fall back to bypass mode, where the layer is
+initialized but applies no Approov token injection, no dynamic pinning and no secret substitution:
+
+```dart
+try {
+  await ApproovService.initialize('<enter-your-config-string-here>');
+} catch (e) {
+  // Continues UNPROTECTED. Ordinary TLS certificate validation still applies, but no Approov
+  // protection is active, so the backend is the only enforcement point for these requests.
+  await ApproovService.initialize('');
+}
+```
+
+Use `isApproovEnabled()` afterwards to report which state the app ended up in, and prefer your own
+logger over `print` so the outcome reaches whatever telemetry you already collect. Note that this
+pattern trades protection for availability on every launch that fails to initialize; if that is not
+the trade you want, do not catch.
+
 ## Approov Service Mutator
 
 `ApproovServiceMutator` lets you customize behavior at key points in the request lifecycle without forking this package.

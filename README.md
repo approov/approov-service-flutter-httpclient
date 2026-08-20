@@ -33,7 +33,7 @@ This package depends on the closed-source Approov SDK for [iOS](https://github.c
 **Android:** no manual manifest changes are needed — the `ACCESS_NETWORK_STATE` and `INTERNET` permissions are bundled in the plugin's own manifest and merged into your app automatically.
 
 **iOS:** both [Swift Package Manager](https://www.swift.org/documentation/package-manager/) and CocoaPods are supported for the native iOS side, so no project changes are required either way:
-- On Flutter 3.24+ with SPM enabled (`flutter config --enable-swift-package-manager`, the default from Flutter 3.44), the plugin resolves via SPM.
+- On Flutter 3.24+ with SPM enabled (`flutter config --enable-swift-package-manager`, [the default from Flutter 3.44](https://flutter.dev/blog/saying-goodbye-to-cocoapods-swift-package-manager-is-soon-the-default-in-flutter)), the plugin resolves via SPM.
 - On older Flutter versions, or with SPM disabled, the plugin falls back to its bundled `.podspec` via CocoaPods.
 
 ## INITIALIZING APPROOV SERVICE
@@ -42,34 +42,16 @@ Initialize `ApproovService` once, early in your app's lifecycle (e.g. in `main()
 
 ```dart
 import 'package:approov_service_flutter_httpclient/approov_service_flutter_httpclient.dart';
-import 'package:uuid/uuid.dart'; // add the `uuid` pub package, or swap in any
-                                  // session/user identifier you already have
 
 Future<void> initializeApproov() async {
-  // An app-generated id used to correlate this install/session across your own app
-  // logs and your backend. Use a UUID, or any session/user identifier you already
-  // have — it is NOT an Approov secret.
-  final correlationId = const Uuid().v4();
-
-  try {
-    await ApproovService.initialize('<enter-your-config-string-here>');
-    final approovEnabled = await ApproovService.isApproovEnabled();
-    if (approovEnabled) {
-      final deviceID = await ApproovService.getDeviceID();
-      // Initialization succeeded — log identifiers for correlation / observability.
-      print('Approov initialized; deviceID=$deviceID session=$correlationId');
-    } else {
-      print('Approov initialized without protection; session=$correlationId');
-    }
-  } catch (e) {
-    // Initialization failed — log it and continue UNPROTECTED so the app still works.
-    // Re-initializing with an empty config string enters bypass mode (initialized,
-    // but no Approov token injection, pinning, or secret substitution).
-    print('Approov init failed (session=$correlationId): $e; continuing unprotected');
-    await ApproovService.initialize('');
-  }
+  await ApproovService.initialize('<enter-your-config-string-here>');
 }
 ```
+
+`initialize()` throws `ApproovException` if the native SDK rejects the configuration. Decide
+deliberately what an initialization failure should mean for your app: see
+[USAGE.md](USAGE.md#handling-an-initialization-failure) for the options, including the bypass-mode
+fallback that keeps the app usable at the cost of running unprotected.
 
 The `<enter-your-config-string-here>` is a custom string that configures your Approov account access. This will have been provided in your Approov onboarding email.
 
