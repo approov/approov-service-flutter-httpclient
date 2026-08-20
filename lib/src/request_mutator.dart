@@ -526,7 +526,7 @@ class ApproovServiceMutator {
   ///
   /// Default behavior:
   /// - returns true only for `SUCCESS`
-  /// - returns false for `UNKNOWN_KEY` and `NO_APPROOV_SERVICE`
+  /// - returns false for `UNKNOWN_KEY`
   /// - throws [ApproovNetworkException] on network failures
   /// - throws [ApproovRejectionException] for `REJECTED`
   /// - throws [ApproovException] for all other statuses
@@ -558,19 +558,16 @@ class ApproovServiceMutator {
       case ApproovTokenFetchStatus.UNKNOWN_KEY:
         return false;
       case ApproovTokenFetchStatus.NO_APPROOV_SERVICE:
-        // The Approov service is unavailable, so no secure string can be
-        // resolved. handleInterceptorFetchTokenResult already allowed the
-        // request to continue for this status, so throwing here would turn an
-        // Approov outage into a hard request failure for every app that has
-        // configured a substitution header. Skip the substitution instead and
-        // leave the original placeholder in place, so the request is forwarded
-        // with only the available artifacts (TESTING_REQUIREMENTS §2 "Missing
-        // Artifacts Fallback").
-        //
-        // NOTE: approov-service-okhttp still throws for this status, so this
-        // layer deliberately diverges from it until that layer receives the
-        // matching fix.
-        return false;
+        // Fail closed. The §3 carve-out that lets this status proceed applies to
+        // the Approov TOKEN fetch, where "no token, backend decides" is a
+        // coherent degraded state. There is no equivalent for a secret: with no
+        // secure string resolved, the only alternative to failing is
+        // transmitting the placeholder as the credential, which is a *wrong*
+        // secret rather than an absent one, and it travels with nothing for the
+        // app to retry on. Matches approov-service-okhttp,
+        // approov-service-urlsession and approov-service-nsurlsession.
+        throw ApproovException(
+            "Header substitution for $header: ${status.name}");
       default:
         throw ApproovException(
             "Header substitution for $header: ${status.name}");
@@ -581,7 +578,7 @@ class ApproovServiceMutator {
   ///
   /// Default behavior:
   /// - returns true only for `SUCCESS`
-  /// - returns false for `UNKNOWN_KEY` and `NO_APPROOV_SERVICE`
+  /// - returns false for `UNKNOWN_KEY`
   /// - throws [ApproovNetworkException] on network failures
   /// - throws [ApproovRejectionException] for `REJECTED`
   /// - throws [ApproovException] for all other statuses
@@ -611,9 +608,10 @@ class ApproovServiceMutator {
       case ApproovTokenFetchStatus.UNKNOWN_KEY:
         return false;
       case ApproovTokenFetchStatus.NO_APPROOV_SERVICE:
-        // Skip the substitution and leave the original placeholder in place -
-        // see the header substitution handler above.
-        return false;
+        // Fail closed, for the reason given in the header substitution handler
+        // above: the placeholder would travel as the credential.
+        throw ApproovException(
+            "Query parameter substitution for $queryKey: ${status.name}");
       default:
         throw ApproovException(
             "Query parameter substitution for $queryKey: ${status.name}");

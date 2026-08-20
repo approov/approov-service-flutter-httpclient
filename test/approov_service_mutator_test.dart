@@ -157,30 +157,32 @@ void main() {
           _result(ApproovTokenFetchStatus.UNKNOWN_KEY), 'api_key'),
       isFalse,
     );
-    // NO_APPROOV_SERVICE skips the substitution and leaves the placeholder in
-    // place rather than throwing. handleInterceptorFetchTokenResult already let
-    // the request continue for this status, so throwing here would turn an
-    // Approov outage into a hard request failure for every app with a
-    // substitution header configured (TESTING_REQUIREMENTS §2 "Missing
-    // Artifacts Fallback"). This deliberately diverges from
-    // approov-service-okhttp, which still throws.
+    // NO_APPROOV_SERVICE fails closed on both substitution paths. The §3
+    // carve-out that lets this status proceed covers the TOKEN fetch, where "no
+    // token, backend decides" is a coherent degraded state; there is no
+    // equivalent for a secret, because the only alternative to failing is
+    // sending the placeholder as the credential - a wrong secret rather than an
+    // absent one, with nothing for the app to retry on. Matches
+    // approov-service-okhttp, approov-service-urlsession and
+    // approov-service-nsurlsession.
     expect(
-      mutator.handleInterceptorHeaderSubstitutionResult(
+      () => mutator.handleInterceptorHeaderSubstitutionResult(
           _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE), 'Authorization'),
-      isFalse,
+      throwsA(isA<ApproovException>()),
     );
     expect(
-      mutator.handleInterceptorQueryParamSubstitutionResult(
+      () => mutator.handleInterceptorQueryParamSubstitutionResult(
           _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE), 'api_key'),
-      isFalse,
+      throwsA(isA<ApproovException>()),
     );
-    // the fallback flag does not change the substitution decision either
+    // the fallback flag does not turn substitution back into a proceed either:
+    // it is a token-header visibility control, never a substitution decision
     expect(
-      mutator.handleInterceptorHeaderSubstitutionResult(
+      () => mutator.handleInterceptorHeaderSubstitutionResult(
           _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
               useApproovStatusIfNoToken: true),
           'Authorization'),
-      isFalse,
+      throwsA(isA<ApproovException>()),
     );
   });
 

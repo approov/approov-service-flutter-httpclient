@@ -118,7 +118,8 @@ Current default behaviour on `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED`:
 | header substitution | throws `ApproovNetworkException` — sending the placeholder where a secret belongs is a silent downgrade |
 | query parameter substitution | throws `ApproovNetworkException` |
 
-The default mutator is fail-closed for every status except `SUCCESS` and `NO_APPROOV_SERVICE`.
+The default mutator is fail-closed for every status except `SUCCESS`, plus `NO_APPROOV_SERVICE` on
+the **token fetch only** — see `NO_APPROOV_SERVICE` handling below.
 `setUseApproovStatusIfNoToken` is a backend-visibility feature only: it never decides whether a request
 is allowed to continue, so enabling it can never let a request go out after the SDK reported
 `MITM_DETECTED`. A custom mutator that overrides `handleInterceptorFetchTokenResult` and returns `true`
@@ -129,15 +130,23 @@ for one of these statuses still gets the status injected into the token header w
 
 ### `NO_APPROOV_SERVICE` handling
 
-When the Approov service is unavailable the request **proceeds unmodified** rather than failing, so an
-Approov outage does not take the app offline. No token is available, so:
+When the Approov service is unavailable the **token fetch** proceeds without a token, so an Approov
+outage does not take the app offline: no token is a coherent degraded state and the backend decides
+what to do with it. **Secure-string substitution fails closed**, because there is no equivalent
+degraded state for a secret — the only alternative to failing is transmitting the placeholder as the
+credential, which is a *wrong* secret rather than an absent one, and it would travel with nothing for
+the app to retry on.
 
 | Path | Behaviour |
 |---|---|
 | token header | omitted entirely by default; carries `NO_APPROOV_SERVICE` as the value when `setUseApproovStatusIfNoToken(true)` is active |
 | trace ID header | omitted — there is no trace ID for this status |
-| header substitution | skipped; the original placeholder value is left in place |
-| query parameter substitution | skipped; the original placeholder value is left in place |
+| header substitution | throws `ApproovException` |
+| query parameter substitution | throws `ApproovException` |
+
+This matches `approov-service-okhttp`, `approov-service-urlsession` and
+`approov-service-nsurlsession`. A custom mutator overriding the substitution handlers can choose to
+proceed instead.
 
 An empty-valued or prefix-only token header (`Approov-Token:` / `Approov-Token: Bearer `) is never sent.
 Backend evidence that Approov processing ran is available through `setUseApproovStatusIfNoToken(true)`,
