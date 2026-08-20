@@ -923,11 +923,11 @@ void main() {
             'request reaches the network');
   });
 
-  test('multi-value header adds are preserved in the signed message', () async {
-    // Regression test for staged header application: a factory that calls
-    // onAddHeader twice for the same name previously collapsed to the last
-    // value, so the signature covered a message the server could never
-    // reconstruct. Both values must survive into the signing context.
+  test('multi-value header adds are preserved in the signing context', () async {
+    // Covers the CONTEXT snapshot only: the values the signature base is built
+    // from. It does NOT cover the staged-header regression - that lived in the
+    // client's staging map, so this test passes with the fix reverted. The wire
+    // assertion is 'multi-value header adds reach the wire' above.
     final uri = Uri.parse('https://example.com/multi');
     final context = _buildSigningContext(uri);
 
@@ -937,6 +937,104 @@ void main() {
     expect(context.getComponentValue(SfItem.string('x-multi')), 'first, second',
         reason: 'both added values must appear in the signature base, in the '
             'order the factory added them');
+  });
+
+  // Drives a real request through ApproovClient to a loopback server and returns the
+  // header values the server actually received. The staged-header defects are only
+  // observable here: asserting on ApproovSigningContext proves nothing, because the
+  // context keeps its own snapshot and is not what gets written to the wire.
+  Future<List<String>?> _wireHeaderValues(
+      SignatureParametersFactory factory, String header) async {
+    List<String>? seen;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'getAccountMessageSignature':
+          return 'YWNjb3VudC1zaWduYXR1cmU=';
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      seen = request.headers[header];
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-staged-headers');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(defaultFactory: factory);
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+    await client.get(Uri.parse('http://127.0.0.1:${server.port}/staged'));
+    return seen;
+  }
+
+  test('multi-value header adds reach the wire, not just the signing context',
+      () async {
+    // The signature covers "first, second"; if staging collapses to the last value
+    // the server receives only "second" and can never reconstruct the signed base.
+    // Asserting on the context passes even with the fix reverted, so assert the wire.
+    final values = await _wireHeaderValues(
+        _StagingFactory(const [
+          ['add', 'X-Multi', 'first'],
+          ['add', 'X-Multi', 'second'],
+        ]),
+        'x-multi');
+
+    expect(values, isNotNull, reason: 'the request must reach the server');
+    expect(values!.join(', '), 'first, second',
+        reason: 'both added values must reach the wire, in the order added');
+  });
+
+  test('mixed-case staging matches the signed base', () async {
+    // ApproovSigningContext lowercases its keys, so after add/add/set the base
+    // covers exactly "third". Case-sensitive staging used to replay two separate
+    // entries and leak the superseded value onto the wire as "third, second".
+    final values = await _wireHeaderValues(
+        _StagingFactory(const [
+          ['add', 'X-Foo', 'first'],
+          ['add', 'x-foo', 'second'],
+          ['set', 'X-Foo', 'third'],
+        ]),
+        'x-foo');
+
+    expect(values, isNotNull, reason: 'the request must reach the server');
+    expect(values!.join(', '), 'third',
+        reason: 'a set must supersede every earlier casing of the same header, '
+            'matching what the signature actually covers');
   });
 
   test('token binding hash is set (and awaited) before the token fetch',
@@ -1022,6 +1120,29 @@ void main() {
 /// Produces parameters with no algorithm identifier at all. Distinct from
 /// [_UnsupportedAlgFactory]: that one names an algorithm the layer does not
 /// implement, this one names none, and both must fail closed.
+/// Replays a scripted sequence of set/add header mutations onto the signing context,
+/// which is how a customer's own factory stages headers, then signs with the account
+/// algorithm so the request completes.
+class _StagingFactory extends SignatureParametersFactory {
+  _StagingFactory(this._script);
+
+  final List<List<String>> _script;
+
+  @override
+  SignatureParameters build(ApproovSigningContext context) {
+    for (final step in _script) {
+      if (step[0] == 'set') {
+        context.setHeader(step[1], step[2]);
+      } else {
+        context.addHeader(step[1], step[2]);
+      }
+    }
+    return SignatureParameters()
+      ..addComponentIdentifier('@method')
+      ..setAlg('hmac-sha256');
+  }
+}
+
 class _MissingAlgFactory extends SignatureParametersFactory {
   @override
   SignatureParameters build(ApproovSigningContext context) {

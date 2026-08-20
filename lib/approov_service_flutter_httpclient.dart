@@ -2152,7 +2152,14 @@ class ApproovService {
       // every value, add appends), so the wire headers always match the signed
       // base - collapsing an added multi-value header would produce a signature
       // the server can never verify.
+      //
+      // Staging is keyed by the LOWERCASED name, because ApproovSigningContext
+      // lowercases its own keys: a factory mixing `X-Foo` and `x-foo` would
+      // otherwise stage two entries whose replay order no longer reproduces the
+      // single entry the signature covered. `stagedNames` keeps the first casing
+      // seen so the wire header still looks the way the caller wrote it.
       final stagedHeaders = <String, List<String>>{};
+      final stagedNames = <String, String>{};
       final stagedReplacements = <String>{};
       final context = ApproovSigningContext(
         requestMethod: request.method,
@@ -2162,11 +2169,16 @@ class ApproovService {
         tokenHeaderName:
             _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
         onSetHeader: (name, value) {
-          stagedReplacements.add(name);
-          stagedHeaders[name] = <String>[value];
+          final key = name.toLowerCase();
+          stagedNames.putIfAbsent(key, () => name);
+          stagedReplacements.add(key);
+          stagedHeaders[key] = <String>[value];
         },
-        onAddHeader: (name, value) =>
-            stagedHeaders.putIfAbsent(name, () => <String>[]).add(value),
+        onAddHeader: (name, value) {
+          final key = name.toLowerCase();
+          stagedNames.putIfAbsent(key, () => name);
+          stagedHeaders.putIfAbsent(key, () => <String>[]).add(value);
+        },
       );
 
       final params = messageSigning.buildParametersFor(request.uri, context);
@@ -2196,23 +2208,26 @@ class ApproovService {
       }
 
       final signatureLabel = _signatureLabelForAlg(alg);
-      stagedReplacements.add('Signature');
-      stagedHeaders['Signature'] = <String>['$signatureLabel=:${signature}:'];
-      stagedReplacements.add('Signature-Input');
-      stagedHeaders['Signature-Input'] = <String>[
-        '$signatureLabel=${params.serializeComponentValue()}'
-      ];
+      void stageReplacement(String name, String value) {
+        final key = name.toLowerCase();
+        stagedNames[key] = name;
+        stagedReplacements.add(key);
+        stagedHeaders[key] = <String>[value];
+      }
+
+      stageReplacement('Signature', '$signatureLabel=:${signature}:');
+      stageReplacement('Signature-Input',
+          '$signatureLabel=${params.serializeComponentValue()}');
 
       if (params.debugMode) {
         final digest = sha256.convert(utf8.encode(signatureBase)).bytes;
-        stagedReplacements.add('Signature-Base-Digest');
-        stagedHeaders['Signature-Base-Digest'] = <String>[
-          'sha-256=:${base64Encode(digest)}:'
-        ];
+        stageReplacement(
+            'Signature-Base-Digest', 'sha-256=:${base64Encode(digest)}:');
       }
 
-      stagedHeaders.forEach((name, values) {
-        if (stagedReplacements.contains(name)) {
+      stagedHeaders.forEach((key, values) {
+        final name = stagedNames[key] ?? key;
+        if (stagedReplacements.contains(key)) {
           request.headers.removeAll(name);
         }
         for (final value in values) {
