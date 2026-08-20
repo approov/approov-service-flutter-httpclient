@@ -411,6 +411,32 @@ class ApproovService {
     }
   }
 
+  /// Logs a substitution that was skipped, leaving the placeholder in the outgoing
+  /// request.
+  ///
+  /// The placeholder then travels where a credential belongs, and no exception is
+  /// raised, so this log is the only evidence the decision was taken
+  /// (`TESTING_REQUIREMENTS.md` §3). Level depends on who decided: `UNKNOWN_KEY` is
+  /// the default mutator reporting a key this account does not define, which is a
+  /// configuration state and logged at warning. Any other status can only reach here
+  /// because a custom mutator overrode a policy that would otherwise have failed the
+  /// request, so it is logged at error.
+  ///
+  /// @param operation describes the substitution for the log line
+  /// @param fetchResult is the secure string fetch result that was skipped
+  static void _logSubstitutionSkipped(
+      String operation, ApproovTokenFetchResult fetchResult) {
+    final status = fetchResult.tokenFetchStatus;
+    final message = "$TAG: $operation skipped on ${status.name} - the "
+        "placeholder is left in the request and no error is raised";
+    if (status == ApproovTokenFetchStatus.UNKNOWN_KEY) {
+      Log.w(message);
+    } else {
+      Log.e("$message (a custom mutator allowed a status the default policy "
+          "fails on)");
+    }
+  }
+
   /// Computes status fallback header value for token injection, if applicable.
   ///
   /// This is only used when:
@@ -1851,9 +1877,13 @@ class ApproovService {
       } else if (shouldSubstitute && secureString != null) {
         // An empty secure string would rewrite the parameter to `key=`, losing the
         // placeholder the backend needs to see. TESTING_REQUIREMENTS §2 "Missing
-        // Artifacts Fallback": leave it untouched.
-        Log.d("$TAG: query substitution for $queryParameter skipped, the secure "
+        // Artifacts Fallback": leave it untouched. Warning rather than debug, for
+        // the reason given at the header substitution site.
+        Log.w("$TAG: query substitution for $queryParameter skipped, the secure "
             "string is empty - the placeholder is left in place");
+      } else {
+        _logSubstitutionSkipped(
+            'query substitution for $queryParameter', fetchResult);
       }
     }
     return uri;
@@ -2111,9 +2141,14 @@ class ApproovService {
           // An empty secure string is not a value: overwriting here would leave an
           // empty or prefix-only header, which TESTING_REQUIREMENTS §2 "Missing
           // Artifacts Fallback" forbids. The placeholder stays in place, matching
-          // approov-service-retrofit.
-          Log.d("$TAG: header substitution for $header skipped, the secure "
+          // approov-service-retrofit. Logged at warning, not debug: the default
+          // logging level is WARNING, so a debug line is invisible in the field and
+          // the placeholder would travel with no signal at all.
+          Log.w("$TAG: header substitution for $header skipped, the secure "
               "string is empty - the placeholder is left in place");
+        } else {
+          _logSubstitutionSkipped(
+              'header substitution for $header', secureStringFetchResult);
         }
       }
     }

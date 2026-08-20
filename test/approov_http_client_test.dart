@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -8,6 +9,10 @@ import 'package:approov_service_flutter_httpclient/src/structured_fields.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+// Logger's static listener API is how the level of a service-layer log line can be
+// asserted: for a skip that leaves a placeholder in the request, the log is the only
+// evidence the decision was taken.
+import 'package:logger/logger.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -1037,6 +1042,68 @@ void main() {
             'matching what the signature actually covers');
   });
 
+  test('a mutator-allowed substitution skip is logged at error level', () async {
+    // The placeholder travels where a credential belongs and no exception is
+    // raised, so this log is the only evidence the decision was taken
+    // (TESTING_REQUIREMENTS.md section 3). Asserting the level matters: the default
+    // logging level is WARNING, so a debug or info line would be invisible.
+    final captured = <LogEvent>[];
+    void listener(LogEvent event) => captured.add(event);
+    Logger.addLogListener(listener);
+    addTearDown(() => Logger.removeLogListener(listener));
+
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'fetchSecureString':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              // REJECTED would fail the request under the default policy; the
+              // custom mutator below overrides that and lets it through.
+              'TokenFetchStatus': 'REJECTED',
+              'Token': '',
+              'SecureString': null,
+              'ARC': 'ARC',
+              'RejectionReasons': 'test',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': '',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    await ApproovService.initialize('test-config', 'reinit-skip-logging');
+    ApproovService.setServiceMutator(_AllowSkipMutator());
+    addTearDown(() => ApproovService.setServiceMutator(null));
+
+    final rewritten = await ApproovService.substituteQueryParam(
+        Uri.parse('https://example.com/resource?api_key=placeholder-value'),
+        'api_key');
+
+    expect(rewritten.queryParameters['api_key'], 'placeholder-value',
+        reason: 'the mutator declined, so the placeholder must survive');
+    final errors = captured
+        .where((event) => event.level == Level.error)
+        .map((event) => event.message.toString())
+        .where((message) => message.contains('query substitution for api_key'))
+        .toList();
+    expect(errors, isNotEmpty,
+        reason: 'a skip that leaves the placeholder on a failing status must be '
+            'logged at error level, since nothing else records it');
+  });
+
   test('token binding hash is set (and awaited) before the token fetch',
       () async {
     final sequence = <String>[];
@@ -1141,6 +1208,20 @@ class _StagingFactory extends SignatureParametersFactory {
       ..addComponentIdentifier('@method')
       ..setAlg('hmac-sha256');
   }
+}
+
+/// Declines every substitution without throwing, which is how a customer overrides a
+/// status the default policy fails on.
+class _AllowSkipMutator extends ApproovServiceMutator {
+  @override
+  FutureOr<bool> handleInterceptorHeaderSubstitutionResult(
+          ApproovTokenFetchResult approovResults, String header) =>
+      false;
+
+  @override
+  FutureOr<bool> handleInterceptorQueryParamSubstitutionResult(
+          ApproovTokenFetchResult approovResults, String queryKey) =>
+      false;
 }
 
 class _MissingAlgFactory extends SignatureParametersFactory {
