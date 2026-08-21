@@ -39,10 +39,12 @@ export 'src/message_signing.dart'
     show
         ApproovMessageSigning,
         ApproovSigningContext,
+        RequiredBodyDigestException,
         SignatureBaseBuilder,
         SignatureDigest,
         SignatureParameters,
-        SignatureParametersFactory;
+        SignatureParametersFactory,
+        UnsupportedSignatureAlgorithmException;
 export 'src/request_mutator.dart'
     show
         ApproovException,
@@ -89,7 +91,7 @@ final Logger Log = Logger(
     lineLength: 120,
     colors: false,
     printEmojis: false,
-    printTime: true,
+    dateTimeFormat: DateTimeFormat.onlyTimeAndSinceStart,
   ),
 );
 
@@ -98,6 +100,22 @@ final Logger Log = Logger(
 class ApproovService {
   // logging tag
   static const String TAG = "ApproovService";
+
+  /// Version of this service layer, reported to the Approov SDK as a user
+  /// property at initialization so the attestation record shows which layer and
+  /// which release produced it. `approov-service-okhttp` reports the same way.
+  ///
+  /// Keep this in lock-step with `pubspec.yaml` `version`, the podspec
+  /// `s.version` and the top CHANGELOG entry: a release bumps all four.
+  /// `test/approov_bypass_mode_test.dart` fails if this drifts from
+  /// `pubspec.yaml`.
+  static const String serviceLayerVersion = "3.5.8";
+
+  /// Identifier reported through `Approov.setUserProperty`. The prefix is what
+  /// the attester matches against the account's permitted service-layer
+  /// prefixes; the version suffix rides along in the attestation request body.
+  static const String _userPropertyPrefix =
+      "approov-service-flutter-httpclient";
 
   // foreground channel for communicating with the platform specific layers (used by the root isolate) - this is
   // used in all cases where the operation is not expected to block for an extended period and also from the root
@@ -140,6 +158,42 @@ class ApproovService {
 
   // initial configuration string provided
   static String? _initialConfig = null;
+
+  // Sentinel recorded as _initialConfig when this isolate initialized with an
+  // empty config but the process-wide native layer was already protected: the
+  // isolate then behaves as protected (every guard here only tests emptiness)
+  // without knowing the real config string, which is held natively.
+  static const String _nativeProtectedConfig = "<native-protected>";
+
+  /// Reads a boolean state flag from the native layer, returning null when neither channel could
+  /// answer. The foreground channel is tried first because that is where these queries are
+  /// registered; the background channel - served by the same native handler - is tried as a
+  /// fallback so a transient failure on one channel does not get reported as an established state.
+  ///
+  /// This is belt-and-braces, not a fix for a known defect: every other native call in this file
+  /// (token fetch, secure-string substitution, `getDeviceID`, message signatures) goes over the
+  /// foreground channel unconditionally and works from background isolates, so "the foreground
+  /// channel is unreachable from a background isolate" - the reason an earlier version of this
+  /// comment gave - cannot be true. If it were, request processing itself would be broken there.
+  static Future<bool?> _queryNativeFlag(String method) async {
+    for (final probe in <Future<bool?> Function()>[
+      () => _invokeFgMethod<bool>(method),
+      () => _invokeBgMethod<bool>(method),
+    ]) {
+      try {
+        final bool? reported = await probe();
+        if (reported != null) return reported;
+      } catch (_) {
+        // try the next channel
+      }
+    }
+    return null;
+  }
+
+  /// True when this isolate holds an active, non-empty configuration, i.e. Approov protection is
+  /// live here. Bypass mode (empty config) and the never-initialized state both read false. Named
+  /// rather than repeated inline so every guard tests protection the same way.
+  static bool get _isApproovActive => _initialConfig?.isNotEmpty ?? false;
 
   // configuration epoch used to determine if the configuration has changed to allow caches at
   // higher levels to be invalidated. This is actually obtained from the platform layer since
@@ -339,6 +393,10 @@ class ApproovService {
 
   /// Indicates if status fallback is allowed for token-header injection.
   ///
+  /// The network-related statuses are only reachable here through a custom
+  /// mutator that deliberately returns true for them; the default mutator
+  /// fails closed on all three (TESTING_REQUIREMENTS §3).
+  ///
   /// @param status is the token fetch status to evaluate
   /// @return true if this status is allowed to be injected as fallback
   static bool _isAllowedStatusFallback(ApproovTokenFetchStatus status) {
@@ -346,9 +404,36 @@ class ApproovService {
       case ApproovTokenFetchStatus.NO_NETWORK:
       case ApproovTokenFetchStatus.POOR_NETWORK:
       case ApproovTokenFetchStatus.MITM_DETECTED:
+      case ApproovTokenFetchStatus.NO_APPROOV_SERVICE:
         return true;
       default:
         return false;
+    }
+  }
+
+  /// Logs a substitution that was skipped, leaving the placeholder in the outgoing
+  /// request.
+  ///
+  /// The placeholder then travels where a credential belongs, and no exception is
+  /// raised, so this log is the only evidence the decision was taken
+  /// (`TESTING_REQUIREMENTS.md` §3). Level depends on who decided: `UNKNOWN_KEY` is
+  /// the default mutator reporting a key this account does not define, which is a
+  /// configuration state and logged at warning. Any other status can only reach here
+  /// because a custom mutator overrode a policy that would otherwise have failed the
+  /// request, so it is logged at error.
+  ///
+  /// @param operation describes the substitution for the log line
+  /// @param fetchResult is the secure string fetch result that was skipped
+  static void _logSubstitutionSkipped(
+      String operation, ApproovTokenFetchResult fetchResult) {
+    final status = fetchResult.tokenFetchStatus;
+    final message = "$TAG: $operation skipped on ${status.name} - the "
+        "placeholder is left in the request and no error is raised";
+    if (status == ApproovTokenFetchStatus.UNKNOWN_KEY) {
+      Log.w(message);
+    } else {
+      Log.e("$message (a custom mutator allowed a status the default policy "
+          "fails on)");
     }
   }
 
@@ -409,18 +494,99 @@ class ApproovService {
     }
   }
 
-  /// Initialize the Approov SDK. This must be called prior to any other methods on the ApproovService. This does not
-  /// actually initialize the SDK at this point, but sets up the intialization which can then be awaited on by other
-  /// methods which need it to be initialized.
+  /// Initialize the Approov SDK. This must be called prior to any other methods on the ApproovService.
+  /// The returned future completes once initialization has finished: a non-empty [config] is forwarded
+  /// to the native Approov SDK and awaited, so a failure (for instance a different configuration string
+  /// already in force in this process) surfaces here as an [ApproovException] and leaves the service
+  /// layer state unchanged. Other methods that require initialization await the same result.
   ///
-  /// @param config is the configuration string
+  /// An empty [config] enters bypass mode: the service layer reports itself initialized and forwards
+  /// requests untouched, with no token injection, trace headers, message signing, secure string
+  /// substitution or Approov dynamic pinning. Ordinary TLS certificate validation still applies. An
+  /// empty [config] supplied after a valid one is ignored, so protection cannot be dropped that way.
+  ///
+  /// The [comment] participates in the native SDK's already-initialized matching, so a repeat call with
+  /// the same [config] is only accepted when [comment] is identical to the one used at first
+  /// initialization (commonly null), or starts with `reinit`. Any other comment - including swapping
+  /// null for the empty string - is rejected by the SDK as an initialization with a different
+  /// configuration.
+  ///
+  /// @param config is the configuration string, or empty for bypass mode
   /// @param comment is an optional comment used during initialization or null if not required
+  /// @throws ApproovException if the initialization is rejected by the native SDK
   static Future<void> initialize(String config, [String? comment]) async {
     if (_futureInitialization != null) {
-      // ensure we wait in case initialize has been called previously
-      await _futureInitialization;
+      // ensure we wait in case initialize has been called previously - a failure
+      // in that previous attempt must not block this one: it is either a retry
+      // of the same config or a bypass-mode recovery (e.g. the documented
+      // try/catch(e) { initialize('') } pattern), so swallow it and proceed
+      // regardless of how the previous attempt ended.
+      try {
+        await _futureInitialization;
+      } catch (_) {
+        // ignored - see above
+      }
     }
-    _futureInitialization = _initializeAsync(config, comment);
+    // Whether Approov protection is ALREADY ACTIVE decides if this attempt is
+    // allowed to become the future that _requireInitialized() awaits.
+    //
+    // Note this is deliberately narrower than _isInitialized alone. Bypass mode
+    // is "initialized but not protected", so _isInitialized is true there: using
+    // it on its own would leave an initialize(realConfig) upgrade out of bypass
+    // unpublished, _requireInitialized() would resolve instantly against the
+    // stale bypass future, and every request issued during the upgrade would go
+    // out with no token and no Approov pinning because _isApproovActive is still
+    // false. The "Empty Then Valid Configuration" upgrade the spec supports
+    // (TESTING_REQUIREMENTS §1) must gate traffic until it resolves.
+    final bool alreadyProtected = _isInitialized && _isApproovActive;
+    final attemptedInitialization = _initializeAsync(config, comment);
+    if (!alreadyProtected) {
+      // No traffic is being protected yet - either nothing has ever initialized
+      // successfully, or the layer is in bypass mode - so there is no protected
+      // state worth shielding and requests must not race ahead of this attempt.
+      // Publishing it means concurrent callers of _requireInitialized() wait for
+      // it and, if it fails, rethrow this original initialization error rather
+      // than the generic "has not been initialized" message of the never-called
+      // case, preserving the root cause for diagnosis while remaining
+      // fail-closed.
+      _futureInitialization = attemptedInitialization;
+    }
+    // When protection IS already active, the attempt is deliberately NOT
+    // published while it is in flight. _futureInitialization keeps pointing at
+    // the already-resolved successful future, so requests issued during a
+    // re-initialization continue to be served under the config that is actually
+    // still in force. Publishing the in-flight attempt would fail every
+    // concurrent request with that attempt's error even though the layer remains
+    // fully functional under the original config (TESTING_REQUIREMENTS §1
+    // "Different Config Failure State": if the layer was protecting traffic with
+    // the original config it continues to do so).
+    try {
+      await attemptedInitialization;
+    } catch (_) {
+      // This attempt failed. If a successful initialization is still in effect,
+      // restore a freshly resolved future so the still-valid state remains
+      // usable. _isInitialized is read here, at catch time, because a
+      // concurrently overlapping initialize may have committed a success after
+      // this attempt started; a flag captured at entry would be stale. A
+      // captured earlier future is deliberately never restored: with
+      // overlapping calls that future may itself be a failed attempt, and
+      // installing it would make every _requireInitialized() rethrow a stale
+      // error while the native layer is healthy. The identical() guard leaves
+      // _futureInitialization alone when a newer attempt already replaced it,
+      // and also makes this a no-op when the attempt was never published.
+      if (_isInitialized &&
+          identical(_futureInitialization, attemptedInitialization)) {
+        _futureInitialization = Future<void>.value();
+      }
+      rethrow;
+    }
+    if (alreadyProtected) {
+      // The attempt succeeded but was never published (nothing else assigns
+      // _futureInitialization, so on this branch it is never the attempt).
+      // Install a freshly resolved future so _requireInitialized() can never
+      // observe a stale failed future left behind by an earlier attempt.
+      _futureInitialization = Future<void>.value();
+    }
   }
 
   /// Internal method to ensure that the Approov SDK has been initialized before any other methods are called.
@@ -446,15 +612,22 @@ class ApproovService {
       bool isRootIsolate = (RootIsolateToken.instance != null);
       String isolate = isRootIsolate ? "root" : "background";
       if (_isInitialized &&
-          ((comment == null) || !comment.startsWith("reinit"))) {
-        // this is a reinitialization attempt and we need to check if the config is the same
-        if (_initialConfig != config) {
-          throw ApproovException(
-              "Attempt to reinitialize the Approov SDK with a different configuration $config");
-        }
+          config.isEmpty &&
+          _isApproovActive) {
+        // Empty configuration after a valid/protected initialization is
+        // ignored outright, regardless of any "reinit" comment - it must never
+        // silently drop an already-active configuration back into bypass mode
+        // (see TESTING_REQUIREMENTS.md §1, "Empty Configuration after Valid
+        // Configuration").
         Log.d(
-            "$TAG: $isolate initialization ignoring attempt with the same config");
+            "$TAG: $isolate initialization ignoring empty configuration; already initialized");
       } else {
+        // Reached when: never initialized, OR previously in bypass mode and now
+        // given any config (the "Empty Then Valid Configuration" upgrade path -
+        // this must fall through to a real initialization below), OR any
+        // non-empty reinitialization. All non-empty initialization attempts must
+        // be forwarded to the native SDK; the native result is the source of
+        // truth for same-config success and different-config failure.
         // perform the actual initialization
         try {
           // initialize the Approov SDK
@@ -465,11 +638,49 @@ class ApproovService {
           };
           await _invokeBgMethod('initialize', arguments);
 
-          // set the user property to represent the framework being used
-          arguments = <String, dynamic>{
-            "property": "approov-service-flutter-httpclient",
-          };
-          await _invokeFgMethod('setUserProperty', arguments);
+          // Determine the effective protection mode. An empty config normally
+          // means bypass mode, but the native layer applies its own
+          // empty-after-valid guard: a fresh isolate (or hot restart) sending
+          // an empty config while the process-wide native layer is already
+          // protected gets a successful no-op, NOT a downgrade. Committing ''
+          // locally in that case would make only this isolate run unprotected
+          // while isApproovEnabled() (native-backed) still reports true, so
+          // query native and record protected mode instead
+          // (TESTING_REQUIREMENTS.md §1, "Empty Configuration after Valid
+          // Configuration": the empty call must not affect existing
+          // functionality).
+          String effectiveConfig = config;
+          if (config.isEmpty) {
+            // Ask the native layer whether the process is already protected. The
+            // foreground channel is tried first because that is where the state
+            // queries are registered, with the background channel - served by the
+            // same native handler - as a fallback, so a transient failure on one
+            // channel does not silently become an assumption of bypass.
+            //
+            // If neither channel can answer, bypass is assumed, because
+            // TESTING_REQUIREMENTS.md section 1 requires an empty config with no
+            // prior initialization to enter bypass mode. Note that this is the
+            // permissive outcome: no token injection and no Approov pinning. It is
+            // therefore logged at error level rather than passed over quietly, so an
+            // isolate running unprotected because a probe failed is visible in the
+            // logs instead of looking like a deliberate bypass.
+            final bool? reported = await _queryNativeFlag('isApproovEnabled');
+            final bool nativeEnabled = reported ?? false;
+            if (reported == null) {
+              Log.e(
+                  "$TAG: $isolate could not determine native protection state; "
+                  "assuming bypass mode - requests from this isolate will carry no "
+                  "Approov token and will not be pinned");
+            }
+            if (nativeEnabled) {
+              effectiveConfig = _nativeProtectedConfig;
+              Log.d(
+                  "$TAG: $isolate empty configuration ignored; native layer already protected");
+            } else {
+              Log.d(
+                  "$TAG: $isolate initialized without the Approov SDK (bypass mode)");
+            }
+          }
 
           // setup ready for callbacks from the platform layer if we are running
           // in the root isolate (this is not possible in background isolates)
@@ -483,31 +694,92 @@ class ApproovService {
             });
           }
 
-          // initialization was successful
+          // initialization was successful - reset the runtime configuration and
+          // commit the Dart state now, before any best-effort follow-up, so a
+          // failure in telemetry cannot desynchronize Dart (bypass) from the
+          // already-committed native state (protected). This matches
+          // approov-service-okhttp, which commits service-layer state before
+          // setting the user property.
+          //
+          // The reset sits immediately before the commit and nothing that can
+          // throw is allowed between the two: a failure landing in that window
+          // would wipe the runtime configuration (token headers, substitution
+          // maps, exclusion regexes, mutator) while _initialConfig still named
+          // the previous config, leaving a half-applied state behind a failed
+          // attempt. TESTING_REQUIREMENTS §1 "Service-Layer State Only Updated
+          // On Success" forbids exactly that.
+          _resetServiceStateAfterSuccessfulInitialization();
           _isInitialized = true;
-          _initialConfig = config;
+          _initialConfig = effectiveConfig;
           _isRootIsolate = isRootIsolate;
           Log.d("$TAG: $isolate initialization complete");
         } catch (err, stack) {
           Log.e("$TAG: $isolate initialization exception $err: $stack");
           throw ApproovException('$err');
         }
+
+        if (config.isNotEmpty) {
+          // best-effort: record the framework in use for metrics. The native
+          // SDK is initialized at this point (this is skipped in bypass mode,
+          // where it is not); a failure here must not fail the
+          // already-committed initialization.
+          try {
+            final userProperty = "$_userPropertyPrefix/$serviceLayerVersion";
+            await _invokeFgMethod('setUserProperty', <String, dynamic>{
+              "property": userProperty,
+            });
+            // Debug level, so it appears only with
+            // setLoggingLevel(ApproovLogLevel.TRACE): enough to confirm on a device
+            // which version reported itself, without adding noise to normal runs.
+            Log.d("$TAG: $isolate reported user property $userProperty");
+          } catch (err) {
+            Log.e("$TAG: $isolate setUserProperty failed (ignored): $err");
+          }
+        }
       }
     });
   }
 
-  /// Sets a flag indicating if the network interceptor should proceed anyway if it is
-  /// not possible to obtain an Approov token due to a networking failure. If this is set
-  /// then your backend API can receive calls without the expected Approov token header
-  /// being added, or without header/query parameter substitutions being made. Note that
-  /// this should be used with caution because it may allow a connection to be established
-  /// before any dynamic pins have been received via Approov, thus potentially opening the
-  /// channel to a MitM.
+  static void _resetServiceStateAfterSuccessfulInitialization() {
+    _approovTokenHeader = APPROOV_HEADER;
+    _approovTraceIDHeader = APPROOV_TRACE_ID_HEADER;
+    _approovTokenPrefix = APPROOV_TOKEN_PREFIX;
+    _proceedOnNetworkFail = false;
+    _useApproovStatusIfNoToken = false;
+    _bindingHeader = null;
+    _substitutionHeaders = {};
+    _substitutionQueryParams = {};
+    _exclusionURLRegexs = {};
+    _serviceMutator = ApproovServiceMutator.DEFAULT;
+    _messageSigning = null;
+    _installMessageSigningAvailable = true;
+    _hostCertificates = Map<String, List<Uint8List>?>();
+    _configEpoch++;
+  }
+
+  /// **Obsolete no-op.** Retained so existing code keeps compiling; the value is
+  /// ignored and network-failure behaviour is decided entirely by the service
+  /// mutator.
   ///
-  /// @param proceed is true if Approov networking fails should allow continuation
+  /// The flag was the wrong mechanism. It was a single global switch over every
+  /// status the SDK can report on a network failure, so it could not distinguish
+  /// "no network" from `MITM_DETECTED` - and proceeding on the latter means
+  /// continuing after the SDK has detected interception, and possibly before any
+  /// dynamic pins have been received. A mutator can express the intended policy
+  /// per status instead, which is now the supported route: override
+  /// [ApproovServiceMutator.handleInterceptorFetchTokenResult] (and the
+  /// substitution handlers) and install it with
+  /// [ApproovService.setServiceMutator].
+  ///
+  /// `approov-service-okhttp` obsoleted the same setter for the same reason; this
+  /// aligns the two layers.
+  ///
+  /// @param proceed ignored
+  @Deprecated('Obsolete no-op: install a custom ApproovServiceMutator instead. '
+      'Network-failure policy is decided per status by the mutator.')
   static void setProceedOnNetworkFail(bool proceed) {
-    Log.d("$TAG: setProceedOnNetworkFail $proceed");
-    _proceedOnNetworkFail = proceed;
+    Log.d("$TAG: setProceedOnNetworkFail $proceed ignored, this setter is an "
+        "obsolete no-op - install a custom ApproovServiceMutator instead");
   }
 
   /// Enables or disables status fallback in the configured token header when no token
@@ -515,7 +787,15 @@ class ApproovService {
   ///
   /// When enabled, and a mutator allows interceptor token processing to continue, the
   /// configured token header receives status enum values for allowlisted statuses:
-  /// `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`.
+  /// `NO_APPROOV_SERVICE`, `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`.
+  ///
+  /// The default mutator only continues for `NO_APPROOV_SERVICE`; the three
+  /// network-related statuses fail closed unless a custom mutator overrides
+  /// [ApproovServiceMutator.handleInterceptorFetchTokenResult]. This flag never
+  /// decides whether a request proceeds - it only controls backend visibility.
+  ///
+  /// When disabled, no token header is set at all if no token is available: an
+  /// empty-valued or prefix-only header is never sent.
   ///
   /// @param shouldUse is true to enable status fallback, false to disable
   static void setUseApproovStatusIfNoToken(bool shouldUse) {
@@ -547,6 +827,12 @@ class ApproovService {
         requestMutations.setTraceIDHeaderKey(traceIDHeader);
       }
     } else if (statusFallbackValue != null) {
+      // No token is available. The header is emitted only when
+      // setUseApproovStatusIfNoToken(true) is active, carrying the fetch status
+      // name so the backend has evidence that Approov processing ran
+      // (TESTING_REQUIREMENTS §2 "Token Fallback Status"). With the fallback
+      // disabled the header is omitted entirely rather than sent empty or
+      // prefix-only, as §2 "Missing Artifacts Fallback" requires.
       setHeader(_approovTokenHeader, _approovTokenPrefix + statusFallbackValue);
       requestMutations.setTokenHeaderKey(_approovTokenHeader);
     }
@@ -595,6 +881,12 @@ class ApproovService {
   static Future<void> setDevKey(String devKey) async {
     Log.d("$TAG: setDevKey");
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to accept a development key, so reject rather than
+      // forwarding a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "devKey": devKey,
     };
@@ -610,11 +902,11 @@ class ApproovService {
   /// "Approov-Token" with no prefix.
   ///
   /// @param header is the header to place the Approov token on
-  /// @param prefix is any prefix String for the Approov token header
-  static void setApproovHeader(String header, String prefix) {
+  /// @param prefix is any prefix String for the Approov token header, or null for no prefix
+  static void setApproovHeader(String header, String? prefix) {
     Log.d("$TAG: setApproovHeader $header $prefix");
     _approovTokenHeader = header;
-    _approovTokenPrefix = prefix;
+    _approovTokenPrefix = prefix ?? "";
   }
 
   /// Sets the header that receives any Approov TraceID value provided by the SDK. Passing null disables adding the header.
@@ -663,6 +955,24 @@ class ApproovService {
 
   @visibleForTesting
   static ApproovMessageSigning? messageSigningForTesting() => _messageSigning;
+
+  /// Snapshot of the mutable runtime configuration, so tests can assert that a
+  /// successful (re-)initialization resets every field
+  /// (TESTING_REQUIREMENTS.md §1, "Service-Layer State Only Updated On
+  /// Success") rather than the subset with individual getters.
+  @visibleForTesting
+  static Map<String, Object?> runtimeStateForTesting() => <String, Object?>{
+        'approovTokenHeader': _approovTokenHeader,
+        'approovTraceIDHeader': _approovTraceIDHeader,
+        'approovTokenPrefix': _approovTokenPrefix,
+        'proceedOnNetworkFail': _proceedOnNetworkFail,
+        'useApproovStatusIfNoToken': _useApproovStatusIfNoToken,
+        'bindingHeader': _bindingHeader,
+        'substitutionHeaders': Map<String, String>.of(_substitutionHeaders),
+        'substitutionQueryParams': _substitutionQueryParams.keys.toSet(),
+        'exclusionURLRegexs': _exclusionURLRegexs.keys.toSet(),
+        'hostCertificateHosts': _hostCertificates.keys.toSet(),
+      };
 
   /// Sets a binding header that must be present on all requests using the Approov service. A
   /// header should be chosen whose value is unchanging for most requests (such as an
@@ -799,15 +1109,16 @@ class ApproovService {
     _exclusionURLRegexs.remove(urlRegex);
   }
 
-  /// Starts a prefetch to lower the effective latency of a subsequent token or secure string fetch by
-  /// starting the operation earlier so the subsequent fetch should be able to use cached data.
-  static void prefetch() async {
-    try {
-      ApproovService._fetchApproovToken("https://approov.io/");
-      Log.d("$TAG: prefetch started");
-    } on ApproovException catch (e) {
-      Log.e("$TAG: prefetch: exception ${e.cause}");
-    }
+  /// Does nothing. Formerly allowed an Approov fetch operation to be performed as
+  /// early as possible.
+  ///
+  /// @deprecated This method is obsolete and is now a no-op. The underlying Approov
+  /// SDK manages prefetching automatically. Matches the rest of the Approov service
+  /// layer family (e.g. `approov-service-retrofit`, `approov-service-urlsession`).
+  @Deprecated(
+      'This method is obsolete and is now a no-op. The underlying Approov SDK manages prefetching automatically.')
+  static void prefetch() {
+    Log.w("$TAG: prefetch is no longer used and does nothing.");
   }
 
   /// Performs a precheck to determine if the app will pass attestation. This requires secure
@@ -824,6 +1135,12 @@ class ApproovService {
     // try and fetch a non-existent secure string in order to check for a rejection
     // setup a Completer for the transaction ID we are going to use
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to attest, so reject rather than forwarding a doomed call
+      // to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     Completer<dynamic> completer = new Completer<dynamic>();
     String transactionID = ApproovService.transactionID.toString();
     ApproovService.transactionID++;
@@ -882,12 +1199,76 @@ class ApproovService {
   /// @return String representation of the device ID
   static Future<String> getDeviceID() async {
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to provide a device ID, so reject rather than forwarding a
+      // doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     try {
       String deviceID = await _invokeFgMethod('getDeviceID');
       Log.d("$TAG: getDeviceID: $deviceID");
       return deviceID;
     } catch (err) {
       throw ApproovException('$err');
+    }
+  }
+
+  /// Returns whether the Approov service layer has been initialized. This is true
+  /// even when initialized in bypass mode with an empty configuration string - it
+  /// does not indicate that Approov protection is actually active. Use
+  /// [isApproovEnabled] for that. The answer is read from the native layer, which
+  /// holds the state process-wide - a static, so it is shared by every
+  /// FlutterEngine in the process, not just the one this isolate belongs to -
+  /// rather than a local Dart flag: Dart-level
+  /// state is per-isolate and a background isolate that never itself called
+  /// [initialize] would otherwise report false even though the SDK is already
+  /// initialized from another isolate. Returns false, rather than throwing, only
+  /// when the native layer reports uninitialized or is unreachable.
+  ///
+  /// @return true if the service layer has been initialized
+  static Future<bool> isInitialized() async {
+    // Settle any in-flight initialize started by *this* isolate so a same-isolate
+    // caller gets a consistent answer. An absent or failed local attempt is not
+    // decisive - another isolate may have initialized the process-wide native SDK
+    // - so always fall through to the authoritative native query.
+    if (_futureInitialization != null) {
+      try {
+        await _futureInitialization;
+      } catch (_) {
+        // ignore - native is the source of truth, queried below
+      }
+    }
+    try {
+      return await _queryNativeFlag('isInitialized') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Returns whether Approov-backed protection (token injection, pinning, secure
+  /// string substitution) is actually active. Returns false when the service
+  /// layer is initialized in bypass mode with an empty configuration string. Like
+  /// [isInitialized], the answer is read from process-wide native state (a static,
+  /// shared across FlutterEngines) rather than a per-isolate Dart flag, and returns
+  /// false (rather than throwing) only when the native layer reports protection
+  /// inactive or is unreachable.
+  ///
+  /// @return true if Approov protection is active
+  static Future<bool> isApproovEnabled() async {
+    // See [isInitialized] - settle this isolate's own initialize if any, then
+    // defer to native as the authoritative, cross-isolate source of truth.
+    if (_futureInitialization != null) {
+      try {
+        await _futureInitialization;
+      } catch (_) {
+        // ignore - native is the source of truth, queried below
+      }
+    }
+    try {
+      return await _queryNativeFlag('isApproovEnabled') ?? false;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -978,6 +1359,14 @@ class ApproovService {
   static Future<void> setDataHashInToken(String data) async {
     Log.d("$TAG: setDataHashInToken");
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): this only stages data for a
+      // future token fetch that will never happen in bypass mode, so
+      // silently accept and do nothing rather than forwarding a doomed call
+      // to the platform channel.
+      Log.d("$TAG: setDataHashInToken skipped in bypass mode");
+      return;
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "data": data,
     };
@@ -1008,6 +1397,19 @@ class ApproovService {
   /// @return results of fetching a token
   /// @throws ApproovException if there was a problem
   static Future<String> fetchToken(String url) async {
+    // Ensure initialization has genuinely settled before consulting
+    // _initialConfig below. This is safe even though _fetchApproovToken calls
+    // _requireInitialized() again internally: awaiting an already-completed
+    // Future a second time is harmless, and it also gives the correct,
+    // specific "not initialized" error for the genuinely-never-initialized
+    // case rather than the misleading "Approov is not enabled".
+    await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch a token from, so reject rather than forwarding a
+      // doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     // fetch the Approov token
     ApproovTokenFetchResult fetchResult = await _fetchApproovToken(url);
     String isolate = _isRootIsolate ? "root" : "background";
@@ -1031,6 +1433,12 @@ class ApproovService {
   static Future<String> getMessageSignature(String message) async {
     Log.d("$TAG: getMessageSignature");
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to provide a signing key, so reject rather than forwarding
+      // a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "message": message,
     };
@@ -1049,6 +1457,13 @@ class ApproovService {
   static Future<String> getAccountMessageSignature(String message) async {
     Log.d("$TAG: getAccountMessageSignature");
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): reject here, before either
+      // branch below is reached - this guard is independent of
+      // getMessageSignature's own guard (it must fire before the
+      // MissingPluginException fallback would otherwise delegate to it).
+      throw ApproovException("Approov is not enabled");
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "message": message,
     };
@@ -1058,6 +1473,45 @@ class ApproovService {
       return await getMessageSignature(message);
     } catch (err) {
       throw ApproovException('$err');
+    }
+  }
+
+  /// Gets the signature for the given message using the **install** message signing
+  /// key, the per-installation ECDSA P-256 key whose public half is carried in the
+  /// Approov token as the `ipk` claim. A backend verifies the signature with that
+  /// public key, so the token must be sent alongside the signature.
+  ///
+  /// This is the manual counterpart to install message signing applied
+  /// automatically by [enableMessageSigning]; use it when the automatic
+  /// interceptor path cannot be used, for example when signing a payload that is
+  /// not an HTTP request.
+  ///
+  /// The returned signature is base64 of the **raw** 64-byte r||s form, converted
+  /// from the DER encoding the platform SDK produces, which is what RFC 9421
+  /// `ecdsa-p256-sha256` verifiers expect.
+  ///
+  /// @param message is the message whose signature is to be computed
+  /// @return base64 encoded raw ECDSA signature of the message
+  /// @throws ApproovException if the service layer is in bypass mode, the platform
+  ///     does not support install message signing, or no signature could be produced
+  static Future<String> getInstallMessageSignature(String message) async {
+    Log.d("$TAG: getInstallMessageSignature");
+    await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance holding an install key, so reject rather than forwarding a
+      // doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
+    try {
+      return await _getInstallMessageSignature(message);
+    } on ApproovException {
+      rethrow;
+    } catch (err) {
+      // The internal helper signals every failure as StateError, including
+      // "not supported on this platform"; surface it in this API's own currency
+      // so callers catch one exception type across the whole service layer.
+      throw ApproovException('getInstallMessageSignature: $err');
     }
   }
 
@@ -1078,6 +1532,12 @@ class ApproovService {
   static Future<String?> fetchSecureString(String key, String? newDef) async {
     // ensure the SDK is initialized
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch secure strings from, so reject rather than
+      // forwarding a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
 
     // determine the type of operation as the values themselves cannot be logged
     String type = "lookup";
@@ -1149,6 +1609,12 @@ class ApproovService {
   static Future<String> fetchCustomJWT(String payload) async {
     // wait on any pending initialization
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch a custom JWT from, so reject rather than
+      // forwarding a doomed call to the platform channel.
+      throw ApproovException("Approov is not enabled");
+    }
 
     // start the custom JWT creation in the platform layer
     // setup a Completer for the transaction ID we are going to use
@@ -1238,6 +1704,14 @@ class ApproovService {
   /// @throws ApproovException if there was a problem
   static Future<Map> getPins(String pinType) async {
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active pinning
+      // configuration, so an empty map ("no pinning info") is the
+      // informationally correct answer rather than an error. This also
+      // keeps getLastARC's internal use of getPins on its normal success
+      // path rather than forcing it through an exception branch.
+      return {};
+    }
     final Map<String, dynamic> arguments = <String, dynamic>{
       "pinType": pinType,
     };
@@ -1317,6 +1791,19 @@ class ApproovService {
   static Future<Uri> substituteQueryParam(
       Uri uri, String queryParameter) async {
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): there is no active Approov SDK
+      // instance to fetch secure strings from. Unlike the "reject" guards
+      // elsewhere in this file, this is a pass-through no-op that returns
+      // the Uri unchanged rather than throwing - this matches what the core
+      // request pipeline (_prepareRequestForApproov) already does when it
+      // uses this same substitution logic internally: in bypass mode it
+      // never reaches this method at all and sends the original URI as-is,
+      // so a direct call here gets the same effective outcome instead of a
+      // throw where the pipeline would have silently skipped.
+      Log.d("$TAG: substituteQueryParam skipped in bypass mode");
+      return uri;
+    }
     String? queryValue = uri.queryParameters[queryParameter];
     if (queryValue != null) {
       // check if the URL matches one of the exclusion regexs and just return the provided Uri if so
@@ -1377,14 +1864,26 @@ class ApproovService {
       final shouldSubstitute = await _invokeMutator((mutator) =>
           mutator.handleInterceptorQueryParamSubstitutionResult(
               fetchResult, queryParameter));
+      final secureString = fetchResult.secureString;
       if (shouldSubstitute &&
           fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS &&
-          fetchResult.secureString != null) {
+          secureString != null &&
+          secureString.isNotEmpty) {
         // perform a query substitution
         Map<String, String> updatedParams =
             Map<String, String>.from(uri.queryParameters);
-        updatedParams[queryParameter] = fetchResult.secureString!;
+        updatedParams[queryParameter] = secureString;
         return uri.replace(queryParameters: updatedParams);
+      } else if (shouldSubstitute && secureString != null) {
+        // An empty secure string would rewrite the parameter to `key=`, losing the
+        // placeholder the backend needs to see. TESTING_REQUIREMENTS §2 "Missing
+        // Artifacts Fallback": leave it untouched. Warning rather than debug, for
+        // the reason given at the header substitution site.
+        Log.w("$TAG: query substitution for $queryParameter skipped, the secure "
+            "string is empty - the placeholder is left in place");
+      } else {
+        _logSubstitutionSkipped(
+            'query substitution for $queryParameter', fetchResult);
       }
     }
     return uri;
@@ -1402,6 +1901,20 @@ class ApproovService {
   static Future<_ApproovRequestPreparation> _prepareRequestForApproov(
       String method, Uri uri) async {
     await _requireInitialized();
+    if (!_isApproovActive) {
+      // Bypass mode (empty initial config): skip Approov entirely for this
+      // real request. The mutator is deliberately never consulted for either
+      // gate here - a custom ApproovServiceMutator must not be able to
+      // re-enable token processing or pinning while running without a real
+      // Approov config, so both flags are forced to false before any call
+      // into _invokeMutator.
+      return _ApproovRequestPreparation(
+        uri: uri,
+        shouldProcessApproov: false,
+        shouldApplyPinning: false,
+        requestMutations: ApproovRequestMutations(),
+      );
+    }
     final snapshot = _requestSnapshotFromUri(method, uri, const {});
     final shouldProcessApproov = await _invokeMutator(
         (mutator) => mutator.handleInterceptorShouldProcessRequest(snapshot));
@@ -1411,9 +1924,20 @@ class ApproovService {
     final requestMutations = ApproovRequestMutations();
     var effectiveUri = uri;
     if (shouldProcessApproov && _substitutionQueryParams.isNotEmpty) {
+      // Query substitution has to happen before the request is opened, because
+      // dart:io fixes the URI at openUrl() time - so it runs ahead of the token
+      // fetch that would otherwise classify the URL. Classify it here instead:
+      // a URL the SDK does not protect must not have a secure string resolved
+      // into it (TESTING_REQUIREMENTS §2 "Unprotected Request Processing"), or
+      // the secret travels to a host Approov neither tokenizes nor pins. The
+      // fetch result is discarded; the SDK caches the token, so the later fetch
+      // in _updateRequest is served from that cache.
+      bool? isProtected; // classified lazily, and only once per request
       for (final entry in _substitutionQueryParams.entries) {
         final queryKey = entry.key;
         if (!effectiveUri.queryParameters.containsKey(queryKey)) continue;
+        isProtected ??= await _isUrlApproovProtected(effectiveUri.toString());
+        if (!isProtected) break;
         final originalUri = effectiveUri;
         effectiveUri = await substituteQueryParam(effectiveUri, queryKey);
         if (effectiveUri.toString() != originalUri.toString()) {
@@ -1429,6 +1953,44 @@ class ApproovService {
       shouldApplyPinning: shouldApplyPinning,
       requestMutations: requestMutations,
     );
+  }
+
+  /// Reports whether the Approov SDK has positively confirmed that it protects
+  /// [url], so pre-open query substitution can be suppressed otherwise.
+  ///
+  /// Only `SUCCESS` counts as confirmation. `UNPROTECTED_URL` and `UNKNOWN_URL`
+  /// are the statuses this exists to catch, and every other outcome - a network
+  /// failure, a rejection, an internal error, a thrown exception - is
+  /// inconclusive about whether the host is protected, so it is treated as "do
+  /// not substitute". That is fail-closed by design: a secure string must never
+  /// be resolved into a request bound for a host that may not be protected.
+  ///
+  /// Only the classification is used here. The request itself still proceeds and
+  /// is judged by the mutator in [_updateRequest], which fetches the token again
+  /// and gets it from the SDK's cache.
+  static Future<bool> _isUrlApproovProtected(String url) async {
+    try {
+      final status = (await _fetchApproovToken(url)).tokenFetchStatus;
+      if (status == ApproovTokenFetchStatus.SUCCESS) return true;
+      Log.d("$TAG: query substitution skipped, the URL is not confirmed "
+          "protected: ${status.name}");
+      return false;
+    } catch (err) {
+      Log.e(
+          "$TAG: query substitution skipped, could not classify the URL: $err");
+      return false;
+    }
+  }
+
+  /// Test-only accessor for [_prepareRequestForApproov].
+  ///
+  /// Exposes the bypass-mode short-circuit (and the normal mutator-driven
+  /// path) so tests can assert on the resulting processing/pinning flags
+  /// without needing a real platform channel or a live HTTP request.
+  @visibleForTesting
+  static Future<_ApproovRequestPreparation> prepareRequestForApproovForTesting(
+      String method, Uri uri) {
+    return _prepareRequestForApproov(method, uri);
   }
 
   /// Adds Approov to the given request by adding the Approov token in a header. If a binding header has been specified
@@ -1453,7 +2015,7 @@ class ApproovService {
     String? bindingHeader = _bindingHeader;
     if (bindingHeader != null) {
       String? headerValue = request.headers.value(bindingHeader);
-      if (headerValue != null) setDataHashInToken(headerValue);
+      if (headerValue != null) await setDataHashInToken(headerValue);
     }
 
     // request an Approov token for the full request URL
@@ -1494,10 +2056,11 @@ class ApproovService {
       fetchResult,
       requestMutations,
     );
-    if (requestMutations.tokenHeaderKey != null &&
-        fetchResult.tokenFetchStatus != ApproovTokenFetchStatus.SUCCESS) {
+    if (statusFallbackValue != null &&
+        requestMutations.tokenHeaderKey != null) {
       Log.d(
-          "$TAG: $isolate updateRequest fallback token header injected for $host: $statusFallbackValue");
+          "$TAG: $isolate updateRequest no Approov token for $host, "
+          "${requestMutations.tokenHeaderKey} set to fetch status $statusFallbackValue");
     }
 
     // we now deal with any header substitutions, which may require further fetches but these
@@ -1563,28 +2126,47 @@ class ApproovService {
         final shouldSubstitute = await _invokeMutator((mutator) =>
             mutator.handleInterceptorHeaderSubstitutionResult(
                 secureStringFetchResult, header));
+        final secureString = secureStringFetchResult.secureString;
         if (shouldSubstitute &&
             secureStringFetchResult.tokenFetchStatus ==
                 ApproovTokenFetchStatus.SUCCESS &&
-            secureStringFetchResult.secureString != null) {
+            secureString != null &&
+            secureString.isNotEmpty) {
           // substitute the header value
-          final substitutedValue =
-              prefix + secureStringFetchResult.secureString!;
+          final substitutedValue = prefix + secureString;
           request.headers
               .set(header, substitutedValue, preserveHeaderCase: true);
           requestMutations.addSubstitutionHeaderKey(header);
+        } else if (shouldSubstitute && secureString != null) {
+          // An empty secure string is not a value: overwriting here would leave an
+          // empty or prefix-only header, which TESTING_REQUIREMENTS §2 "Missing
+          // Artifacts Fallback" forbids. The placeholder stays in place, matching
+          // approov-service-retrofit. Logged at warning, not debug: the default
+          // logging level is WARNING, so a debug line is invisible in the field and
+          // the placeholder would travel with no signal at all.
+          Log.w("$TAG: header substitution for $header skipped, the secure "
+              "string is empty - the placeholder is left in place");
+        } else {
+          _logSubstitutionSkipped(
+              'header substitution for $header', secureStringFetchResult);
         }
       }
     }
 
+    // Message signing needs the artifacts the token fetch delivers, and both of them
+    // come from the token itself: install signing is verified against the public key
+    // carried in the Approov token, and account signing uses the `mskid` claim inside
+    // it. A SUCCESS with an empty token therefore has neither, so signing headers
+    // would be unverifiable by any backend (TESTING_REQUIREMENTS §2 "Missing
+    // Artifacts Fallback": sign only when the required artifacts exist). Skipping is
+    // the fail-open outcome the layer already applies elsewhere in the signing flow.
     if (_messageSigning != null &&
         fetchResult.tokenFetchStatus == ApproovTokenFetchStatus.SUCCESS) {
-      try {
+      if (fetchResult.token.isEmpty) {
+        Log.d("$TAG: message signing skipped, the token fetch succeeded without a "
+            "token so neither the install public key nor the account mskid is available");
+      } else {
         await _applyMessageSigning(request, pendingBodyBytes);
-      } on ApproovException {
-        rethrow;
-      } catch (err) {
-        throw ApproovException("Message signing failed: $err");
       }
     }
 
@@ -1597,82 +2179,146 @@ class ApproovService {
     final messageSigning = _messageSigning;
     if (messageSigning == null) return;
 
-    final context = ApproovSigningContext(
-      requestMethod: request.method,
-      uri: request.uri,
-      headers: _snapshotHeaders(request.headers),
-      bodyBytes: pendingBodyBytes,
-      tokenHeaderName: _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
-      onSetHeader: (name, value) =>
-          request.headers.set(name, value, preserveHeaderCase: true),
-      onAddHeader: (name, value) =>
-          request.headers.add(name, value, preserveHeaderCase: true),
-    );
-
-    final params = messageSigning.buildParametersFor(request.uri, context);
-    if (params == null) {
-      Log.d("$TAG: no message signing parameters for ${request.uri}");
-      return;
-    }
-
-    final signatureBase =
-        SignatureBaseBuilder(params, context).createSignatureBase();
-    final alg = params.algorithmIdentifier;
-    if (alg == null) {
-      throw StateError('Signature parameters missing alg identifier');
-    }
-    String signature;
     try {
-      signature = await _signCanonicalMessage(signatureBase, alg);
-    } catch (err) {
-      if (alg == 'ecdsa-p256-sha256') {
-        Log.w("$TAG: skipping install message signing; $err");
+      // Header mutations are staged and applied to the live request only after
+      // the whole signing flow succeeds, so a fail-open exit leaves the request
+      // untouched. Staging is list-valued and replayed with the same set/add
+      // semantics the signing context applies to its own snapshot (set replaces
+      // every value, add appends), so the wire headers always match the signed
+      // base - collapsing an added multi-value header would produce a signature
+      // the server can never verify.
+      //
+      // Staging is keyed by the LOWERCASED name, because ApproovSigningContext
+      // lowercases its own keys: a factory mixing `X-Foo` and `x-foo` would
+      // otherwise stage two entries whose replay order no longer reproduces the
+      // single entry the signature covered. `stagedNames` keeps the first casing
+      // seen so the wire header still looks the way the caller wrote it.
+      final stagedHeaders = <String, List<String>>{};
+      final stagedNames = <String, String>{};
+      final stagedReplacements = <String>{};
+      final context = ApproovSigningContext(
+        requestMethod: request.method,
+        uri: request.uri,
+        headers: _snapshotHeaders(request.headers),
+        bodyBytes: pendingBodyBytes,
+        tokenHeaderName:
+            _approovTokenHeader.isEmpty ? null : _approovTokenHeader,
+        onSetHeader: (name, value) {
+          final key = name.toLowerCase();
+          stagedNames.putIfAbsent(key, () => name);
+          stagedReplacements.add(key);
+          stagedHeaders[key] = <String>[value];
+        },
+        onAddHeader: (name, value) {
+          final key = name.toLowerCase();
+          stagedNames.putIfAbsent(key, () => name);
+          stagedHeaders.putIfAbsent(key, () => <String>[]).add(value);
+        },
+      );
+
+      final params = messageSigning.buildParametersFor(request.uri, context);
+      if (params == null) {
+        Log.d("$TAG: no message signing parameters for ${request.uri}");
         return;
       }
-      rethrow;
-    }
-    if (signature.isEmpty) {
-      Log.d(
-          "$TAG: message signing returned empty signature for ${request.uri}");
-      return;
-    }
 
-    final signatureLabel = _signatureLabelForAlg(alg);
-    final signatureHeader = '$signatureLabel=:${signature}:';
-    context.setHeader('Signature', signatureHeader);
+      final alg = params.algorithmIdentifier;
+      if (alg == null) {
+        // A params object with no algorithm is the same misconfiguration class
+        // as an unsupported one - approov-service-okhttp fails closed for both
+        // via its unsupported-algorithm switch default.
+        throw UnsupportedSignatureAlgorithmException(
+            'Signature parameters missing alg identifier');
+      }
+      if (!_isSupportedSignatureAlgorithm(alg)) {
+        throw UnsupportedSignatureAlgorithmException(
+            'Unsupported signature alg: $alg');
+      }
 
-    final signatureInput =
-        '$signatureLabel=${params.serializeComponentValue()}';
-    context.setHeader('Signature-Input', signatureInput);
+      final signatureBase =
+          SignatureBaseBuilder(params, context).createSignatureBase();
+      final signature = await _signCanonicalMessage(signatureBase, alg);
+      if (signature.isEmpty) {
+        throw StateError('message signing returned empty signature');
+      }
 
-    if (params.debugMode) {
-      final digest = sha256.convert(utf8.encode(signatureBase)).bytes;
-      final baseDigestHeader = 'sha-256=:${base64Encode(digest)}:';
-      context.setHeader('Signature-Base-Digest', baseDigestHeader);
+      final signatureLabel = _signatureLabelForAlg(alg);
+      void stageReplacement(String name, String value) {
+        final key = name.toLowerCase();
+        stagedNames[key] = name;
+        stagedReplacements.add(key);
+        stagedHeaders[key] = <String>[value];
+      }
+
+      stageReplacement('Signature', '$signatureLabel=:${signature}:');
+      stageReplacement('Signature-Input',
+          '$signatureLabel=${params.serializeComponentValue()}');
+
+      if (params.debugMode) {
+        final digest = sha256.convert(utf8.encode(signatureBase)).bytes;
+        stageReplacement(
+            'Signature-Base-Digest', 'sha-256=:${base64Encode(digest)}:');
+      }
+
+      stagedHeaders.forEach((key, values) {
+        final name = stagedNames[key] ?? key;
+        if (stagedReplacements.contains(key)) {
+          request.headers.removeAll(name);
+        }
+        for (final value in values) {
+          request.headers.add(name, value, preserveHeaderCase: true);
+        }
+      });
+    } catch (err) {
+      // Typed classification (never string matching, which silently flips
+      // fail-closed to fail-open when a message is reworded): only the two
+      // deliberate fail-closed conditions from TESTING_REQUIREMENTS.md §5 -
+      // a required body digest that cannot be generated, and an unsupported
+      // or missing signing algorithm - abort the request, mirroring
+      // approov-service-okhttp. Everything else proceeds unsigned; the
+      // backend is the enforcement point.
+      if (err is RequiredBodyDigestException ||
+          err is UnsupportedSignatureAlgorithmException) {
+        throw ApproovException("Message signing failed: $err");
+      }
+      Log.e("$TAG: skipping message signing for ${request.uri}: $err");
     }
+  }
+
+  // The supported signing algorithms, mapped to the signature label used for each. Single source
+  // of truth: the support check, the signing dispatch and the label lookup all read this map, so a
+  // new algorithm cannot be added to one and forgotten in the others.
+  static const String _installSignatureAlg = 'ecdsa-p256-sha256';
+  static const String _accountSignatureAlg = 'hmac-sha256';
+  static const Map<String, String> _signatureAlgorithmLabels = {
+    _installSignatureAlg: 'install',
+    _accountSignatureAlg: 'account',
+  };
+
+  static bool _isSupportedSignatureAlgorithm(String algorithmIdentifier) {
+    return _signatureAlgorithmLabels.containsKey(algorithmIdentifier);
   }
 
   static Future<String> _signCanonicalMessage(
       String message, String algorithmIdentifier) async {
     switch (algorithmIdentifier) {
-      case 'ecdsa-p256-sha256':
+      case _installSignatureAlg:
         return await _getInstallMessageSignature(message);
-      case 'hmac-sha256':
+      case _accountSignatureAlg:
         return await getAccountMessageSignature(message);
       default:
-        throw StateError('Unsupported signature alg: $algorithmIdentifier');
+        throw UnsupportedSignatureAlgorithmException(
+            'Unsupported signature alg: $algorithmIdentifier');
     }
   }
 
   static String _signatureLabelForAlg(String algorithmIdentifier) {
-    switch (algorithmIdentifier) {
-      case 'ecdsa-p256-sha256':
-        return 'install';
-      case 'hmac-sha256':
-        return 'account';
-      default:
-        throw StateError('Unsupported signature alg: $algorithmIdentifier');
+    final label = _signatureAlgorithmLabels[algorithmIdentifier];
+    if (label == null) {
+      throw UnsupportedSignatureAlgorithmException(
+          'Unsupported signature alg: $algorithmIdentifier');
     }
+    return label;
   }
 
   static Future<String> _getInstallMessageSignature(String message) async {
@@ -1692,12 +2338,11 @@ class ApproovService {
       return base64Encode(rawSignature);
     } on MissingPluginException {
       _installMessageSigningAvailable = false;
-      Log.w("$TAG: getInstallMessageSignature not available on this platform");
+      Log.e("$TAG: getInstallMessageSignature not available on this platform");
       throw StateError('install message signing not supported');
     } catch (err) {
-      _installMessageSigningAvailable = false;
-      Log.w("$TAG: getInstallMessageSignature error: $err");
-      throw StateError('install message signing not supported');
+      Log.e("$TAG: getInstallMessageSignature error: $err");
+      throw StateError('install message signing failed: $err');
     }
   }
 
@@ -1999,6 +2644,22 @@ class ApproovService {
     Log.d(
         "$TAG: $isolate pinned security context with ${pinCerts.length} trusted certs, from ${approovPins.length} possible pins");
     return securityContext;
+  }
+
+  /// Restores static initialization and runtime configuration state, so one
+  /// test cannot leak state into the next. [_isRootIsolate] is included
+  /// deliberately: it is written by a successful [initialize] and then selects
+  /// between the callback and blocking background-channel paths, so leaving it
+  /// set would make later tests order-dependent.
+  @visibleForTesting
+  static void resetInitStateForTesting() {
+    _futureInitialization = null;
+    _isInitialized = false;
+    _initialConfig = null;
+    _isRootIsolate = false;
+    _resetServiceStateAfterSuccessfulInitialization();
+    _configEpoch = 0;
+    _platformTransactions.clear();
   }
 }
 
@@ -2636,15 +3297,36 @@ class ApproovHttpClient implements HttpClient {
   // must have been previously initialized, else there will be exceptions when
   // the client is used.
   //
+  // PREFER `await ApproovService.initialize(config)` BEFORE CONSTRUCTING. A
+  // constructor cannot await, so an initialization started here cannot report
+  // its outcome to the caller: `initialize` throws asynchronously on a bad or
+  // conflicting configuration, and no try/catch around `ApproovHttpClient(...)`
+  // can observe that. The failure is not lost - it is retained by
+  // ApproovService and rethrown from the first request made through this client
+  // (see `_requireInitialized`), which is a point the caller can await and
+  // catch - but it surfaces later and further from its cause than the
+  // documented `try { await initialize(config); } catch (_) { ... }` pattern.
+  // The `.catchError` below exists only to stop that pending failure being
+  // reported as an unhandled asynchronous error; it deliberately does not
+  // swallow it for request processing.
+  //
   // @param initialConfig optionally provide the config string for account
   //     initialization. If provided, the config must be obtained using the
-  //     Approov CLI or from the original onboarding email.
+  //     Approov CLI or from the original onboarding email. Prefer awaiting
+  //     `ApproovService.initialize` instead, so failures are catchable.
   // @param initialComment optionally provide the comment string for account
   //     initialization. If no config is provided the comment string is
   //     ignored.
   ApproovHttpClient([String? initialConfig, String? initialComment]) : super() {
     if (initialConfig != null) {
-      ApproovService.initialize(initialConfig, initialComment);
+      ApproovService.initialize(initialConfig, initialComment)
+          .catchError((Object err) {
+        // Retained by ApproovService and rethrown from the first request; logged
+        // here so a construction-time failure is still visible immediately.
+        Log.e(
+            "$TAG: initialization from the ApproovHttpClient constructor failed, "
+            "the error will be rethrown from the first request: $err");
+      });
     }
   }
 
@@ -2931,6 +3613,10 @@ class ApproovClient extends http.BaseClient {
   // @param initialComment optionally provide the comment string for account
   //     initialization. If no config is provided the comment string is
   //     ignored.
+  // PREFER `await ApproovService.initialize(config)` BEFORE CONSTRUCTING: this
+  // forwards to the ApproovHttpClient constructor, so the same limitation
+  // applies - an initialization failure cannot be caught around construction
+  // and instead surfaces from the first request through this client.
   ApproovClient([String? initialConfig, String? initialComment])
       : _delegateClient =
             httpio.IOClient(ApproovHttpClient(initialConfig, initialComment)),

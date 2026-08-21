@@ -1,10 +1,18 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:approov_service_flutter_httpclient/approov_service_flutter_httpclient.dart';
+// SfItem is internal to the package (not re-exported from the public library), so the signing
+// component identifier is built from the source library directly, as structured_fields_test does.
+import 'package:approov_service_flutter_httpclient/src/structured_fields.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+// Logger's static listener API is how the level of a service-layer log line can be
+// asserted: for a skip that leaves a placeholder in the request, the log is the only
+// evidence the decision was taken.
+import 'package:logger/logger.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -17,22 +25,28 @@ void main() {
   late Future<dynamic> Function(MethodCall call) bgChannelHandler;
 
   setUp(() {
+    ApproovService.resetInitStateForTesting();
     channelHandler = (MethodCall methodCall) async => '42';
     bgChannelHandler = (MethodCall methodCall) async => null;
-    fgChannel.setMockMethodCallHandler(
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      fgChannel,
       (MethodCall call) => channelHandler(call),
     );
-    bgChannel.setMockMethodCallHandler(
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      bgChannel,
       (MethodCall call) => bgChannelHandler(call),
     );
   });
 
   tearDown(() {
-    fgChannel.setMockMethodCallHandler(null);
-    bgChannel.setMockMethodCallHandler(null);
-    ApproovService.disableMessageSigning();
-    ApproovService.setServiceMutator(null);
-    ApproovService.setApproovTraceIDHeader('Approov-TraceID');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(fgChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(bgChannel, null);
+    // state isolation is provided by resetInitStateForTesting() in setUp,
+    // which restores every mutable runtime field
   });
 
   test('signature base matches HTTP message signatures format', () {
@@ -285,6 +299,945 @@ void main() {
     expect(mutations.tokenHeaderKey, 'Approov-Token');
     expect(mutations.traceIDHeaderKey, isNull);
   });
+
+  test('null token prefix is treated as no prefix', () {
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('X-Approov-Token', null);
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _successfulFetchResult(traceID: ''),
+      mutations,
+    );
+
+    expect(headers['X-Approov-Token'], 'trace-test-token');
+    expect(headers['X-Approov-Token']!.startsWith('null'), false);
+    expect(mutations.tokenHeaderKey, 'X-Approov-Token');
+  });
+
+  test('NO_APPROOV_SERVICE omits the token header when the fallback is off',
+      () async {
+    // TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback": empty token values must be omitted,
+    // never sent as an empty-valued header. Status evidence belongs behind
+    // setUseApproovStatusIfNoToken(true) instead.
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', null);
+    expect(ApproovService.getUseApproovStatusIfNoToken(), isFalse);
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _noApproovServiceFetchResult(),
+      mutations,
+    );
+
+    expect(headers.containsKey('Approov-Token'), isFalse);
+    expect(mutations.tokenHeaderKey, isNull);
+  });
+
+  test('NO_APPROOV_SERVICE never emits a prefix-only token header', () async {
+    // with a prefix configured and the fallback off, the header must still be absent rather than
+    // carrying a bare "Bearer " value.
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', 'Bearer ');
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _noApproovServiceFetchResult(),
+      mutations,
+    );
+
+    expect(headers.containsKey('Approov-Token'), isFalse);
+    expect(mutations.tokenHeaderKey, isNull);
+  });
+
+  test('NO_APPROOV_SERVICE carries the status when the fallback is enabled', () async {
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', 'Bearer ');
+    ApproovService.setUseApproovStatusIfNoToken(true);
+    addTearDown(() => ApproovService.setUseApproovStatusIfNoToken(false));
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _noApproovServiceFetchResult(),
+      mutations,
+    );
+
+    expect(headers['Approov-Token'], 'Bearer NO_APPROOV_SERVICE');
+    expect(mutations.tokenHeaderKey, 'Approov-Token');
+    // the trace ID is an artifact in its own right: there is none for this
+    // status, so its header stays absent whatever the fallback setting
+    expect(headers.containsKey('Approov-TraceID'), isFalse);
+    expect(mutations.traceIDHeaderKey, isNull);
+  });
+
+  test('MITM_DETECTED injects the status only when a mutator allows it',
+      () async {
+    // The default mutator throws for MITM_DETECTED, so this header value is only
+    // ever reachable through a custom mutator that deliberately returns true.
+    // The injection path itself must remain intact for that case.
+    final headers = <String, String>{};
+    final mutations = ApproovRequestMutations();
+    ApproovService.setApproovHeader('Approov-Token', null);
+
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _mitmDetectedFetchResult(),
+      mutations,
+    );
+    expect(headers.containsKey('Approov-Token'), isFalse,
+        reason: 'with the fallback off no header is emitted at all');
+
+    ApproovService.setUseApproovStatusIfNoToken(true);
+    addTearDown(() => ApproovService.setUseApproovStatusIfNoToken(false));
+    ApproovService.applyTokenFetchResultHeadersForTesting(
+      headers,
+      _mitmDetectedFetchResult(),
+      mutations,
+    );
+    expect(headers['Approov-Token'], 'MITM_DETECTED');
+  });
+
+  test('an empty secure string leaves the header placeholder in place', () async {
+    // TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback": an empty secure string is not a value.
+    // Substituting it would leave an empty (or prefix-only) header where the app put a placeholder, so
+    // the backend loses both the secret and the evidence of what was meant to be there.
+    final observedHeaders = <String, List<String>>{};
+
+    bgChannelHandler = (MethodCall call) async => null;
+    channelHandler = (MethodCall call) async {
+      final args = call.arguments as Map?;
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+        case 'fetchSecureString':
+          await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args!['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': call.method == 'fetchApproovToken' ? 'approov-token' : '',
+              // The fetch succeeds but yields nothing - a defined-then-deleted secure string.
+              'SecureString': call.method == 'fetchSecureString' ? '' : null,
+              'ARC': '',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': '',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-empty-secure-string');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.addSubstitutionHeader('X-Api-Key', 'Bearer ');
+    addTearDown(() => ApproovService.removeSubstitutionHeader('X-Api-Key'));
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+    final response = await client.get(
+      Uri.parse('http://${server.address.host}:${server.port}/'),
+      headers: {'X-Api-Key': 'Bearer placeholder-key'},
+    );
+
+    expect(response.statusCode, 200);
+    expect(observedHeaders['x-api-key'], ['Bearer placeholder-key'],
+        reason: 'the placeholder must survive an empty secure string, not become "Bearer "');
+  });
+
+  test('a SUCCESS fetch with no token does not add signing headers', () async {
+    // Both signing artifacts come from the token: install signing is verified against the public key
+    // inside it, account signing uses its `mskid` claim. A SUCCESS with an empty token has neither, so
+    // signature headers would be unverifiable by any backend (TESTING_REQUIREMENTS §2 "Missing
+    // Artifacts Fallback").
+    final observedHeaders = <String, List<String>>{};
+    final calls = <String>[];
+
+    bgChannelHandler = (MethodCall call) async => null;
+    channelHandler = (MethodCall call) async {
+      calls.add(call.method);
+      final args = call.arguments as Map?;
+      if (call.method == 'fetchApproovToken') {
+        await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .handlePlatformMessage(
+          fgChannel.name,
+          fgChannel.codec.encodeMethodCall(MethodCall('response', {
+            'TransactionID': args!['transactionID'],
+            'TokenFetchStatus': 'SUCCESS',
+            'Token': '', // succeeded, but delivered nothing
+            'ARC': '',
+            'RejectionReasons': '',
+            'IsConfigChanged': false,
+            'IsForceApplyPins': false,
+            'MeasurementConfig': Uint8List(0),
+            'LoggableToken': 'loggable-token',
+            'TraceID': '',
+            'ConfigEpoch': 0,
+          })),
+          null,
+        );
+      }
+      return null;
+    };
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-empty-token-signing');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseAccountMessageSigning(),
+    );
+    addTearDown(ApproovService.disableMessageSigning);
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+    final response = await client
+        .get(Uri.parse('http://${server.address.host}:${server.port}/'));
+
+    expect(response.statusCode, 200);
+    expect(observedHeaders.containsKey('signature'), isFalse,
+        reason: 'no signature may be added when the token carries no artifacts');
+    expect(observedHeaders.containsKey('signature-input'), isFalse);
+    expect(calls, isNot(contains('getAccountMessageSignature')),
+        reason: 'the signing SDK must not even be asked');
+  });
+
+  test('message signing SDK failures proceed unsigned', () async {
+    final calls = <MethodCall>[];
+    final observedHeaders = <String, List<String>>{};
+
+    bgChannelHandler = (MethodCall call) async {
+      calls.add(call);
+      return null;
+    };
+    channelHandler = (MethodCall call) async {
+      calls.add(call);
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        case 'getAccountMessageSignature':
+          throw PlatformException(
+              code: 'Approov.sign', message: 'account key unavailable');
+        default:
+          fail('Unexpected method ${call.method}');
+      }
+    };
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-signing-fail-open');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseAccountMessageSigning(),
+    );
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    final response =
+        await client.get(Uri.parse('http://127.0.0.1:${server.port}/signed'));
+
+    expect(response.statusCode, 200);
+    expect(response.body, 'ok');
+    expect(observedHeaders['approov-token'], ['approov-token']);
+    expect(observedHeaders.containsKey('signature'), false);
+    expect(observedHeaders.containsKey('signature-input'), false);
+    expect(calls.map((call) => call.method),
+        containsAll(['fetchApproovToken', 'getAccountMessageSignature']));
+  });
+
+  test('install message signing SDK failures proceed unsigned', () async {
+    final observedHeaders = <String, List<String>>{};
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        case 'getInstallMessageSignature':
+          throw PlatformException(
+              code: 'Approov.sign', message: 'install key unavailable');
+        default:
+          fail('Unexpected method ${call.method}');
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.headers.forEach((name, values) {
+        observedHeaders[name.toLowerCase()] = values;
+      });
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-install-fail-open');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseInstallMessageSigning(),
+    );
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    final response =
+        await client.get(Uri.parse('http://127.0.0.1:${server.port}/signed'));
+
+    expect(response.statusCode, 200);
+    expect(observedHeaders['approov-token'], ['approov-token']);
+    expect(observedHeaders.containsKey('signature'), false,
+        reason: 'install signature failure must proceed unsigned, not abort');
+  });
+
+  test('required body digest failure aborts the request (fail-closed)',
+      () async {
+    var serverSawRequest = false;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      serverSawRequest = true;
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-digest-required');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    // A GET has no body, so a REQUIRED body digest cannot be generated. This
+    // is one of the two deliberate fail-closed signing conditions
+    // (TESTING_REQUIREMENTS.md section 5): the request must abort, not go out
+    // unsigned.
+    ApproovService.enableMessageSigning(
+      defaultFactory: SignatureParametersFactory()
+          .setBaseParameters(
+              SignatureParameters()..addComponentIdentifier('@method'))
+          .setUseAccountMessageSigning()
+          .setBodyDigestConfig(SignatureDigest.sha256.identifier,
+              required: true),
+    );
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    await expectLater(
+      client.get(Uri.parse('http://127.0.0.1:${server.port}/signed')),
+      throwsA(anyOf(isA<ApproovException>(), isA<Exception>())),
+    );
+    expect(serverSawRequest, false,
+        reason: 'a fail-closed signing error must abort before the request '
+            'reaches the network');
+  });
+
+  test('unsupported signing algorithm aborts the request (fail-closed)',
+      () async {
+    var serverSawRequest = false;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      serverSawRequest = true;
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-bad-alg');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    // The second deliberate fail-closed signing condition: a misconfigured
+    // (unsupported) algorithm must abort rather than silently disable signing.
+    ApproovService.enableMessageSigning(
+        defaultFactory: _UnsupportedAlgFactory());
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    await expectLater(
+      client.get(Uri.parse('http://127.0.0.1:${server.port}/signed')),
+      throwsA(anyOf(isA<ApproovException>(), isA<Exception>())),
+    );
+    expect(serverSawRequest, false,
+        reason: 'an unsupported signing algorithm must abort before the '
+            'request reaches the network');
+  });
+
+  test('missing signing algorithm aborts the request (fail-closed)',
+      () async {
+    var serverSawRequest = false;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      serverSawRequest = true;
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-missing-alg');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    // Parameters carrying no algorithm identifier at all must fail closed too, not
+    // fall back to a default or silently proceed unsigned.
+    ApproovService.enableMessageSigning(
+        defaultFactory: _MissingAlgFactory());
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    await expectLater(
+      client.get(Uri.parse('http://127.0.0.1:${server.port}/signed')),
+      throwsA(anyOf(isA<ApproovException>(), isA<Exception>())),
+    );
+    expect(serverSawRequest, false,
+        reason: 'a missing signing algorithm must abort before the '
+            'request reaches the network');
+  });
+
+  test('multi-value header adds are preserved in the signing context', () async {
+    // Covers the CONTEXT snapshot only: the values the signature base is built
+    // from. It does NOT cover the staged-header regression - that lived in the
+    // client's staging map, so this test passes with the fix reverted. The wire
+    // assertion is 'multi-value header adds reach the wire' above.
+    final uri = Uri.parse('https://example.com/multi');
+    final context = _buildSigningContext(uri);
+
+    context.addHeader('X-Multi', 'first');
+    context.addHeader('X-Multi', 'second');
+
+    expect(context.getComponentValue(SfItem.string('x-multi')), 'first, second',
+        reason: 'both added values must appear in the signature base, in the '
+            'order the factory added them');
+  });
+
+  // Drives a real request through ApproovClient to a loopback server and returns the
+  // header values the server actually received. The staged-header defects are only
+  // observable here: asserting on ApproovSigningContext proves nothing, because the
+  // context keeps its own snapshot and is not what gets written to the wire.
+  Future<List<String>?> _wireHeaderValues(
+      SignatureParametersFactory factory, String header) async {
+    List<String>? seen;
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'getAccountMessageSignature':
+          return 'YWNjb3VudC1zaWduYXR1cmU=';
+        case 'fetchApproovToken':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      seen = request.headers[header];
+      request.response.statusCode = 200;
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-staged-headers');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.enableMessageSigning(defaultFactory: factory);
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+    await client.get(Uri.parse('http://127.0.0.1:${server.port}/staged'));
+    return seen;
+  }
+
+  test('multi-value header adds reach the wire, not just the signing context',
+      () async {
+    // The signature covers "first, second"; if staging collapses to the last value
+    // the server receives only "second" and can never reconstruct the signed base.
+    // Asserting on the context passes even with the fix reverted, so assert the wire.
+    final values = await _wireHeaderValues(
+        _StagingFactory(const [
+          ['add', 'X-Multi', 'first'],
+          ['add', 'X-Multi', 'second'],
+        ]),
+        'x-multi');
+
+    expect(values, isNotNull, reason: 'the request must reach the server');
+    expect(values!.join(', '), 'first, second',
+        reason: 'both added values must reach the wire, in the order added');
+  });
+
+  test('mixed-case staging matches the signed base', () async {
+    // ApproovSigningContext lowercases its keys, so after add/add/set the base
+    // covers exactly "third". Case-sensitive staging used to replay two separate
+    // entries and leak the superseded value onto the wire as "third, second".
+    final values = await _wireHeaderValues(
+        _StagingFactory(const [
+          ['add', 'X-Foo', 'first'],
+          ['add', 'x-foo', 'second'],
+          ['set', 'X-Foo', 'third'],
+        ]),
+        'x-foo');
+
+    expect(values, isNotNull, reason: 'the request must reach the server');
+    expect(values!.join(', '), 'third',
+        reason: 'a set must supersede every earlier casing of the same header, '
+            'matching what the signature actually covers');
+  });
+
+  test('a mutator-allowed substitution skip is logged at error level', () async {
+    // The placeholder travels where a credential belongs and no exception is
+    // raised, so this log is the only evidence the decision was taken
+    // (TESTING_REQUIREMENTS.md section 3). Asserting the level matters: the default
+    // logging level is WARNING, so a debug or info line would be invisible.
+    final captured = <LogEvent>[];
+    void listener(LogEvent event) => captured.add(event);
+    Logger.addLogListener(listener);
+    addTearDown(() => Logger.removeLogListener(listener));
+
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'fetchSecureString':
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              // REJECTED would fail the request under the default policy; the
+              // custom mutator below overrides that and lets it through.
+              'TokenFetchStatus': 'REJECTED',
+              'Token': '',
+              'SecureString': null,
+              'ARC': 'ARC',
+              'RejectionReasons': 'test',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': '',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    await ApproovService.initialize('test-config', 'reinit-skip-logging');
+    ApproovService.setServiceMutator(_AllowSkipMutator());
+    addTearDown(() => ApproovService.setServiceMutator(null));
+
+    final rewritten = await ApproovService.substituteQueryParam(
+        Uri.parse('https://example.com/resource?api_key=placeholder-value'),
+        'api_key');
+
+    expect(rewritten.queryParameters['api_key'], 'placeholder-value',
+        reason: 'the mutator declined, so the placeholder must survive');
+    final errors = captured
+        .where((event) => event.level == Level.error)
+        .map((event) => event.message.toString())
+        .where((message) => message.contains('query substitution for api_key'))
+        .toList();
+    expect(errors, isNotEmpty,
+        reason: 'a skip that leaves the placeholder on a failing status must be '
+            'logged at error level, since nothing else records it');
+  });
+
+  test('token binding hash is set (and awaited) before the token fetch',
+      () async {
+    final sequence = <String>[];
+    channelHandler = (MethodCall call) async {
+      switch (call.method) {
+        case 'setUserProperty':
+          return null;
+        case 'setDataHashInToken':
+          // delay so a fire-and-forget caller would demonstrably race ahead:
+          // only an awaited call keeps the fetch from starting first
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          sequence.add('setDataHashInToken-complete');
+          return null;
+        case 'fetchApproovToken':
+          sequence.add('fetchApproovToken-start');
+          final args = call.arguments as Map;
+          await TestDefaultBinaryMessengerBinding
+              .instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+            fgChannel.name,
+            fgChannel.codec.encodeMethodCall(MethodCall('response', {
+              'TransactionID': args['transactionID'],
+              'TokenFetchStatus': 'SUCCESS',
+              'Token': 'approov-token',
+              'ARC': 'ARC',
+              'RejectionReasons': '',
+              'IsConfigChanged': false,
+              'IsForceApplyPins': false,
+              'MeasurementConfig': Uint8List(0),
+              'LoggableToken': 'loggable-token',
+              'TraceID': 'trace-id',
+              'ConfigEpoch': 0,
+            })),
+            null,
+          );
+          return null;
+        default:
+          return null;
+      }
+    };
+    bgChannelHandler = (MethodCall call) async => null;
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serverSubscription = server.listen((request) async {
+      request.response.statusCode = 200;
+      request.response.write('ok');
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await serverSubscription.cancel();
+      await server.close(force: true);
+    });
+
+    await ApproovService.initialize('test-config', 'reinit-binding');
+    ApproovService.setServiceMutator(_SkipPinningMutator());
+    ApproovService.setBindingHeader('Authorization');
+
+    final previousHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+
+    final client = ApproovClient();
+    addTearDown(client.close);
+
+    final response = await client.get(
+      Uri.parse('http://127.0.0.1:${server.port}/bound'),
+      headers: {'Authorization': 'Bearer user-token'},
+    );
+
+    expect(response.statusCode, 200);
+    expect(
+        sequence, ['setDataHashInToken-complete', 'fetchApproovToken-start'],
+        reason: 'the binding hash must reach native (awaited) before the '
+            'token fetch starts, or the pay claim can be missing from the '
+            'issued token (TESTING_REQUIREMENTS.md section 2, Token Binding)');
+  });
+}
+
+/// Factory producing parameters with an algorithm the service does not
+/// support - used to prove the fail-closed path for misconfigured algorithms.
+/// Produces parameters with no algorithm identifier at all. Distinct from
+/// [_UnsupportedAlgFactory]: that one names an algorithm the layer does not
+/// implement, this one names none, and both must fail closed.
+/// Replays a scripted sequence of set/add header mutations onto the signing context,
+/// which is how a customer's own factory stages headers, then signs with the account
+/// algorithm so the request completes.
+class _StagingFactory extends SignatureParametersFactory {
+  _StagingFactory(this._script);
+
+  final List<List<String>> _script;
+
+  @override
+  SignatureParameters build(ApproovSigningContext context) {
+    for (final step in _script) {
+      if (step[0] == 'set') {
+        context.setHeader(step[1], step[2]);
+      } else {
+        context.addHeader(step[1], step[2]);
+      }
+    }
+    return SignatureParameters()
+      ..addComponentIdentifier('@method')
+      ..setAlg('hmac-sha256');
+  }
+}
+
+/// Declines every substitution without throwing, which is how a customer overrides a
+/// status the default policy fails on.
+class _AllowSkipMutator extends ApproovServiceMutator {
+  @override
+  FutureOr<bool> handleInterceptorHeaderSubstitutionResult(
+          ApproovTokenFetchResult approovResults, String header) =>
+      false;
+
+  @override
+  FutureOr<bool> handleInterceptorQueryParamSubstitutionResult(
+          ApproovTokenFetchResult approovResults, String queryKey) =>
+      false;
+}
+
+class _MissingAlgFactory extends SignatureParametersFactory {
+  @override
+  SignatureParameters build(ApproovSigningContext context) {
+    return SignatureParameters()..addComponentIdentifier('@method');
+  }
+}
+
+class _UnsupportedAlgFactory extends SignatureParametersFactory {
+  @override
+  SignatureParameters build(ApproovSigningContext context) {
+    return SignatureParameters()
+      ..addComponentIdentifier('@method')
+      ..setAlg('rsa-pss-sha512');
+  }
 }
 
 ApproovSigningContext _buildSigningContext(Uri uri) {
@@ -319,4 +1272,49 @@ ApproovTokenFetchResult _successfulFetchResult({required String traceID}) {
     proceedOnNetworkFail: false,
     useApproovStatusIfNoToken: false,
   );
+}
+
+ApproovTokenFetchResult _mitmDetectedFetchResult() {
+  return ApproovTokenFetchResult(
+    tokenFetchStatus: ApproovTokenFetchStatus.MITM_DETECTED,
+    token: '',
+    secureString: null,
+    arc: '',
+    rejectionReasons: '',
+    isConfigChanged: false,
+    isForceApplyPins: false,
+    measurementConfig: Uint8List(0),
+    loggableToken: '',
+    traceID: '',
+    requestURL: 'https://api.example.com',
+    // ignore: deprecated_member_use_from_same_package
+    proceedOnNetworkFail: false,
+    useApproovStatusIfNoToken: false,
+  );
+}
+
+ApproovTokenFetchResult _noApproovServiceFetchResult() {
+  return ApproovTokenFetchResult(
+    tokenFetchStatus: ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
+    token: '',
+    secureString: null,
+    arc: '',
+    rejectionReasons: '',
+    isConfigChanged: false,
+    isForceApplyPins: false,
+    measurementConfig: Uint8List(0),
+    loggableToken: '',
+    traceID: '',
+    requestURL: 'https://api.example.com',
+    // ignore: deprecated_member_use_from_same_package
+    proceedOnNetworkFail: false,
+    useApproovStatusIfNoToken: false,
+  );
+}
+
+class _SkipPinningMutator extends ApproovServiceMutator {
+  @override
+  bool handlePinningShouldProcessRequest(ApproovRequestSnapshot request) {
+    return false;
+  }
 }

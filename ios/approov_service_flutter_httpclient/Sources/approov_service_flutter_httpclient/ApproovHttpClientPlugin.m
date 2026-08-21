@@ -17,7 +17,7 @@
 * OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-#import "ApproovHttpClientPlugin.h"
+#import "./include/approov_service_flutter_httpclient/ApproovHttpClientPlugin.h"
 #import "Approov/Approov.h"
 
 // Timeout in seconds for a getting the host certificates
@@ -151,9 +151,17 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
     completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler
 {
-    // ignore any requests that are not related to server trust
-    if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust])
+    // Any challenge that is not server trust is not ours to answer, but the completion
+    // handler must still be called: returning without invoking it leaves URLSession
+    // waiting for a disposition and the certificate fetch stalls until it times out.
+    // Default handling hands the challenge back to the system, which is the valid
+    // fallback disposition (TESTING_REQUIREMENTS §4 "Authentication Challenge
+    // Dispositions Must Be Valid"). Never NSURLSessionAuthChallengeUseCredential with a
+    // nil credential, which is undefined behaviour per Apple's documentation.
+    if (![challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
         return;
+    }
 
     // check we have a server trust
     SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
@@ -369,11 +377,10 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 @property FlutterMethodChannel *bgChannel;
 
 // Provides any prior initial configuration supplied, to allow a reinitialization caused by
-// a hot restart if the configuration is the same or nil if not initialized.
-@property NSString *initializedConfig;
-
-// Provides any prior initial comment supplied, or empty string if none was provided
-@property NSString *initializedComment;
+// a hot restart if the configuration is the same or nil if not initialized. Held in a file scope
+// static (see ApproovHttpClientInitializedConfig below) rather than an instance property, because
+// the Approov SDK it mirrors is a process-wide singleton while a plugin instance is created per
+// FlutterEngine.
 
 // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
 // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
@@ -389,6 +396,40 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 @property NSMutableDictionary<NSString*, CertificatesFetcher*> *activeCertFetches;  
 
 @end
+
+// The configuration the process was initialized with, or nil if it has not been initialized.
+//
+// Process-wide, not per plugin instance: registerWithRegistrar allocates a new plugin for every
+// FlutterEngine, so an app with a second engine (background fetch, geolocation, alarm plugins)
+// would otherwise see nil here while the SDK is initialized and protecting traffic. The Dart layer
+// reads that as "native not protected" and commits real bypass mode, silently dropping token
+// injection and pinning for every request from that engine. Matches approov-service-okhttp, which
+// holds its configString in a static.
+//
+// Written from "initialize" on the background task queue and read from "isInitialized" and
+// "isApproovEnabled" on the platform thread, so all access is serialised on the class object. The
+// synchronisation is load-bearing: do not replace it with a bare static read/write.
+static NSString *sApproovHttpClientInitializedConfig = nil;
+
+static NSString *ApproovHttpClientInitializedConfig(void) {
+    @synchronized ([ApproovHttpClientPlugin class]) {
+        return sApproovHttpClientInitializedConfig;
+    }
+}
+
+static void ApproovHttpClientSetInitializedConfig(NSString *config) {
+    @synchronized ([ApproovHttpClientPlugin class]) {
+        sApproovHttpClientInitializedConfig = config;
+    }
+}
+
+// Returns true when the service layer is initialized and Approov-backed request
+// protection is active (i.e. initialized with a non-empty config).
+static BOOL ApproovHttpClientIsEnabled(void) {
+    // read once so the nil check and the emptiness check cannot disagree
+    NSString *config = ApproovHttpClientInitializedConfig();
+    return (config != nil) && (config.length != 0);
+}
 
 // ApproovHttpClientPlugin provides the bridge to the Approov SDK itself. Methods are initiated using the
 // MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
@@ -420,44 +461,51 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
     if ([@"initialize" isEqualToString:call.method]) {
         // get the initialization arguments
         NSError* error = nil;
-        NSString *initialConfig = call.arguments[@"initialConfig"];
+        // guard NSNull as the comment and updateConfig arguments below do: -[NSNull length] is an
+        // unrecognised selector, so an NSNull here would crash rather than being read as empty
+        NSString *initialConfig = nil;
+        if ((call.arguments[@"initialConfig"] != nil) && (call.arguments[@"initialConfig"] != [NSNull null]))
+            initialConfig = call.arguments[@"initialConfig"];
         NSString *commentString = nil;
-        if (call.arguments[@"comment"] != [NSNull null])
+        if ((call.arguments[@"comment"] != nil) && (call.arguments[@"comment"] != [NSNull null]))
             commentString = call.arguments[@"comment"];
-        else
-            commentString = @"";
 
-        // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
-        // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
-        // that the SDK is already initialized whereas this native layer holds its state
-        if ((_initializedConfig == nil) || ![_initializedConfig isEqualToString:initialConfig] || ![_initializedComment isEqualToString:commentString]) {
-            // this is a new config or a reinitialization
-            NSString *updateConfig = nil;
-            if (call.arguments[@"updateConfig"] != [NSNull null])
-                updateConfig = call.arguments[@"updateConfig"];
-            [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
-            if (error != nil) {
-                // check if the error message contains "Approov SDK already initialized"
-                if ([error.localizedDescription rangeOfString:@"Approov SDK already initialized" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
-                    // different isolates and the initialization was made by a different quickstart (note we don't currently check
-                    // for the compatibility of the SDK parameters but a future version of the SDK will do this to avoid needing to
-                    // catch this at all)
-                    NSLog(@"ApproovService: Ignoring initialization error in Approov SDK: %@", error.localizedDescription);
-                } else {
-                    result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
-                                            message:error.domain
-                                            details:error.localizedDescription]);
-                    return;
-                }
-            }
-            _initializedConfig = initialConfig;
-            _initializedComment = commentString;
+        // An empty config after a valid config is already active must be ignored -
+        // it must never silently drop back into bypass mode.
+        if (ApproovHttpClientIsEnabled() && initialConfig.length == 0) {
+            NSLog(@"ApproovService: already initialized with a valid config; ignoring empty configuration");
             result(nil);
-        } else {
-            // the previous initialization is compatible
-            result(nil);
+            return;
         }
+
+        NSString *updateConfig = nil;
+        if ((call.arguments[@"updateConfig"] != nil) && (call.arguments[@"updateConfig"] != [NSNull null]))
+            updateConfig = call.arguments[@"updateConfig"];
+        // All non-empty configuration strings must be forwarded to the native
+        // Approov SDK. Empty configuration is service-layer bypass mode, so it is
+        // recorded as initialized but deliberately not forwarded.
+        if (initialConfig.length != 0) {
+            BOOL sdkInitialized = [Approov initialize:initialConfig updateConfig:updateConfig comment:commentString error:&error];
+            if (error != nil) {
+                result([FlutterError errorWithCode:[NSString stringWithFormat:@"%ld", (long)error.code]
+                                        message:error.domain
+                                        details:error.localizedDescription]);
+                return;
+            }
+            if (!sdkInitialized) {
+                // a matching-parameter re-initialization: the SDK reports it was
+                // already initialized (NO return with no error), which is treated
+                // as success (TESTING_REQUIREMENTS.md section 1, "Same Config
+                // Re-initialization"; matches approov-service-okhttp)
+                NSLog(@"ApproovService: Approov SDK already initialized");
+            }
+        }
+        ApproovHttpClientSetInitializedConfig(initialConfig);
+        result(nil);
+    } else if ([@"isInitialized" isEqualToString:call.method]) {
+        result(@((BOOL)(ApproovHttpClientInitializedConfig() != nil)));
+    } else if ([@"isApproovEnabled" isEqualToString:call.method]) {
+        result(@(ApproovHttpClientIsEnabled()));
     } else if ([@"fetchConfig" isEqualToString:call.method]) {
         _configEpoch++;
         result([Approov fetchConfig]);

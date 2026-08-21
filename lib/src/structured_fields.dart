@@ -5,22 +5,18 @@ import 'dart:typed_data';
 /// Exception thrown when Structured Field values fail validation.
 class SfFormatException extends FormatException {
   /// Creates a format exception referencing the offending source.
-  SfFormatException(String message, [dynamic source])
-      : super(message, source);
+  SfFormatException(String message, [dynamic source]) : super(message, source);
 }
 
-enum _CharType { alphaLower, alphaUpper, digit }
-
 /// Returns true when the code unit represents a lowercase ASCII letter.
-bool _isLowerAlpha(int codeUnit) =>
-    codeUnit >= 0x61 && codeUnit <= 0x7a; // a-z
+bool _isLowerAlpha(int codeUnit) => codeUnit >= 0x61 && codeUnit <= 0x7a; // a-z
 
 /// Returns true when the code unit represents an uppercase ASCII letter.
-bool _isUpperAlpha(int codeUnit) =>
-    codeUnit >= 0x41 && codeUnit <= 0x5a; // A-Z
+bool _isUpperAlpha(int codeUnit) => codeUnit >= 0x41 && codeUnit <= 0x5a; // A-Z
 
 /// Returns true when the code unit represents any ASCII letter.
-bool _isAlpha(int codeUnit) => _isLowerAlpha(codeUnit) || _isUpperAlpha(codeUnit);
+bool _isAlpha(int codeUnit) =>
+    _isLowerAlpha(codeUnit) || _isUpperAlpha(codeUnit);
 
 /// Returns true when the code unit is an ASCII digit.
 bool _isDigit(int codeUnit) => codeUnit >= 0x30 && codeUnit <= 0x39;
@@ -51,7 +47,8 @@ bool _isTchar(int codeUnit) {
 /// Validates that a Structured Field key adheres to RFC token rules.
 void _validateKey(String key) {
   if (key.isEmpty) {
-    throw SfFormatException('Structured Field parameter and dictionary keys must not be empty');
+    throw SfFormatException(
+        'Structured Field parameter and dictionary keys must not be empty');
   }
   final codeUnits = key.codeUnits;
   // RFC 9651 restricts the first character and allows a limited token charset for the rest.
@@ -59,9 +56,15 @@ void _validateKey(String key) {
     final unit = codeUnits[index];
     final isValid = index == 0
         ? (unit == 0x2a /* * */ || _isLowerAlpha(unit))
-        : (_isLowerAlpha(unit) || _isDigit(unit) || unit == 0x5f /* _ */ || unit == 0x2d /* - */ || unit == 0x2e /* . */ || unit == 0x2a /* * */);
+        : (_isLowerAlpha(unit) ||
+            _isDigit(unit) ||
+            unit == 0x5f /* _ */ ||
+            unit == 0x2d /* - */ ||
+            unit == 0x2e /* . */ ||
+            unit == 0x2a /* * */);
     if (!isValid) {
-      throw SfFormatException('Invalid character "${String.fromCharCode(unit)}" in key "$key" at position $index');
+      throw SfFormatException(
+          'Invalid character "${String.fromCharCode(unit)}" in key "$key" at position $index');
     }
   }
 }
@@ -103,11 +106,13 @@ void _validateToken(String value) {
 void _validateDisplayString(String value) {
   for (final rune in value.runes) {
     if (rune >= 0xd800 && rune <= 0xdfff) {
-      throw SfFormatException('Display strings must not contain surrogate code points');
+      throw SfFormatException(
+          'Display strings must not contain surrogate code points');
     }
     // Reject values outside the valid Unicode scalar range.
     if (rune < 0x0 || rune > 0x10ffff) {
-      throw SfFormatException('Invalid Unicode scalar value 0x${rune.toRadixString(16)} in display string');
+      throw SfFormatException(
+          'Invalid Unicode scalar value 0x${rune.toRadixString(16)} in display string');
     }
   }
 }
@@ -191,6 +196,7 @@ class SfDecimal {
   double toDouble() => _scaledValue / 1000.0;
 
   @override
+
   /// Serializes the decimal back into its canonical textual representation.
   String toString() {
     final sign = _scaledValue < 0 ? '-' : '';
@@ -221,14 +227,29 @@ class SfDate {
   final int seconds;
 
   /// Converts the stored seconds back into a UTC `DateTime`.
-  DateTime toUtcDateTime() => DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+  ///
+  /// The RFC 9651 date range (±999,999,999,999,999 seconds) is wider than
+  /// Dart's `DateTime` range (±100,000,000 days, ~±8.64e12 seconds), so an
+  /// RFC-valid extreme value may not be representable; that case throws
+  /// [SfFormatException] rather than leaking `DateTime`'s internal error type.
+  /// Parsing and serialization use [seconds] directly and are unaffected.
+  DateTime toUtcDateTime() {
+    try {
+      return DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+    } catch (_) {
+      throw SfFormatException(
+          'Date value $seconds is valid per RFC 9651 but outside the range '
+          'representable by DateTime');
+    }
+  }
 
   /// Validates that the seconds value lies within the allowed range.
   static void _validateRange(int seconds) {
-    const min = -62135596800; // year 0001
-    const max = 253402214400; // year 9999
+    const min = -999999999999999;
+    const max = 999999999999999;
     if (seconds < min || seconds > max) {
-      throw SfFormatException('Date value $seconds is outside the supported range');
+      throw SfFormatException(
+          'Date value $seconds is outside the supported range');
     }
   }
 }
@@ -255,7 +276,8 @@ class SfBareItem {
     const min = -999999999999999;
     const max = 999999999999999;
     if (value < min || value > max) {
-      throw SfFormatException('Integer magnitude exceeds allowed range: $value');
+      throw SfFormatException(
+          'Integer magnitude exceeds allowed range: $value');
     }
     return SfBareItem._(SfBareItemType.integer, value);
   }
@@ -269,7 +291,8 @@ class SfBareItem {
     } else if (value is String) {
       return SfBareItem._(SfBareItemType.decimal, SfDecimal.parse(value));
     }
-    throw SfFormatException('Unsupported value for decimal bare item: ${value.runtimeType}');
+    throw SfFormatException(
+        'Unsupported value for decimal bare item: ${value.runtimeType}');
   }
 
   /// Creates a string bare item, validating the character set.
@@ -299,7 +322,8 @@ class SfBareItem {
     } else if (value is int) {
       return SfBareItem._(SfBareItemType.date, SfDate.fromSeconds(value));
     }
-    throw SfFormatException('Unsupported value for date bare item: ${value.runtimeType}');
+    throw SfFormatException(
+        'Unsupported value for date bare item: ${value.runtimeType}');
   }
 
   /// Creates a display string bare item.
@@ -311,7 +335,9 @@ class SfBareItem {
     if (value is SfBareItem) return value;
     if (value is bool) return SfBareItem.boolean(value);
     if (value is int) return SfBareItem.integer(value);
-    if (value is SfDecimal || value is num || value is String && value.contains('.')) {
+    if (value is SfDecimal ||
+        value is num ||
+        value is String && value.contains('.')) {
       // Interpret numeric-looking inputs as decimals first, falling back to strings when invalid.
       try {
         return SfBareItem.decimal(value);
@@ -325,12 +351,14 @@ class SfBareItem {
     if (value is SfToken) return SfBareItem.token(value);
     if (value is SfDisplayString) return SfBareItem.displayString(value);
     if (value is Uint8List) return SfBareItem.byteSequence(value);
-    if (value is List<int>) return SfBareItem.byteSequence(Uint8List.fromList(value));
+    if (value is List<int>)
+      return SfBareItem.byteSequence(Uint8List.fromList(value));
     if (value is DateTime || value is SfDate) {
       return SfBareItem.date(value);
     }
     if (value is String) return SfBareItem.string(value);
-    throw SfFormatException('Unsupported value for bare item: ${value.runtimeType}');
+    throw SfFormatException(
+        'Unsupported value for bare item: ${value.runtimeType}');
   }
 
   final SfBareItemType type;
@@ -410,7 +438,8 @@ class SfParameters {
   /// Builds an `SfParameters` instance from a map of raw values.
   factory SfParameters([Map<String, dynamic>? entries]) {
     if (entries == null || entries.isEmpty) {
-      return SfParameters._(UnmodifiableMapView<String, SfBareItem>(LinkedHashMap()));
+      return SfParameters._(
+          UnmodifiableMapView<String, SfBareItem>(LinkedHashMap()));
     }
     final map = LinkedHashMap<String, SfBareItem>();
     entries.forEach((key, value) {
@@ -470,7 +499,8 @@ class SfItem {
       SfItem(SfBareItem.decimal(value), parameters);
 
   /// Creates a byte sequence item.
-  factory SfItem.byteSequence(Uint8List value, [Map<String, dynamic>? parameters]) =>
+  factory SfItem.byteSequence(Uint8List value,
+          [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.byteSequence(value), parameters);
 
   /// Creates a date item.
@@ -478,7 +508,8 @@ class SfItem {
       SfItem(SfBareItem.date(value), parameters);
 
   /// Creates a display string item.
-  factory SfItem.displayString(String value, [Map<String, dynamic>? parameters]) =>
+  factory SfItem.displayString(String value,
+          [Map<String, dynamic>? parameters]) =>
       SfItem(SfBareItem.displayString(SfDisplayString(value)), parameters);
 
   final SfBareItem bareItem;

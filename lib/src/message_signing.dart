@@ -22,6 +22,25 @@ String _componentIdentifierValue(SfItem item) {
 }
 
 /// Holds configuration for message signature parameters, mirroring the Swift implementation.
+/// Thrown when a body digest configured as required cannot be generated. One of
+/// only two deliberate fail-closed message signing conditions (mirroring
+/// approov-service-okhttp's RequiredBodyDigestException): the request must be
+/// aborted rather than sent without its required digest. Every other signing
+/// failure is fail-open - the request proceeds unsigned and the backend remains
+/// the enforcement point.
+class RequiredBodyDigestException extends StateError {
+  RequiredBodyDigestException(String message) : super(message);
+}
+
+/// Thrown when the configured signing algorithm is unsupported or missing. The
+/// second deliberate fail-closed message signing condition (mirroring
+/// approov-service-okhttp, which fails closed via its unsupported-algorithm
+/// switch default): a misconfigured algorithm must abort the request rather
+/// than silently disable signing.
+class UnsupportedSignatureAlgorithmException extends StateError {
+  UnsupportedSignatureAlgorithmException(String message) : super(message);
+}
+
 class SignatureParameters {
   /// Creates an empty set of signature parameters.
   SignatureParameters()
@@ -416,7 +435,8 @@ class ApproovSigningContext {
       {required bool required}) {
     if (bodyBytes == null) {
       if (required) {
-        throw StateError('Body digest required but body is not available');
+        throw RequiredBodyDigestException(
+            'Body digest required but body is not available');
       }
       return null;
     }

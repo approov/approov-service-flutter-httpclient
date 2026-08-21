@@ -223,16 +223,36 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
   private Context appContext;
 
   // Provides any prior initial configuration supplied, to allow a reinitialization caused by
-  // a hot restart if the configuration is the same, or null if not initialized
-  private String initializedConfig = null;
-
-  // Provides any prior initial comment supplied, or empty string if none was provided
-  private String initializedComment;
+  // a hot restart if the configuration is the same, or null if not initialized.
+  //
+  // Static because the Approov SDK it mirrors is a process-wide singleton, while a plugin
+  // instance is created per FlutterEngine. An app with a second engine (workmanager,
+  // android_alarm_manager_plus, background geolocation) would otherwise get a fresh instance
+  // reporting "not initialized" while the SDK is initialized and protecting traffic: the Dart
+  // layer reads that as "native not protected" and commits real bypass mode, so every request
+  // from that engine would silently lose token injection and pinning. Matches
+  // approov-service-okhttp, which holds its configString in a static.
+  //
+  // Marked volatile because it is written from the "initialize" call arriving on the background
+  // method channel thread and read from the "isInitialized"/"isApproovEnabled" calls arriving on
+  // the foreground method channel thread - volatile provides the happens-before guarantee needed
+  // for the reading thread to observe the writing thread's update.
+  private static volatile String initializedConfig = null;
 
   // Counter for the configuration epoch that is incremented whenever the configuration is fetched. This keeps
   // track of dynamic configuration changes and the state is held in the platform layer as we want this to work
   // across multiple different isolates which have independent Dart level state.
   private int configEpoch = 0;
+
+  /**
+   * Returns true when the service layer is initialized and Approov-backed
+   * request protection is active (i.e. initialized with a non-empty config).
+   */
+  private static boolean isApproovEnabled() {
+    // read the volatile once so the null check and the emptiness check cannot disagree
+    String config = initializedConfig;
+    return (config != null) && !config.isEmpty();
+  }
 
   // Handler for the main thread to allow call backs since they must be in the context of that thread
   private Handler handler;
@@ -272,34 +292,39 @@ public class ApproovHttpClientPlugin implements FlutterPlugin, MethodCallHandler
       // get the initialization arguments
       String initialConfig = call.argument("initialConfig");
       String commentString = call.argument("comment");
-      if (commentString == null) {
-        commentString = "";
+
+      // An empty config after a valid config is already active must be ignored -
+      // it must never silently drop back into bypass mode.
+      if (isApproovEnabled() && ((initialConfig == null) || initialConfig.isEmpty())) {
+        Log.i("ApproovService", "already initialized with a valid config; ignoring empty configuration");
+        result.success(null);
+        return;
       }
 
-      // determine if the initialization is needed (indicated by a change in either the initial config string or the comment) -
-      // this is necessary because hot restarts or the creation of new isolates means that the Dart level may not have determined
-      // that the SDK is already initialized whereas this native layer holds its state
-      if ((initializedConfig == null) || !initializedConfig.equals(initialConfig) || !initializedComment.equals(commentString)) {
-        // this is a new config or a reinitialization
-        try {
-          Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
-        } catch (IllegalStateException e) {
-          // log and ignore the error if the SDK is already initialized - this can happen if an app is using multiple
-          // different isolates and the initialization was made by a different quickstart (note we don't currently check
-          // for the compatibility of the SDK parameters but a future version of the SDK will do this to avoid needing to
-          // catch this at all)
-          Log.w("ApproovService", "Ignoring initialization error in Approov SDK: " + e.getLocalizedMessage());
-        } catch(Exception e) {
-            result.error("Approov.initialize", e.getLocalizedMessage(), null);
-            return;
+      // All non-empty configuration strings must be forwarded to the native
+      // Approov SDK. Empty configuration is service-layer bypass mode, so it is
+      // recorded as initialized but deliberately not forwarded.
+      try {
+        if ((initialConfig != null) && !initialConfig.isEmpty()) {
+          boolean sdkInitialized = Approov.initialize(appContext, initialConfig, call.argument("updateConfig"), commentString);
+          if (!sdkInitialized) {
+            // a matching-parameter re-initialization: the SDK reports it was
+            // already initialized, which is treated as success
+            // (TESTING_REQUIREMENTS.md section 1, "Same Config
+            // Re-initialization"; matches approov-service-okhttp)
+            Log.d("ApproovService", "Approov SDK already initialized");
+          }
         }
-        initializedConfig = initialConfig;
-        initializedComment = commentString;
-        result.success(null);
-      } else {
-        // the previous initialization is compatible
-        result.success(null);
+      } catch(Exception e) {
+        result.error("Approov.initialize", e.getLocalizedMessage(), null);
+        return;
       }
+      initializedConfig = initialConfig;
+      result.success(null);
+    } else if (call.method.equals("isInitialized")) {
+      result.success(initializedConfig != null);
+    } else if (call.method.equals("isApproovEnabled")) {
+      result.success(isApproovEnabled());
     } else if (call.method.equals("fetchConfig")) {
       try {
         configEpoch++;

@@ -60,7 +60,9 @@ void main() {
       mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.UNPROTECTED_URL),
           'https://api.example.com'),
-      isTrue,
+      isFalse,
+      reason: 'a URL the SDK does not protect must not be mutated at all - no '
+          'token, and no secure-string substitution (TESTING_REQUIREMENTS §2)',
     );
     expect(
       () => mutator.handleInterceptorFetchTokenResult(
@@ -69,39 +71,72 @@ void main() {
       throwsA(isA<ApproovNetworkException>()),
     );
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      // proceedOnNetworkFail is an obsolete no-op: it no longer opens this path,
+      // so a network failure still fails closed regardless of the flag. A custom
+      // mutator overriding this handler is the supported way to proceed.
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.NO_NETWORK,
+              // ignore: deprecated_member_use_from_same_package
               proceedOnNetworkFail: true),
           'https://api.example.com'),
-      isFalse,
+      throwsA(isA<ApproovNetworkException>()),
     );
+    // setUseApproovStatusIfNoToken(true) is a backend-visibility feature and must
+    // never decide whether a request is allowed to continue. The default mutator
+    // is fail-closed for every status except SUCCESS and NO_APPROOV_SERVICE
+    // (TESTING_REQUIREMENTS §3 "Default Mutator Behavior"). This deliberately
+    // diverges from approov-service-okhttp, which still has the escape hatch.
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.NO_NETWORK,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isTrue,
+      throwsA(isA<ApproovNetworkException>()),
     );
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.POOR_NETWORK,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isTrue,
+      throwsA(isA<ApproovNetworkException>()),
     );
     expect(
-      mutator.handleInterceptorFetchTokenResult(
+      () => mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.MITM_DETECTED,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isTrue,
+      throwsA(isA<ApproovNetworkException>()),
+      reason: 'enabling the status fallback must never let a request continue '
+          'after the SDK reported MITM_DETECTED',
     );
     expect(
+      () => mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.MITM_DETECTED),
+          'https://api.example.com'),
+      throwsA(isA<ApproovNetworkException>()),
+    );
+    expect(
+      () => mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.POOR_NETWORK),
+          'https://api.example.com'),
+      throwsA(isA<ApproovNetworkException>()),
+    );
+    expect(
+      // NO_APPROOV_SERVICE proceeds, matching approov-service-okhttp: the request
+      // goes out unmodified rather than failing during an Approov outage
+      // (TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback").
       mutator.handleInterceptorFetchTokenResult(
           _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
               useApproovStatusIfNoToken: true),
           'https://api.example.com'),
-      isFalse,
+      isTrue,
+    );
+    expect(
+      mutator.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE),
+          'https://api.example.com'),
+      isTrue,
+      reason: 'the status alone decides this, not the fallback flag',
     );
   });
 
@@ -121,6 +156,33 @@ void main() {
       mutator.handleInterceptorQueryParamSubstitutionResult(
           _result(ApproovTokenFetchStatus.UNKNOWN_KEY), 'api_key'),
       isFalse,
+    );
+    // NO_APPROOV_SERVICE fails closed on both substitution paths. The §3
+    // carve-out that lets this status proceed covers the TOKEN fetch, where "no
+    // token, backend decides" is a coherent degraded state; there is no
+    // equivalent for a secret, because the only alternative to failing is
+    // sending the placeholder as the credential - a wrong secret rather than an
+    // absent one, with nothing for the app to retry on. Matches
+    // approov-service-okhttp, approov-service-urlsession and
+    // approov-service-nsurlsession.
+    expect(
+      () => mutator.handleInterceptorHeaderSubstitutionResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE), 'Authorization'),
+      throwsA(isA<ApproovException>()),
+    );
+    expect(
+      () => mutator.handleInterceptorQueryParamSubstitutionResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE), 'api_key'),
+      throwsA(isA<ApproovException>()),
+    );
+    // the fallback flag does not turn substitution back into a proceed either:
+    // it is a token-header visibility control, never a substitution decision
+    expect(
+      () => mutator.handleInterceptorHeaderSubstitutionResult(
+          _result(ApproovTokenFetchStatus.NO_APPROOV_SERVICE,
+              useApproovStatusIfNoToken: true),
+          'Authorization'),
+      throwsA(isA<ApproovException>()),
     );
   });
 
@@ -148,6 +210,29 @@ void main() {
     expect(ApproovService.getUseApproovStatusIfNoToken(), isTrue);
     ApproovService.setUseApproovStatusIfNoToken(false);
     expect(ApproovService.getUseApproovStatusIfNoToken(), isFalse);
+  });
+  test('setProceedOnNetworkFail is an obsolete no-op', () {
+    // The setter must not change any behaviour. Calling it with true and then
+    // exercising the default mutator on a network failure must still fail closed.
+    // ignore: deprecated_member_use_from_same_package
+    ApproovService.setProceedOnNetworkFail(true);
+    expect(
+      () => ApproovServiceMutator.DEFAULT.handleInterceptorFetchTokenResult(
+          _result(ApproovTokenFetchStatus.NO_NETWORK),
+          'https://api.example.com'),
+      throwsA(isA<ApproovNetworkException>()),
+    );
+    expect(
+      () => ApproovServiceMutator.DEFAULT
+          .handleInterceptorHeaderSubstitutionResult(
+              _result(ApproovTokenFetchStatus.NO_NETWORK), 'X-Api-Key'),
+      throwsA(isA<ApproovNetworkException>()),
+    );
+    expect(
+      ApproovService.runtimeStateForTesting()['proceedOnNetworkFail'],
+      isFalse,
+      reason: 'the setter must not record the value either',
+    );
   });
 }
 
@@ -182,4 +267,5 @@ ApproovTokenFetchResult _result(
     proceedOnNetworkFail: proceedOnNetworkFail,
     useApproovStatusIfNoToken: useApproovStatusIfNoToken,
   );
+
 }

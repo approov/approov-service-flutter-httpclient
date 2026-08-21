@@ -2,6 +2,31 @@
 
 This document describes how to use the Approov Flutter HttpClient wrapper and how to customize request behavior with `ApproovServiceMutator`.
 
+## Handling an initialization failure
+
+`await ApproovService.initialize(config)` completes only after the native initialization attempt
+finishes, and throws `ApproovException` if the SDK rejects the configuration. What to do next is a
+policy decision rather than a technical one, so the package does not choose for you.
+
+The strictest option is to let the exception propagate: the app does not start, and the failure is
+impossible to miss. The permissive option is to fall back to bypass mode, where the layer is
+initialized but applies no Approov token injection, no dynamic pinning and no secret substitution:
+
+```dart
+try {
+  await ApproovService.initialize('<enter-your-config-string-here>');
+} catch (e) {
+  // Continues UNPROTECTED. Ordinary TLS certificate validation still applies, but no Approov
+  // protection is active, so the backend is the only enforcement point for these requests.
+  await ApproovService.initialize('');
+}
+```
+
+Use `isApproovEnabled()` afterwards to report which state the app ended up in, and prefer your own
+logger over `print` so the outcome reaches whatever telemetry you already collect. Note that this
+pattern trades protection for availability on every launch that fails to initialize; if that is not
+the trade you want, do not catch.
+
 ## Approov Service Mutator
 
 `ApproovServiceMutator` lets you customize behavior at key points in the request lifecycle without forking this package.
@@ -21,11 +46,11 @@ By default, `ApproovServiceMutator.DEFAULT` preserves existing Flutter service b
 | Approov Fetch Status | Default Action |
 | --- | --- |
 | `SUCCESS` | Continue |
-| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | If `setUseApproovStatusIfNoToken(true)` is active, interceptor flow continues and status fallback can be injected in the token header. Otherwise throw `ApproovNetworkException` (unless `setProceedOnNetworkFail(true)` is active in interceptor flows). |
+| `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED` | Throw `ApproovNetworkException` on the token fetch and on both substitution paths. Fail-closed unconditionally: `setUseApproovStatusIfNoToken(true)` is a backend-visibility feature and never lets a request continue, and `setProceedOnNetworkFail` is an obsolete no-op. Install a custom mutator to proceed instead — the status fallback is still injected into the token header when such a mutator returns `true` and the flag is on. |
 | `REJECTED` | Throw `ApproovRejectionException` |
-| `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: continue without token. |
+| `NO_APPROOV_SERVICE` | `fetchToken`: return token as before (possibly empty). Interceptor flow: **continue**, forwarding the request unmodified so an Approov outage does not take the app offline. No token is available, so the token header is **omitted** unless `setUseApproovStatusIfNoToken(true)` is active, in which case it carries `NO_APPROOV_SERVICE`. An empty-valued or prefix-only header is never sent. Secure-string substitution **fails closed** (`ApproovException`): with no secret resolved, the only alternative is sending the placeholder as the credential. |
 | `UNKNOWN_URL` | Interceptor flow continues without token |
-| `UNPROTECTED_URL` | Interceptor flow continues (token omitted, substitutions can still run) |
+| `UNPROTECTED_URL` | Interceptor flow skips all mutation: no token, no trace header, no message signing, and **no secure-string substitution**. Automatic query substitution is suppressed too, by classifying the URL before the request is opened — that classification runs ahead of the mutator, so overriding `handleInterceptorFetchTokenResult` re-enables header substitution but not query substitution. Call `substituteQueryParam()` directly if you need one regardless |
 
 ## Install a custom mutator
 
@@ -82,7 +107,10 @@ ApproovService.setUseApproovStatusIfNoToken(true);
 Defaults:
 
 - `useApproovStatusIfNoToken = false`
-- fallback allowlist: `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`
+- fallback allowlist: `NO_APPROOV_SERVICE`, `NO_NETWORK`, `POOR_NETWORK`, `MITM_DETECTED`
+
+Of these, only `NO_APPROOV_SERVICE` is reached with the default mutator — the three network statuses
+fail closed unless a custom mutator deliberately allows them to continue.
 
 Behavior in interceptor request flow:
 
@@ -95,8 +123,8 @@ Behavior in interceptor request flow:
 
 Notes:
 
-- Header name and prefix come from `setApproovHeader(header, prefix)`.
-- Fallback is not injected by default for `NO_APPROOV_SERVICE`, `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses.
+- Header name and prefix come from `setApproovHeader(header, prefix)`; pass `null` for no prefix.
+- Fallback is not injected for `UNKNOWN_URL`, `UNPROTECTED_URL`, `REJECTED`, or internal/unknown statuses. `NO_APPROOV_SERVICE` is on the allowlist, so the token header carries `NO_APPROOV_SERVICE` when the fallback is enabled — but with the fallback disabled the header is **omitted entirely** for it, exactly as for every other artifact-less outcome. An empty-valued or prefix-only token header is never sent.
 - Trace ID behavior is unchanged (only standard token success path controls trace ID injection).
 
 ## Message signing with a mutator
@@ -114,6 +142,8 @@ The mutator callback order is:
 3. header/query substitutions callbacks
 4. message signing (if enabled and token fetch succeeded)
 5. `handleInterceptorProcessedRequest`
+
+**Signing failures are fail-open** (matching `approov-service-okhttp`): a request whose signature cannot be produced goes out **unsigned** with the reason logged at error level, and the backend decides whether to accept it. The only two conditions that abort the request instead are a body digest configured as required that cannot be generated (`RequiredBodyDigestException`) and an unsupported or missing signing algorithm (`UnsupportedSignatureAlgorithmException`). If your backend strictly enforces signatures, monitor error logs for `skipping message signing` lines.
 
 ## Secure string substitutions
 

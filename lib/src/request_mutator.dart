@@ -133,6 +133,11 @@ class ApproovTokenFetchResult {
   final String? requestURL;
 
   /// Snapshot of `setProceedOnNetworkFail` at the callback point.
+  /// **Obsolete.** Always false: `ApproovService.setProceedOnNetworkFail` is a
+  /// no-op. Retained so custom mutators keep compiling; no default handler reads
+  /// it.
+  @Deprecated('Obsolete: always false. Express network-failure policy by '
+      'overriding the mutator handlers instead.')
   final bool proceedOnNetworkFail;
 
   /// Snapshot of whether the status should be used as token value when empty.
@@ -447,14 +452,20 @@ class ApproovServiceMutator {
   /// Handles token fetch result during interceptor request processing.
   ///
   /// Default behavior:
-  /// - continues for `SUCCESS` and `UNPROTECTED_URL`
-  /// - skips token/header mutation for `NO_APPROOV_SERVICE` and `UNKNOWN_URL`
-  /// - on `NO_NETWORK` / `POOR_NETWORK` / `MITM_DETECTED`, continues when
-  ///   `approovResults.useApproovStatusIfNoToken` is enabled so service-layer
-  ///   token-header fallback can inject the status enum
-  /// - otherwise for network failures, either throws or skips based on
-  ///   `approovResults.proceedOnNetworkFail`
+  /// - continues for `SUCCESS` and `NO_APPROOV_SERVICE`
+  /// - skips all mutation for `UNKNOWN_URL` and `UNPROTECTED_URL`
+  /// - throws [ApproovNetworkException] for `NO_NETWORK` / `POOR_NETWORK` /
+  ///   `MITM_DETECTED`, unconditionally - `setUseApproovStatusIfNoToken(true)`
+  ///   does not open this path
   /// - throws [ApproovException] for all other statuses
+  ///
+  /// The default mutator is fail-closed for every status except `SUCCESS` and
+  /// `NO_APPROOV_SERVICE` (TESTING_REQUIREMENTS §3 "Default Mutator
+  /// Behavior"). A custom mutator overriding this method may return true for a
+  /// network-failure status; the service layer then still injects the fetch
+  /// status into the token header when `setUseApproovStatusIfNoToken(true)` is
+  /// active, so backend visibility remains available to callers that
+  /// deliberately opt in to proceeding.
   ///
   /// @param approovResults is the interceptor token fetch result
   /// @param url is the request URL being processed
@@ -469,19 +480,43 @@ class ApproovServiceMutator {
       case ApproovTokenFetchStatus.NO_NETWORK:
       case ApproovTokenFetchStatus.POOR_NETWORK:
       case ApproovTokenFetchStatus.MITM_DETECTED:
-        if (approovResults.useApproovStatusIfNoToken) {
-          return true;
-        }
-        if (!approovResults.proceedOnNetworkFail) {
-          throw ApproovNetworkException(
-              "Approov token fetch for $url: ${status.name}");
-        }
-        return false;
+        // Fail closed, unconditionally. Neither `proceedOnNetworkFail` (now an
+        // obsolete no-op) nor `setUseApproovStatusIfNoToken(true)` opens this
+        // path. The status fallback is a backend-visibility feature and must
+        // never decide whether a request is allowed to continue - enabling it
+        // must not let a request proceed after the SDK reported
+        // MITM_DETECTED. TESTING_REQUIREMENTS §3 requires the default mutator
+        // to be fail-closed for every status except SUCCESS and
+        // NO_APPROOV_SERVICE. Override this method in a custom mutator to
+        // express a per-status policy; the fallback injection still applies
+        // when such a mutator returns true.
+        //
+        // NOTE: approov-service-okhttp still has the useApproovStatusIfNoToken
+        // escape here, so this layer deliberately diverges from it until that
+        // layer receives the matching fix.
+        throw ApproovNetworkException(
+            "Approov token fetch for $url: ${status.name}");
       case ApproovTokenFetchStatus.NO_APPROOV_SERVICE:
-      case ApproovTokenFetchStatus.UNKNOWN_URL:
-        return false;
-      case ApproovTokenFetchStatus.UNPROTECTED_URL:
+        // The Approov service is unavailable, but the request proceeds
+        // unmodified so an outage does not take the app offline
+        // (TESTING_REQUIREMENTS §2 "Missing Artifacts Fallback"). No token is
+        // available, so no token header is emitted unless
+        // setUseApproovStatusIfNoToken(true) is active, in which case the
+        // status name is injected as backend evidence. This mirrors
+        // approov-service-okhttp's default mutator, which returns true for this
+        // status alone among the non-SUCCESS outcomes.
         return true;
+      case ApproovTokenFetchStatus.UNKNOWN_URL:
+      case ApproovTokenFetchStatus.UNPROTECTED_URL:
+        // Skip all mutation for a URL the SDK does not protect. Beyond omitting
+        // the token, this is what keeps secure-string substitution off
+        // unprotected domains: returning true here would let a header or query
+        // placeholder be resolved and sent to a host Approov neither tokenizes
+        // nor pins, which is exactly the MitM exposure TESTING_REQUIREMENTS §2
+        // ("Unprotected Request Processing") forbids. Matches
+        // approov-service-okhttp, whose default mutator returns false for both
+        // of these for the same stated reason.
+        return false;
       default:
         throw ApproovException("Approov token fetch for $url: ${status.name}");
     }
@@ -492,8 +527,7 @@ class ApproovServiceMutator {
   /// Default behavior:
   /// - returns true only for `SUCCESS`
   /// - returns false for `UNKNOWN_KEY`
-  /// - on network failures, either throws or returns false based on
-  ///   `approovResults.proceedOnNetworkFail`
+  /// - throws [ApproovNetworkException] on network failures
   /// - throws [ApproovRejectionException] for `REJECTED`
   /// - throws [ApproovException] for all other statuses
   ///
@@ -515,13 +549,25 @@ class ApproovServiceMutator {
       case ApproovTokenFetchStatus.NO_NETWORK:
       case ApproovTokenFetchStatus.POOR_NETWORK:
       case ApproovTokenFetchStatus.MITM_DETECTED:
-        if (!approovResults.proceedOnNetworkFail) {
-          throw ApproovNetworkException(
-              "Header substitution for $header: ${status.name}");
-        }
-        return false;
+        // Fail closed, matching approov-service-okhttp: sending the placeholder
+        // where a secret belongs is a silent downgrade. `proceedOnNetworkFail` is
+        // now an obsolete no-op; a custom mutator overriding this method is the
+        // supported way to proceed instead.
+        throw ApproovNetworkException(
+            "Header substitution for $header: ${status.name}");
       case ApproovTokenFetchStatus.UNKNOWN_KEY:
         return false;
+      case ApproovTokenFetchStatus.NO_APPROOV_SERVICE:
+        // Fail closed. The §3 carve-out that lets this status proceed applies to
+        // the Approov TOKEN fetch, where "no token, backend decides" is a
+        // coherent degraded state. There is no equivalent for a secret: with no
+        // secure string resolved, the only alternative to failing is
+        // transmitting the placeholder as the credential, which is a *wrong*
+        // secret rather than an absent one, and it travels with nothing for the
+        // app to retry on. Matches approov-service-okhttp,
+        // approov-service-urlsession and approov-service-nsurlsession.
+        throw ApproovException(
+            "Header substitution for $header: ${status.name}");
       default:
         throw ApproovException(
             "Header substitution for $header: ${status.name}");
@@ -533,8 +579,7 @@ class ApproovServiceMutator {
   /// Default behavior:
   /// - returns true only for `SUCCESS`
   /// - returns false for `UNKNOWN_KEY`
-  /// - on network failures, either throws or returns false based on
-  ///   `approovResults.proceedOnNetworkFail`
+  /// - throws [ApproovNetworkException] on network failures
   /// - throws [ApproovRejectionException] for `REJECTED`
   /// - throws [ApproovException] for all other statuses
   ///
@@ -556,13 +601,17 @@ class ApproovServiceMutator {
       case ApproovTokenFetchStatus.NO_NETWORK:
       case ApproovTokenFetchStatus.POOR_NETWORK:
       case ApproovTokenFetchStatus.MITM_DETECTED:
-        if (!approovResults.proceedOnNetworkFail) {
-          throw ApproovNetworkException(
-              "Query parameter substitution for $queryKey: ${status.name}");
-        }
-        return false;
+        // Fail closed, matching approov-service-okhttp - see the header
+        // substitution handler above.
+        throw ApproovNetworkException(
+            "Query parameter substitution for $queryKey: ${status.name}");
       case ApproovTokenFetchStatus.UNKNOWN_KEY:
         return false;
+      case ApproovTokenFetchStatus.NO_APPROOV_SERVICE:
+        // Fail closed, for the reason given in the header substitution handler
+        // above: the placeholder would travel as the credential.
+        throw ApproovException(
+            "Query parameter substitution for $queryKey: ${status.name}");
       default:
         throw ApproovException(
             "Query parameter substitution for $queryKey: ${status.name}");
