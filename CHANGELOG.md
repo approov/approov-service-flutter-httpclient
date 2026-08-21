@@ -1,4 +1,4 @@
-## [3.5.8] - (19-August-2026)
+## [3.5.8] - (21-August-2026)
 
 > **Upgrade notes:**
 > - `await ApproovService.initialize(config)` now completes only after the native initialization attempt finishes, and **throws `ApproovException` on failure** — previously it returned immediately and swallowed native failures. Wrap it in try/catch if you want to fall back to bypass mode (see README).
